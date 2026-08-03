@@ -20,8 +20,15 @@ private:
     esp_codec_dev_handle_t input_dev_ = nullptr;
     gpio_num_t pa_pin_ = GPIO_NUM_NC;
     std::mutex data_if_mutex_;
+    bool input_dev_open_ = false;
+    bool output_dev_open_ = false;
+    uint32_t input_dead_silence_count_ = 0;
 
     void CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din);
+    void OpenInputDevice();
+    void CloseInputDevice();
+    void OpenOutputDevice();
+    void CloseOutputDevice();
 
     virtual int Read(int16_t* dest, int samples) override;
     virtual int Write(const int16_t* data, int samples) override;

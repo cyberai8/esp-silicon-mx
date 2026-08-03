@@ -27,6 +27,7 @@
 
 // 本板使用片上蓝牙，无外置 AT 模块
 #define BOARD_HAS_EXTERNAL_BT 0
+#define BOARD_HAS_NATIVE_BT 1
 #define BT_AUDIO_TX_PIN GPIO_NUM_NC
 #define BT_AUDIO_RX_PIN GPIO_NUM_NC
 

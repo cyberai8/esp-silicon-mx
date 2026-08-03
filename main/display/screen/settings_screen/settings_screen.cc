@@ -13,6 +13,7 @@
 #include "cx25601n.h"
 #include "home_screen/home_screen.h"
 #include "i18n.h"
+#include "native_bluetooth_audio.h"
 #include "screen_util.h"
 #include "settings.h"
 
@@ -530,11 +531,57 @@ void BuildBluetoothTab(lv_obj_t* tab) {
 #if BOARD_HAS_EXTERNAL_BT
     BluetoothScreen::BuildInto(tab);
 #else
-    lv_obj_t* tip = lv_label_create(tab);
-    lv_label_set_text(tip, "本板使用片上蓝牙\n(非外置 AT 模块)");
-    lv_obj_set_style_text_color(tip, lv_color_hex(0x9AA3B2), LV_PART_MAIN);
-    lv_obj_set_style_text_font(tip, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_center(tip);
+    lv_obj_set_style_pad_all(tab, 16, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(tab, 12, LV_PART_MAIN);
+    lv_obj_set_flex_flow(tab, LV_FLEX_FLOW_COLUMN);
+
+    lv_obj_t* title = lv_label_create(tab);
+    lv_label_set_text(title, "片上蓝牙");
+    lv_obj_set_style_text_color(title, lv_color_hex(kColorText), LV_PART_MAIN);
+    lv_obj_set_style_text_font(title, &font_puhui_20_4, LV_PART_MAIN);
+
+    lv_obj_t* desc = lv_label_create(tab);
+    lv_label_set_text(desc, "ESP32-S31 内置 Classic BT/A2DP，音乐 App 默认使用音响模式");
+    lv_obj_set_width(desc, LV_PCT(100));
+    lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(desc, lv_color_hex(kColorSubtle), LV_PART_MAIN);
+    lv_obj_set_style_text_font(desc, &font_puhui_20_4, LV_PART_MAIN);
+
+    auto make_native_btn = [](lv_obj_t* parent, const char* text, NativeBluetoothAudio::Mode mode) {
+        lv_obj_t* btn = lv_button_create(parent);
+        lv_obj_set_width(btn, LV_PCT(100));
+        lv_obj_set_height(btn, 56);
+        lv_obj_set_style_radius(btn, 12, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(kColorCard), LV_PART_MAIN);
+        lv_obj_add_event_cb(
+            btn,
+            [](lv_event_t* e) {
+                auto mode = static_cast<NativeBluetoothAudio::Mode>(
+                    reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
+                NativeBluetoothAudio::GetInstance().SetMode(mode);
+            },
+            LV_EVENT_CLICKED,
+            reinterpret_cast<void*>(static_cast<intptr_t>(static_cast<uint8_t>(mode))));
+        screen_swipe_back_ignore(btn, true);
+
+        lv_obj_t* lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, text);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(kColorText), LV_PART_MAIN);
+        lv_obj_set_style_text_font(lbl, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_center(lbl);
+    };
+
+    make_native_btn(tab, "音响模式：手机连接本机播放音乐",
+                    NativeBluetoothAudio::Mode::kSpeakerSink);
+    make_native_btn(tab, "音源模式：待接入本机播放链路",
+                    NativeBluetoothAudio::Mode::kAudioSource);
+
+    lv_obj_t* note = lv_label_create(tab);
+    lv_label_set_text(note, "当前固件已接通音响模式；音源模式还需要本机播放器/扫描连接链路");
+    lv_obj_set_width(note, LV_PCT(100));
+    lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(note, lv_color_hex(kColorSubtle), LV_PART_MAIN);
+    lv_obj_set_style_text_font(note, &font_puhui_20_4, LV_PART_MAIN);
 #endif
 }
 

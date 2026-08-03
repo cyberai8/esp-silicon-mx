@@ -8,6 +8,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <mutex>
 
 #include "board.h"
 
@@ -42,6 +43,8 @@ public:
 protected:
     i2s_chan_handle_t tx_handle_ = nullptr;
     i2s_chan_handle_t rx_handle_ = nullptr;
+    std::mutex output_mutex_;
+    std::mutex input_mutex_;
 
     bool duplex_ = false;
     bool input_reference_ = false;

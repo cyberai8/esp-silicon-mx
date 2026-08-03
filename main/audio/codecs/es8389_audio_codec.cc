@@ -1,8 +1,10 @@
 #include "es8389_audio_codec.h"
 
 #include <esp_log.h>
+#include <cstring>
 
 static const char TAG[] = "Es8389AudioCodec";
+static constexpr uint32_t kInputDeadSilenceWarnFrames = 100;
 
 Es8389AudioCodec::Es8389AudioCodec(void* i2c_master_handle, i2c_port_t i2c_port, int input_sample_rate, int output_sample_rate,
     gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din,
@@ -70,9 +72,13 @@ Es8389AudioCodec::Es8389AudioCodec(void* i2c_master_handle, i2c_port_t i2c_port,
 }
 
 Es8389AudioCodec::~Es8389AudioCodec() {
-    ESP_ERROR_CHECK(esp_codec_dev_close(output_dev_));
+    if (output_dev_open_) {
+        ESP_ERROR_CHECK(esp_codec_dev_close(output_dev_));
+    }
     esp_codec_dev_delete(output_dev_);
-    ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
+    if (input_dev_open_) {
+        ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
+    }
     esp_codec_dev_delete(input_dev_);
 
     audio_codec_delete_codec_if(codec_if_);
@@ -140,23 +146,64 @@ void Es8389AudioCodec::SetOutputVolume(int volume) {
     AudioCodec::SetOutputVolume(volume);
 }
 
+void Es8389AudioCodec::OpenInputDevice() {
+    if (input_dev_open_) {
+        return;
+    }
+    esp_codec_dev_sample_info_t fs = {
+        .bits_per_sample = 16,
+        .channel = 1,
+        .channel_mask = 0,
+        .sample_rate = (uint32_t)input_sample_rate_,
+        .mclk_multiple = 0,
+    };
+    ESP_ERROR_CHECK(esp_codec_dev_open(input_dev_, &fs));
+    ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(input_dev_, input_gain_));
+    input_dev_open_ = true;
+    input_dead_silence_count_ = 0;
+}
+
+void Es8389AudioCodec::CloseInputDevice() {
+    if (!input_dev_open_) {
+        return;
+    }
+    ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
+    input_dev_open_ = false;
+    input_dead_silence_count_ = 0;
+}
+
+void Es8389AudioCodec::OpenOutputDevice() {
+    if (!output_dev_open_) {
+        esp_codec_dev_sample_info_t fs = {
+            .bits_per_sample = 16,
+            .channel = 1,
+            .channel_mask = 0,
+            .sample_rate = (uint32_t)output_sample_rate_,
+            .mclk_multiple = 0,
+        };
+        ESP_ERROR_CHECK(esp_codec_dev_open(output_dev_, &fs));
+        output_dev_open_ = true;
+    }
+    ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, output_volume_));
+}
+
+void Es8389AudioCodec::CloseOutputDevice() {
+    if (!output_dev_open_) {
+        return;
+    }
+    ESP_ERROR_CHECK(esp_codec_dev_close(output_dev_));
+    output_dev_open_ = false;
+}
+
 void Es8389AudioCodec::EnableInput(bool enable) {
     std::lock_guard<std::mutex> lock(data_if_mutex_);
     if (enable == input_enabled_) {
         return;
     }
     if (enable) {
-        esp_codec_dev_sample_info_t fs = {
-            .bits_per_sample = 16,
-            .channel = 1,
-            .channel_mask = 0,
-            .sample_rate = (uint32_t)input_sample_rate_,
-            .mclk_multiple = 0,
-        };
-        ESP_ERROR_CHECK(esp_codec_dev_open(input_dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(input_dev_, input_gain_));
+        OpenInputDevice();
     } else {
-        ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
+        ESP_LOGI(TAG, "Keep ES8389 input device open for stable duplex capture");
     }
     AudioCodec::EnableInput(enable);
 }
@@ -167,24 +214,15 @@ void Es8389AudioCodec::EnableOutput(bool enable) {
         return;
     }
     if (enable) {
-        // Play 16bit 1 channel
-        esp_codec_dev_sample_info_t fs = {
-            .bits_per_sample = 16,
-            .channel = 1,
-            .channel_mask = 0,
-            .sample_rate = (uint32_t)output_sample_rate_,
-            .mclk_multiple = 0,
-        };
-        ESP_ERROR_CHECK(esp_codec_dev_open(output_dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, output_volume_));
+        OpenOutputDevice();
         if (pa_pin_ != GPIO_NUM_NC) {
             gpio_set_level(pa_pin_, 1);
         }
     } else {
-        ESP_ERROR_CHECK(esp_codec_dev_close(output_dev_));
         if (pa_pin_ != GPIO_NUM_NC) {
             gpio_set_level(pa_pin_, 0);
         }
+        ESP_LOGI(TAG, "Keep ES8389 output device open for stable duplex capture");
     }
     AudioCodec::EnableOutput(enable);
 }
@@ -192,6 +230,26 @@ void Es8389AudioCodec::EnableOutput(bool enable) {
 int Es8389AudioCodec::Read(int16_t* dest, int samples) {
     if (input_enabled_) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_read(input_dev_, (void*)dest, samples * sizeof(int16_t)));
+        int peak = 0;
+        for (int i = 0; i < samples; ++i) {
+            int value = dest[i];
+            if (value < 0) {
+                value = -value;
+            }
+            if (value > peak) {
+                peak = value;
+            }
+        }
+        if (peak <= 1) {
+            if (++input_dead_silence_count_ == kInputDeadSilenceWarnFrames) {
+                ESP_LOGW(TAG, "Input PCM stayed near zero for %u frames", input_dead_silence_count_);
+                input_dead_silence_count_ = 0;
+            }
+        } else {
+            input_dead_silence_count_ = 0;
+        }
+    } else {
+        std::memset(dest, 0, samples * sizeof(int16_t));
     }
     return samples;
 }

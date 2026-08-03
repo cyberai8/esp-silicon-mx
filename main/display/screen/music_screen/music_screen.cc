@@ -10,9 +10,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "config.h"
+#if BOARD_HAS_EXTERNAL_BT
 #include "SimpleUart.hpp"
+#endif
 
 #include "home_screen/home_screen.h"
+#include "native_bluetooth_audio.h"
 #include "screen_util.h"
 
 #include "lv_eaf.h"
@@ -227,6 +231,7 @@ void post_lyric(const std::string& text) {
     lv_async_call(async_set_lyric, msg);
 }
 
+#if BOARD_HAS_EXTERNAL_BT
 // ---------------------------------------------------------------------------
 // JSON 解析（极简）—— 只支持下面这两种行：
 //   {"type":"song",  "data":"..."}
@@ -374,12 +379,37 @@ void send_at(const char* cmd) {
     ESP_LOGI(TAG, "TX: %s", cmd);
     uart.sendString(cmd);
 }
+#else
+void on_native_bt_state_changed(bool connected, bool playing) {
+    post_play_state(playing);
+    if (!connected) {
+        post_lyric(I18n::T("等待手机连接本机蓝牙"));
+    } else if (playing) {
+        post_lyric(I18n::T("蓝牙音乐正在播放"));
+    } else {
+        post_lyric(I18n::T("蓝牙已连接，等待手机播放"));
+    }
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // 控件回调
 // ---------------------------------------------------------------------------
-void OnPrevClicked(lv_event_t* /*e*/) { send_at("AT+PREV\r\n"); }
-void OnNextClicked(lv_event_t* /*e*/) { send_at("AT+NEXT\r\n"); }
+void OnPrevClicked(lv_event_t* /*e*/) {
+#if BOARD_HAS_EXTERNAL_BT
+    send_at("AT+PREV\r\n");
+#else
+    NativeBluetoothAudio::GetInstance().SendCommand(NativeBluetoothAudio::Command::kPrevious);
+#endif
+}
+
+void OnNextClicked(lv_event_t* /*e*/) {
+#if BOARD_HAS_EXTERNAL_BT
+    send_at("AT+NEXT\r\n");
+#else
+    NativeBluetoothAudio::GetInstance().SendCommand(NativeBluetoothAudio::Command::kNext);
+#endif
+}
 
 void OnPlayClicked(lv_event_t* /*e*/) {
     // 按钮图标语义 = 「点了之后的动作」。
@@ -388,7 +418,13 @@ void OnPlayClicked(lv_event_t* /*e*/) {
     // 先乐观切图标，BT 模块随后会回包 MPLAY / MPAUSE 让 handle_play_state_line
     // 做最终对齐，万一命令丢了也能恢复。
     const bool want_playing = !s_ui.playing;
+#if BOARD_HAS_EXTERNAL_BT
     send_at(want_playing ? "AT+MPLAY=1\r\n" : "AT+MPAUSE=1\r\n");
+#else
+    NativeBluetoothAudio::GetInstance().SendCommand(
+        want_playing ? NativeBluetoothAudio::Command::kPlay
+                     : NativeBluetoothAudio::Command::kPause);
+#endif
     s_ui.playing = want_playing;
     if (s_ui.img_play_icon != nullptr) {
         lv_image_set_src(s_ui.img_play_icon,
@@ -398,8 +434,21 @@ void OnPlayClicked(lv_event_t* /*e*/) {
     sync_album_eaf(want_playing);
 }
 
-void OnVolDownClicked(lv_event_t* /*e*/) { send_at("AT+VOLDOWN\r\n"); }
-void OnVolUpClicked(lv_event_t* /*e*/) { send_at("AT+VOLUP\r\n"); }
+void OnVolDownClicked(lv_event_t* /*e*/) {
+#if BOARD_HAS_EXTERNAL_BT
+    send_at("AT+VOLDOWN\r\n");
+#else
+    NativeBluetoothAudio::GetInstance().SendCommand(NativeBluetoothAudio::Command::kVolumeDown);
+#endif
+}
+
+void OnVolUpClicked(lv_event_t* /*e*/) {
+#if BOARD_HAS_EXTERNAL_BT
+    send_at("AT+VOLUP\r\n");
+#else
+    NativeBluetoothAudio::GetInstance().SendCommand(NativeBluetoothAudio::Command::kVolumeUp);
+#endif
+}
 
 void OnSwipeBack() {
     lv_obj_t* old_scr = lv_screen_active();
@@ -427,7 +476,7 @@ lv_obj_t* CreateRoundButton(lv_obj_t* parent, int32_t size, uint32_t bg_color,
     lv_obj_set_style_bg_color(btn, lv_color_hex(bg_color), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_bg_color(btn, lv_color_hex(bg_pressed),
-                              LV_PART_MAIN | LV_STATE_PRESSED);
+                              Sel(LV_PART_MAIN, LV_STATE_PRESSED));
     lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(btn, 0, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
@@ -619,13 +668,29 @@ lv_obj_t* MusicScreen::Create() {
 
 void MusicScreen::LifecycleCallback(screen_lifecycle_event_t event) {
     if (event == SCREEN_LIFECYCLE_LOAD) {
+#if BOARD_HAS_EXTERNAL_BT
         ESP_LOGI(TAG, "load: music_screen -> switching BT to mode 3");
         // 让 BT 模块切到「音乐接收」模式三；命令需要 700ms 间隔，放后台 task。
         xTaskCreate(switch_to_mode3_task, "mus_mode3", 4096, nullptr, 5, nullptr);
         // 注册 UART RX 回调，开始监听手机回传的 JSON。
         s_rx_buffer.clear();
         SimpleUart::getInstance().registerCallback(on_uart_data);
+#else
+        ESP_LOGI(TAG, "load: music_screen -> native BT speaker mode");
+        s_rx_buffer.clear();
+        auto& bt = NativeBluetoothAudio::GetInstance();
+        bt.SetStateCallback(on_native_bt_state_changed);
+        if (bt.SetMode(NativeBluetoothAudio::Mode::kSpeakerSink)) {
+            char title[96];
+            snprintf(title, sizeof(title), "%s", bt.DeviceName());
+            post_song(title);
+            on_native_bt_state_changed(bt.IsConnected(), bt.IsPlaying());
+        } else {
+            post_lyric(I18n::T("内置蓝牙未启用，请检查固件配置"));
+        }
+#endif
     } else {
+#if BOARD_HAS_EXTERNAL_BT
         ESP_LOGI(TAG, "unload: music_screen -> switching BT back to mode 1");
         // 摘掉回调，避免 UART task 仍向已经销毁的 UI 投递更新。
         SimpleUart::getInstance().registerCallback(
@@ -634,5 +699,11 @@ void MusicScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         s_rx_buffer.clear();
         // 切回模式 1 同样需要 700ms 间隔，放后台 task 异步执行。
         xTaskCreate(switch_to_mode1_task, "mus_mode1", 4096, nullptr, 5, nullptr);
+#else
+        ESP_LOGI(TAG, "unload: music_screen -> native BT remains available");
+        NativeBluetoothAudio::GetInstance().SetStateCallback(nullptr);
+        s_screen_active = false;
+        s_rx_buffer.clear();
+#endif
     }
 }

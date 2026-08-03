@@ -15,10 +15,12 @@ AudioCodec::~AudioCodec() {
 }
 
 void AudioCodec::OutputData(std::vector<int16_t>& data) {
+    std::lock_guard<std::mutex> lock(output_mutex_);
     Write(data.data(), data.size());
 }
 
 bool AudioCodec::InputData(std::vector<int16_t>& data) {
+    std::lock_guard<std::mutex> lock(input_mutex_);
     int samples = Read(data.data(), data.size());
     if (samples > 0) {
         return true;

@@ -2085,10 +2085,26 @@ void OnPwrMaskClicked(lv_event_t* e);  // forward decl
 
 lv_obj_t* s_shutdown_screen = nullptr;
 
-void AppendShutdownProgressContent(lv_obj_t* parent) {
+enum class ShutdownScreenMode {
+    kPoweringOff,
+    kUnsupported,
+};
+
+void ReturnHomeFromShutdownScreen(lv_event_t* /*e*/) {
+    lv_obj_t* old_scr = lv_screen_active();
+    lv_obj_t* home = HomeScreen::Create();
+    lv_screen_load(home);
+    if (old_scr != nullptr && old_scr != home) {
+        lv_obj_delete_async(old_scr);
+    }
+    s_shutdown_screen = nullptr;
+}
+
+void AppendShutdownProgressContent(lv_obj_t* parent, ShutdownScreenMode mode,
+                                   const char* reason) {
     lv_obj_t* box = lv_obj_create(parent);
     lv_obj_remove_style_all(box);
-    lv_obj_set_size(box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_size(box, kPanelW - 80, LV_SIZE_CONTENT);
     lv_obj_center(box);
     lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_pad_row(box, 24, LV_PART_MAIN);
@@ -2098,24 +2114,47 @@ void AppendShutdownProgressContent(lv_obj_t* parent) {
     lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(box, LV_OBJ_FLAG_CLICKABLE);
 
-    lv_obj_t* spin = lv_spinner_create(box);
-    lv_obj_set_size(spin, 140, 140);
-    lv_spinner_set_anim_params(spin, 1000, 200);
-    lv_obj_set_style_arc_color(spin, lv_color_hex(0x2A2F3A), LV_PART_MAIN);
-    lv_obj_set_style_arc_color(spin, lv_color_hex(0xFFFFFF), LV_PART_INDICATOR);
-    lv_obj_set_style_arc_width(spin, 10, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(spin, 10, LV_PART_INDICATOR);
-    lv_obj_remove_flag(spin, LV_OBJ_FLAG_CLICKABLE);
+    if (mode == ShutdownScreenMode::kPoweringOff) {
+        lv_obj_t* spin = lv_spinner_create(box);
+        lv_obj_set_size(spin, 140, 140);
+        lv_spinner_set_anim_params(spin, 1000, 200);
+        lv_obj_set_style_arc_color(spin, lv_color_hex(0x2A2F3A), LV_PART_MAIN);
+        lv_obj_set_style_arc_color(spin, lv_color_hex(0xFFFFFF), LV_PART_INDICATOR);
+        lv_obj_set_style_arc_width(spin, 10, LV_PART_MAIN);
+        lv_obj_set_style_arc_width(spin, 10, LV_PART_INDICATOR);
+        lv_obj_remove_flag(spin, LV_OBJ_FLAG_CLICKABLE);
+    } else {
+        lv_obj_t* icon = lv_label_create(box);
+        lv_label_set_text(icon, LV_SYMBOL_WARNING);
+        lv_obj_set_style_text_color(icon, lv_color_hex(0xFBBF24), LV_PART_MAIN);
+        lv_obj_set_style_text_font(icon, &font_puhui_30_4, LV_PART_MAIN);
+        lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    }
 
     lv_obj_t* lbl = lv_label_create(box);
-    // lv_label_set_text(lbl, I18n::T("????..."));
+    lv_label_set_text(lbl, mode == ShutdownScreenMode::kPoweringOff
+                               ? I18n::T("正在关机...")
+                               : I18n::T("当前板级不支持软件断电"));
+    lv_obj_set_width(lbl, kPanelW - 100);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl, &font_puhui_30_4, LV_PART_MAIN);
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_remove_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t* sub = lv_label_create(box);
+    lv_label_set_text(sub, mode == ShutdownScreenMode::kPoweringOff
+                               ? (reason != nullptr ? reason : I18n::T("请稍候"))
+                               : I18n::T("S31 没有外置电源保持/关断 IO，点击屏幕返回主页"));
+    lv_obj_set_width(sub, kPanelW - 120);
+    lv_label_set_long_mode(sub, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(sub, lv_color_hex(0x9CA3AF), LV_PART_MAIN);
+    lv_obj_set_style_text_font(sub, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_align(sub, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_remove_flag(sub, LV_OBJ_FLAG_CLICKABLE);
 }
 
-lv_obj_t* CreateShutdownScreen() {
+lv_obj_t* CreateShutdownScreen(ShutdownScreenMode mode, const char* reason) {
     lv_obj_t* screen = lv_obj_create(NULL);
     lv_obj_set_size(screen, kPanelW, kPanelH);
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), LV_PART_MAIN);
@@ -2123,17 +2162,23 @@ lv_obj_t* CreateShutdownScreen() {
     lv_obj_set_style_pad_all(screen, 0, LV_PART_MAIN);
     lv_obj_set_style_border_width(screen, 0, LV_PART_MAIN);
     lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
-    AppendShutdownProgressContent(screen);
+    if (mode == ShutdownScreenMode::kUnsupported) {
+        lv_obj_add_flag(screen, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(screen, ReturnHomeFromShutdownScreen,
+                            LV_EVENT_CLICKED, nullptr);
+    }
+    AppendShutdownProgressContent(screen, mode, reason);
     return screen;
 }
 
 // ????????????????????????????
-void ShowShutdownScreen() {
+void ShowShutdownScreen(ShutdownScreenMode mode, const char* reason) {
     ClosePowerDialog();
 
-    if (s_shutdown_screen == nullptr) {
-        s_shutdown_screen = CreateShutdownScreen();
+    if (s_shutdown_screen != nullptr) {
+        lv_obj_delete(s_shutdown_screen);
     }
+    s_shutdown_screen = CreateShutdownScreen(mode, reason);
     lv_screen_load(s_shutdown_screen);
 }
 
@@ -2157,6 +2202,12 @@ void PwrShutdownPulseTask(void* /*arg*/) {
 }
 
 void BeginSystemShutdown(const char* reason) {
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    ESP_LOGW(TAG_HOME, "S31 has no IOExpander; skip software power-off");
+    IdlePower_Stop();
+    ShowShutdownScreen(ShutdownScreenMode::kUnsupported, reason);
+    return;
+#else
     static bool shutting_down = false;
     if (shutting_down) {
         return;
@@ -2165,8 +2216,9 @@ void BeginSystemShutdown(const char* reason) {
 
     // ESP_LOGW(TAG_HOME, "%s????PWR_KEY_PULSE ????", reason);
     IdlePower_Stop();
-    ShowShutdownScreen();
+    ShowShutdownScreen(ShutdownScreenMode::kPoweringOff, reason);
     xTaskCreate(PwrShutdownPulseTask, "pwr_off_pulse", 2048, nullptr, 5, nullptr);
+#endif
 }
 
 void OnPwrShutdownClicked(lv_event_t* /*e*/) {
@@ -2276,7 +2328,7 @@ lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
     s_pwr_dlg.card = card;
 
     lv_obj_t* title = lv_label_create(card);
-    // lv_label_set_text(title, I18n::T("????"));
+    lv_label_set_text(title, I18n::T("电源"));
     lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
@@ -2298,7 +2350,7 @@ lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
 
     // ---- ??????????????----
     lv_obj_t* hint = lv_label_create(card);
-    // lv_label_set_text(hint, I18n::T("??????5 ??????"));
+    lv_label_set_text(hint, I18n::T("选择电源操作"));
     lv_obj_set_style_text_color(hint, lv_color_hex(0x9CA3AF), LV_PART_MAIN);
     lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, 0);
