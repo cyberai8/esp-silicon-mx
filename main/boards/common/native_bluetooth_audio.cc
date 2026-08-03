@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "esp_heap_caps.h"
@@ -29,6 +30,8 @@ namespace {
 constexpr const char* TAG = "NativeBTAudio";
 constexpr const char* kDeviceName = "Xingzhi-S31";
 constexpr uint32_t kPcmQueueDepth = 8;
+constexpr size_t kMinInternalFreeBeforeBtInit = 50000;
+constexpr size_t kMinLargestBlockBeforeBtInit = 20000;
 
 struct PcmBlock {
     uint8_t* data = nullptr;
@@ -37,6 +40,7 @@ struct PcmBlock {
 
 struct BtState {
     bool initialized = false;
+    bool output_active = false;
     bool avrc_initialized = false;
     bool a2dp_initialized = false;
     bool connected = false;
@@ -47,6 +51,10 @@ struct BtState {
     int channels = 2;
     uint8_t avrc_tl = 0;
     NativeBluetoothAudio::StateCallback state_callback = nullptr;
+    NativeBluetoothAudio::MetadataCallback metadata_callback = nullptr;
+    std::string title;
+    std::string artist;
+    std::string album;
     QueueHandle_t pcm_queue = nullptr;
     TaskHandle_t pcm_task = nullptr;
 };
@@ -153,6 +161,16 @@ void delete_pcm_output() {
     }
 }
 
+void drain_pcm_queue() {
+    if (s_state.pcm_queue == nullptr) {
+        return;
+    }
+    PcmBlock block;
+    while (xQueueReceive(s_state.pcm_queue, &block, 0) == pdTRUE) {
+        free_pcm_block(block);
+    }
+}
+
 void cleanup_bt_stack() {
     delete_pcm_output();
 
@@ -184,10 +202,14 @@ void cleanup_bt_stack() {
     }
 
     s_state.initialized = false;
+    s_state.output_active = false;
     s_state.connected = false;
     s_state.playing = false;
     s_state.has_remote_bda = false;
     std::memset(s_state.remote_bda, 0, sizeof(s_state.remote_bda));
+    s_state.title.clear();
+    s_state.artist.clear();
+    s_state.album.clear();
 }
 
 void notify_state_changed() {
@@ -195,6 +217,54 @@ void notify_state_changed() {
     if (callback != nullptr) {
         callback(s_state.connected, s_state.playing);
     }
+}
+
+void notify_metadata_changed() {
+    auto callback = s_state.metadata_callback;
+    if (callback == nullptr) {
+        return;
+    }
+    NativeBluetoothAudio::Metadata metadata = {
+        s_state.title.c_str(),
+        s_state.artist.c_str(),
+        s_state.album.c_str(),
+    };
+    callback(metadata);
+}
+
+uint8_t next_avrc_tl() {
+    return s_state.avrc_tl++ & 0x0f;
+}
+
+void request_metadata() {
+    constexpr uint8_t kAttrMask = ESP_AVRC_MD_ATTR_TITLE |
+                                  ESP_AVRC_MD_ATTR_ARTIST |
+                                  ESP_AVRC_MD_ATTR_ALBUM;
+    esp_err_t err = esp_avrc_ct_send_metadata_cmd(next_avrc_tl(), kAttrMask);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "AVRCP metadata request failed: %s", esp_err_to_name(err));
+    }
+}
+
+void register_track_notifications() {
+    esp_err_t err = esp_avrc_ct_send_register_notification_cmd(
+        next_avrc_tl(), ESP_AVRC_RN_TRACK_CHANGE, 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "AVRCP track notify register failed: %s", esp_err_to_name(err));
+    }
+    err = esp_avrc_ct_send_register_notification_cmd(
+        next_avrc_tl(), ESP_AVRC_RN_PLAY_STATUS_CHANGE, 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "AVRCP play notify register failed: %s", esp_err_to_name(err));
+    }
+}
+
+std::string metadata_text_to_string(const uint8_t* text, int length) {
+    if (text == nullptr || length <= 0) {
+        return {};
+    }
+    return std::string(reinterpret_cast<const char*>(text),
+                       static_cast<size_t>(length));
 }
 
 std::vector<int16_t> resample_mono_linear(const std::vector<int16_t>& input,
@@ -258,7 +328,8 @@ void pcm_output_task(void* /*arg*/) {
 }
 
 void a2d_data_cb(const uint8_t* data, uint32_t len) {
-    if (s_state.pcm_queue == nullptr || data == nullptr || len == 0) {
+    if (!s_state.output_active || s_state.pcm_queue == nullptr ||
+        data == nullptr || len == 0) {
         return;
     }
     PcmBlock block;
@@ -316,8 +387,64 @@ void a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t* param) {
 }
 
 void avrc_ct_cb(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t* param) {
-    if (event == ESP_AVRC_CT_CONNECTION_STATE_EVT) {
-        ESP_LOGI(TAG, "AVRCP CT %s", param->conn_stat.connected ? "connected" : "disconnected");
+    switch (event) {
+        case ESP_AVRC_CT_CONNECTION_STATE_EVT:
+            ESP_LOGI(TAG, "AVRCP CT %s",
+                     param->conn_stat.connected ? "connected" : "disconnected");
+            if (param->conn_stat.connected) {
+                request_metadata();
+                register_track_notifications();
+            } else {
+                s_state.title.clear();
+                s_state.artist.clear();
+                s_state.album.clear();
+                notify_metadata_changed();
+            }
+            break;
+        case ESP_AVRC_CT_METADATA_RSP_EVT: {
+            const std::string text = metadata_text_to_string(
+                param->meta_rsp.attr_text, param->meta_rsp.attr_length);
+            switch (param->meta_rsp.attr_id) {
+                case ESP_AVRC_MD_ATTR_TITLE:
+                    s_state.title = text;
+                    break;
+                case ESP_AVRC_MD_ATTR_ARTIST:
+                    s_state.artist = text;
+                    break;
+                case ESP_AVRC_MD_ATTR_ALBUM:
+                    s_state.album = text;
+                    break;
+                default:
+                    break;
+            }
+            ESP_LOGI(TAG, "AVRCP metadata: attr=0x%02x text=%s",
+                     param->meta_rsp.attr_id, text.c_str());
+            notify_metadata_changed();
+            break;
+        }
+        case ESP_AVRC_CT_CHANGE_NOTIFY_EVT:
+            ESP_LOGI(TAG, "AVRCP notify: event=0x%02x",
+                     param->change_ntf.event_id);
+            if (param->change_ntf.event_id == ESP_AVRC_RN_TRACK_CHANGE ||
+                param->change_ntf.event_id == ESP_AVRC_RN_NOW_PLAYING_CHANGE) {
+                request_metadata();
+                esp_avrc_ct_send_register_notification_cmd(
+                    next_avrc_tl(), param->change_ntf.event_id, 0);
+            } else if (param->change_ntf.event_id == ESP_AVRC_RN_PLAY_STATUS_CHANGE) {
+                s_state.playing =
+                    param->change_ntf.event_parameter.playback == ESP_AVRC_PLAYBACK_PLAYING;
+                notify_state_changed();
+                esp_avrc_ct_send_register_notification_cmd(
+                    next_avrc_tl(), ESP_AVRC_RN_PLAY_STATUS_CHANGE, 0);
+            }
+            break;
+        case ESP_AVRC_CT_PLAY_STATUS_RSP_EVT:
+            s_state.playing =
+                param->play_status_rsp.play_status == ESP_AVRC_PLAYBACK_PLAYING;
+            notify_state_changed();
+            break;
+        default:
+            break;
     }
 }
 
@@ -356,6 +483,10 @@ bool NativeBluetoothAudio::IsSupported() const {
 #endif
 }
 
+bool NativeBluetoothAudio::IsInitialized() const {
+    return s_state.initialized;
+}
+
 const char* NativeBluetoothAudio::DeviceName() const {
     return kDeviceName;
 }
@@ -370,6 +501,21 @@ bool NativeBluetoothAudio::Initialize() {
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
+
+    const size_t internal_free =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (internal_free < kMinInternalFreeBeforeBtInit ||
+        largest < kMinLargestBlockBeforeBtInit) {
+        ESP_LOGE(TAG,
+                 "Not enough internal heap for BT init: free=%u/%u largest=%u/%u",
+                 static_cast<unsigned>(internal_free),
+                 static_cast<unsigned>(kMinInternalFreeBeforeBtInit),
+                 static_cast<unsigned>(largest),
+                 static_cast<unsigned>(kMinLargestBlockBeforeBtInit));
+        return false;
+    }
 
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     esp_err_t err = esp_bt_controller_init(&bt_cfg);
@@ -477,16 +623,33 @@ bool NativeBluetoothAudio::SetMode(Mode mode) {
     }
     if (mode == Mode::kSpeakerSink) {
         ESP_LOGI(TAG, "Set native BT speaker/sink mode");
+        s_state.output_active = true;
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE));
         return true;
     }
 
     ESP_LOGW(TAG, "Native BT audio-source mode UI is available, A2DP source stream is not wired yet");
+    s_state.output_active = false;
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE));
     return true;
 #else
     (void)mode;
     return false;
+#endif
+}
+
+void NativeBluetoothAudio::Suspend() {
+#if CONFIG_BT_ENABLED
+    if (!s_state.initialized) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Suspending native Bluetooth audio");
+    s_state.output_active = false;
+    s_state.playing = false;
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE,
+                                                           ESP_BT_NON_DISCOVERABLE));
+    drain_pcm_queue();
 #endif
 }
 
@@ -531,7 +694,7 @@ bool NativeBluetoothAudio::SendCommand(Command command) {
             break;
     }
 
-    uint8_t tl = s_state.avrc_tl++ & 0x0f;
+    uint8_t tl = next_avrc_tl();
     esp_err_t err = esp_avrc_ct_send_passthrough_cmd(tl, key, ESP_AVRC_PT_CMD_STATE_PRESSED);
     if (err == ESP_OK) {
         vTaskDelay(pdMS_TO_TICKS(80));
@@ -550,6 +713,15 @@ bool NativeBluetoothAudio::SendCommand(Command command) {
 
 void NativeBluetoothAudio::SetStateCallback(StateCallback callback) {
     s_state.state_callback = callback;
+}
+
+void NativeBluetoothAudio::SetMetadataCallback(MetadataCallback callback) {
+    s_state.metadata_callback = callback;
+#if CONFIG_BT_ENABLED
+    if (callback != nullptr) {
+        notify_metadata_changed();
+    }
+#endif
 }
 
 bool NativeBluetoothAudio::IsConnected() const {

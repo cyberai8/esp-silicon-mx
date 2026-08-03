@@ -11,7 +11,7 @@
 //     （AT+RX=1 / AT+MODE=3），切换后注册 UART RX 回调用于解析手机
 //     回传的 JSON 数据流。
 //   - ESP32-S31-Korvo-1：使用片上 Classic BT/A2DP Sink，手机直接连接本机
-//     播放音乐。
+//     播放音乐，并通过 AVRCP Metadata 显示歌名 / 歌手 / 专辑。
 //   - 外置蓝牙模块 JSON：
 //       {"type":"song",  "data":"人间共鸣-李健"}   -> 显示成歌名标题
 //       {"type":"lyrics","data":"人间共鸣 - 李健"}  -> 显示成当前歌词
