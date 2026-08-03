@@ -33,9 +33,25 @@ bool EspWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
         ESP_LOGE(TAG, "No model found");
         return false;
     }
-    char *model_name = wakenet_model_->model_name[0];
+
+    char* model_name = esp_srmodel_filter(wakenet_model_, ESP_WN_PREFIX, NULL);
+    if (model_name == nullptr) {
+        ESP_LOGE(TAG, "No WakeNet model found");
+        return false;
+    }
+
     wakenet_iface_ = (esp_wn_iface_t*)esp_wn_handle_from_name(model_name);
+    if (wakenet_iface_ == nullptr) {
+        ESP_LOGE(TAG, "No WakeNet interface for model: %s", model_name);
+        return false;
+    }
+
     wakenet_data_ = wakenet_iface_->create(model_name, DET_MODE_95);
+    if (wakenet_data_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create WakeNet data for model: %s", model_name);
+        wakenet_iface_ = nullptr;
+        return false;
+    }
 
     int frequency = wakenet_iface_->get_samp_rate(wakenet_data_);
     int audio_chunksize = wakenet_iface_->get_samp_chunksize(wakenet_data_);

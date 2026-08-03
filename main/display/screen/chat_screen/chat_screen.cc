@@ -24,7 +24,7 @@ namespace {
 constexpr const char* TAG = "ChatScreen";
 
 // ---------------------------------------------------------------------------
-// 720x720 视觉参数
+// 视觉参数
 //
 //   ┌───────────────────────────────────────────┐ 0
 //   │ Header  [←] 聊天 待唤醒  [表情][聊天][清空] │ 88
@@ -33,6 +33,30 @@ constexpr const char* TAG = "ChatScreen";
 //   │  表情模式：EAF 偏上 + 底部白色字幕           │
 //   └───────────────────────────────────────────┘ 720
 // ---------------------------------------------------------------------------
+#if CONFIG_BOARD_TYPE_ESP32_S31_KORVO_1
+constexpr int32_t kPanelW          = 800;
+constexpr int32_t kPanelH          = 480;
+constexpr int32_t kHeaderH         = 64;
+constexpr int32_t kBackBtnSize     = 52;
+constexpr int32_t kListPadH        = 26;
+constexpr int32_t kListPadTop      = 10;
+constexpr int32_t kListPadBottom   = 104;
+constexpr int32_t kRowGap          = 8;
+constexpr int32_t kBubblePadX      = 14;
+constexpr int32_t kBubblePadY      = 10;
+constexpr int32_t kBubbleRadius    = 14;
+constexpr int32_t kSideMargin      = 4;
+constexpr int32_t kMaxMessages     = 16;
+constexpr int32_t kToggleBtnSize   = 64;
+constexpr int32_t kToggleIconSize  = 48;
+constexpr int32_t kToggleBtnMargin = 24;
+constexpr int32_t kClearBtnW       = 90;
+constexpr int32_t kClearBtnH       = 44;
+constexpr int32_t kModeBtnW        = 88;
+constexpr int32_t kModeBtnH        = 44;
+constexpr int32_t kHeaderRightPad  = 16;
+constexpr int32_t kHeaderCtrlGap   = 8;
+#else
 constexpr int32_t kPanelW          = 720;
 constexpr int32_t kPanelH          = 720;
 constexpr int32_t kHeaderH         = 88;
@@ -55,6 +79,7 @@ constexpr int32_t kModeBtnW        = 100;
 constexpr int32_t kModeBtnH        = 56;
 constexpr int32_t kHeaderRightPad  = 20;
 constexpr int32_t kHeaderCtrlGap   = 10;
+#endif
 
 // 表情：服务器完整情绪名 → S:/sdcard/system/chat/{emotion}.eaf
 constexpr const char* kEmotionDir      = "S:/sdcard/system/chat/";
@@ -66,9 +91,15 @@ constexpr size_t kEmotionPathBufSize   = 96;
 constexpr uint32_t kEmotionFrameDelayMs = 30;  // 与 boot_screen 一致
 
 constexpr int32_t kEmotionBubbleBorder = 0;
+#if CONFIG_BOARD_TYPE_ESP32_S31_KORVO_1
+constexpr int32_t kEmotionBubbleSide   = 28;
+constexpr int32_t kCaptionBottom       = 22;
+constexpr int32_t kEmotionEafLift      = 56;
+#else
 constexpr int32_t kEmotionBubbleSide   = 24;
 constexpr int32_t kCaptionBottom       = 36;   // 底部字幕距底边
 constexpr int32_t kEmotionEafLift      = 90;   // EAF 相对中心上移，给底部字幕留空
+#endif
 constexpr int32_t kEmotionBubbleMaxW   = kPanelW - kEmotionBubbleSide * 2;
 
 constexpr uint32_t kColorBg                 = 0x0E1116;
@@ -125,7 +156,13 @@ char s_current_emotion[kEmotionNameMax + 1] = "neutral";
 char s_applied_emotion[kEmotionNameMax + 1] = "";
 char s_emotion_path_buf[kEmotionPathBufSize];
 
-const lv_font_t* chat_font() { return &font_puhui_30_4; }
+const lv_font_t* chat_font() {
+#if CONFIG_BOARD_TYPE_ESP32_S31_KORVO_1
+    return &font_puhui_20_4;
+#else
+    return &font_puhui_30_4;
+#endif
+}
 
 // 仅允许 [A-Za-z0-9_-]，防止路径穿越 / 非法文件名。
 bool IsSafeEmotionName(const char* name) {

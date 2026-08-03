@@ -397,6 +397,24 @@ void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
 }
 
 void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm) {
+    if (type == kAudioTaskTypeEncodeToSendQueue && (++encode_audio_level_counter_ % 20) == 0) {
+        int peak = 0;
+        int64_t abs_sum = 0;
+        for (int16_t sample : pcm) {
+            int value = sample;
+            if (value < 0) {
+                value = -value;
+            }
+            if (value > peak) {
+                peak = value;
+            }
+            abs_sum += value;
+        }
+        int avg = pcm.empty() ? 0 : (int)(abs_sum / (int64_t)pcm.size());
+        ESP_LOGI(TAG, "Mic PCM level: samples=%u peak=%d avg=%d",
+            (unsigned)pcm.size(), peak, avg);
+    }
+
     auto task = std::make_unique<AudioTask>();
     task->type = type;
     task->pcm = std::move(pcm);
