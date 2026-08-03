@@ -93,6 +93,7 @@ public:
     void Initialize(AudioCodec* codec);
     void Start();
     void Stop();
+    bool StopAndWait(uint32_t timeout_ms);
     void EncodeWakeWord();
     std::unique_ptr<AudioStreamPacket> PopWakeWordPacket();
     const std::string& GetLastWakeWord() const;

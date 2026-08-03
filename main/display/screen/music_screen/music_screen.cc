@@ -102,6 +102,7 @@ bool s_screen_active = false;
 std::string s_rx_buffer;
 #if !BOARD_HAS_EXTERNAL_BT
 bool s_restore_wake_word_after_native_bt = false;
+bool s_restart_audio_service_after_native_bt = false;
 #endif
 
 void sync_album_eaf(bool playing) {
@@ -686,10 +687,19 @@ void MusicScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         s_rx_buffer.clear();
         auto& audio_service = Application::GetInstance().GetAudioService();
         s_restore_wake_word_after_native_bt = audio_service.ReleaseWakeWordDetection();
+        s_restart_audio_service_after_native_bt = audio_service.IsStarted();
+        if (s_restart_audio_service_after_native_bt) {
+            if (!audio_service.StopAndWait(1200)) {
+                ESP_LOGW(TAG, "audio service did not fully stop before native BT init");
+            }
+            ESP_LOGI(TAG, "after stopping audio service: internal free=%u largest=%u",
+                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                     static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+        }
         if (auto* codec = Board::GetInstance().GetAudioCodec()) {
             codec->EnableInput(false);
         }
-        vTaskDelay(pdMS_TO_TICKS(120));
+        vTaskDelay(pdMS_TO_TICKS(180));
         ESP_LOGI(TAG, "after releasing wake word: internal free=%u largest=%u",
                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
@@ -719,6 +729,10 @@ void MusicScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         auto& bt = NativeBluetoothAudio::GetInstance();
         bt.SetStateCallback(nullptr);
         bt.Shutdown();
+        if (s_restart_audio_service_after_native_bt) {
+            Application::GetInstance().GetAudioService().Start();
+            s_restart_audio_service_after_native_bt = false;
+        }
         if (s_restore_wake_word_after_native_bt) {
             Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
             s_restore_wake_word_after_native_bt = false;

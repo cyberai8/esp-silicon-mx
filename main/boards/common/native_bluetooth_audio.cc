@@ -4,6 +4,7 @@
 #include "board.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -36,8 +37,12 @@ struct PcmBlock {
 
 struct BtState {
     bool initialized = false;
+    bool avrc_initialized = false;
+    bool a2dp_initialized = false;
     bool connected = false;
     bool playing = false;
+    bool has_remote_bda = false;
+    esp_bd_addr_t remote_bda = {0};
     int sample_rate = 48000;
     int channels = 2;
     uint8_t avrc_tl = 0;
@@ -49,6 +54,25 @@ struct BtState {
 BtState s_state;
 
 #if CONFIG_BT_ENABLED
+extern "C" {
+struct BtmPowerMode {
+    uint16_t max;
+    uint16_t min;
+    uint16_t attempt;
+    uint16_t timeout;
+    uint8_t mode;
+};
+
+uint8_t BTM_SetLinkPolicy(uint8_t remote_bda[ESP_BD_ADDR_LEN],
+                          uint16_t* settings);
+uint8_t BTM_SetPowerMode(uint8_t pm_id, uint8_t remote_bda[ESP_BD_ADDR_LEN],
+                         BtmPowerMode* mode);
+}
+
+constexpr uint16_t kBtLinkPolicyActiveOnly = 0x0000;
+constexpr uint8_t kBtmPmSetOnlyId = 0x80;
+constexpr uint8_t kBtmPmModeActive = 0x00;
+
 int sample_rate_from_sbc(uint8_t samp_freq) {
     if (samp_freq & ESP_A2D_SBC_CIE_SF_48K) {
         return 48000;
@@ -69,12 +93,101 @@ int channels_from_sbc(uint8_t ch_mode) {
     return (ch_mode & ESP_A2D_SBC_CIE_CH_MODE_MONO) ? 1 : 2;
 }
 
+void format_bda(const esp_bd_addr_t bda, char* out, size_t out_size) {
+    if (out == nullptr || out_size == 0) {
+        return;
+    }
+    if (bda == nullptr) {
+        std::snprintf(out, out_size, "(null)");
+        return;
+    }
+    std::snprintf(out, out_size, "%02x:%02x:%02x:%02x:%02x:%02x",
+                  bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
+}
+
+void keep_acl_active(const esp_bd_addr_t bda, const char* reason) {
+    if (bda == nullptr) {
+        return;
+    }
+
+    uint16_t policy = kBtLinkPolicyActiveOnly;
+    const uint8_t policy_status = BTM_SetLinkPolicy(
+        const_cast<uint8_t*>(bda), &policy);
+
+    BtmPowerMode active_mode = {};
+    active_mode.mode = kBtmPmModeActive;
+    const uint8_t power_status = BTM_SetPowerMode(
+        kBtmPmSetOnlyId, const_cast<uint8_t*>(bda), &active_mode);
+
+    esp_err_t qos_err = esp_bt_gap_set_qos(
+        const_cast<uint8_t*>(bda), ESP_BT_GAP_TPOLL_DFT);
+
+    char bda_text[18];
+    format_bda(bda, bda_text, sizeof(bda_text));
+    ESP_LOGI(TAG,
+             "Keep ACL active (%s): peer=%s policy=0x%04x status=%u power=%u qos=%s",
+             reason != nullptr ? reason : "bt", bda_text, policy,
+             policy_status, power_status, esp_err_to_name(qos_err));
+}
+
 void free_pcm_block(PcmBlock& block) {
     if (block.data != nullptr) {
         heap_caps_free(block.data);
         block.data = nullptr;
     }
     block.len = 0;
+}
+
+void delete_pcm_output() {
+    if (s_state.pcm_task != nullptr) {
+        vTaskDelete(s_state.pcm_task);
+        s_state.pcm_task = nullptr;
+    }
+    if (s_state.pcm_queue != nullptr) {
+        PcmBlock block;
+        while (xQueueReceive(s_state.pcm_queue, &block, 0) == pdTRUE) {
+            free_pcm_block(block);
+        }
+        vQueueDelete(s_state.pcm_queue);
+        s_state.pcm_queue = nullptr;
+    }
+}
+
+void cleanup_bt_stack() {
+    delete_pcm_output();
+
+    if (s_state.a2dp_initialized) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_a2d_sink_deinit());
+        s_state.a2dp_initialized = false;
+    }
+    if (s_state.avrc_initialized) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_avrc_ct_deinit());
+        s_state.avrc_initialized = false;
+    }
+
+    esp_bluedroid_status_t bluedroid_status = esp_bluedroid_get_status();
+    if (bluedroid_status == ESP_BLUEDROID_STATUS_ENABLED) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bluedroid_disable());
+        bluedroid_status = esp_bluedroid_get_status();
+    }
+    if (bluedroid_status == ESP_BLUEDROID_STATUS_INITIALIZED) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bluedroid_deinit());
+    }
+
+    esp_bt_controller_status_t controller_status = esp_bt_controller_get_status();
+    if (controller_status == ESP_BT_CONTROLLER_STATUS_ENABLED) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_controller_disable());
+        controller_status = esp_bt_controller_get_status();
+    }
+    if (controller_status == ESP_BT_CONTROLLER_STATUS_INITED) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_controller_deinit());
+    }
+
+    s_state.initialized = false;
+    s_state.connected = false;
+    s_state.playing = false;
+    s_state.has_remote_bda = false;
+    std::memset(s_state.remote_bda, 0, sizeof(s_state.remote_bda));
 }
 
 void notify_state_changed() {
@@ -169,8 +282,15 @@ void a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t* param) {
     switch (event) {
         case ESP_A2D_CONNECTION_STATE_EVT:
             s_state.connected = param->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED;
-            if (!s_state.connected) {
+            if (s_state.connected) {
+                std::memcpy(s_state.remote_bda, param->conn_stat.remote_bda,
+                            sizeof(s_state.remote_bda));
+                s_state.has_remote_bda = true;
+                keep_acl_active(s_state.remote_bda, "a2dp connected");
+            } else {
                 s_state.playing = false;
+                s_state.has_remote_bda = false;
+                std::memset(s_state.remote_bda, 0, sizeof(s_state.remote_bda));
             }
             ESP_LOGI(TAG, "A2DP %s", s_state.connected ? "connected" : "disconnected");
             notify_state_changed();
@@ -198,6 +318,25 @@ void a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t* param) {
 void avrc_ct_cb(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t* param) {
     if (event == ESP_AVRC_CT_CONNECTION_STATE_EVT) {
         ESP_LOGI(TAG, "AVRCP CT %s", param->conn_stat.connected ? "connected" : "disconnected");
+    }
+}
+
+void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t* param) {
+    switch (event) {
+        case ESP_BT_GAP_MODE_CHG_EVT:
+            ESP_LOGI(TAG, "GAP mode change: mode=%u interval=%u",
+                     param->mode_chg.mode, param->mode_chg.interval);
+            if (param->mode_chg.mode != ESP_BT_PM_MD_ACTIVE) {
+                keep_acl_active(param->mode_chg.bda, "gap mode change");
+            }
+            break;
+        case ESP_BT_GAP_ACL_DISCONN_CMPL_STAT_EVT:
+            ESP_LOGW(TAG, "GAP ACL disconnected: reason=0x%02x handle=0x%04x",
+                     param->acl_disconn_cmpl_stat.reason,
+                     param->acl_disconn_cmpl_stat.handle);
+            break;
+        default:
+            break;
     }
 }
 #endif
@@ -236,41 +375,89 @@ bool NativeBluetoothAudio::Initialize() {
     esp_err_t err = esp_bt_controller_init(&bt_cfg);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "esp_bt_controller_init failed: %s", esp_err_to_name(err));
+        cleanup_bt_stack();
         return false;
     }
     err = esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "esp_bt_controller_enable failed: %s", esp_err_to_name(err));
+        cleanup_bt_stack();
         return false;
     }
     err = esp_bluedroid_init();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "esp_bluedroid_init failed: %s", esp_err_to_name(err));
+        cleanup_bt_stack();
         return false;
     }
     err = esp_bluedroid_enable();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "esp_bluedroid_enable failed: %s", esp_err_to_name(err));
+        cleanup_bt_stack();
         return false;
     }
 
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_gap_set_device_name(kDeviceName));
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_avrc_ct_register_callback(avrc_ct_cb));
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_avrc_ct_init());
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_a2d_register_callback(a2d_cb));
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_a2d_sink_init());
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_a2d_sink_register_data_callback(a2d_data_cb));
+    err = esp_bt_gap_set_device_name(kDeviceName);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_bt_gap_set_device_name failed: %s", esp_err_to_name(err));
+        cleanup_bt_stack();
+        return false;
+    }
+    err = esp_bt_gap_register_callback(gap_cb);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_bt_gap_register_callback failed: %s", esp_err_to_name(err));
+        cleanup_bt_stack();
+        return false;
+    }
+    esp_bt_cod_t cod = {};
+    cod.major = ESP_BT_COD_MAJOR_DEV_AV;
+    cod.minor = 0x04;
+    cod.service = ESP_BT_COD_SRVC_RENDERING | ESP_BT_COD_SRVC_AUDIO;
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_gap_set_cod(cod, ESP_BT_INIT_COD));
+
+    err = esp_avrc_ct_register_callback(avrc_ct_cb);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_avrc_ct_register_callback failed: %s", esp_err_to_name(err));
+        cleanup_bt_stack();
+        return false;
+    }
+    err = esp_avrc_ct_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_avrc_ct_init failed: %s", esp_err_to_name(err));
+        cleanup_bt_stack();
+        return false;
+    }
+    s_state.avrc_initialized = true;
+    err = esp_a2d_register_callback(a2d_cb);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_a2d_register_callback failed: %s", esp_err_to_name(err));
+        cleanup_bt_stack();
+        return false;
+    }
+    err = esp_a2d_sink_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_a2d_sink_init failed: %s", esp_err_to_name(err));
+        cleanup_bt_stack();
+        return false;
+    }
+    s_state.a2dp_initialized = true;
+    err = esp_a2d_sink_register_data_callback(a2d_data_cb);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_a2d_sink_register_data_callback failed: %s", esp_err_to_name(err));
+        cleanup_bt_stack();
+        return false;
+    }
 
     s_state.pcm_queue = xQueueCreate(kPcmQueueDepth, sizeof(PcmBlock));
     if (s_state.pcm_queue == nullptr) {
         ESP_LOGE(TAG, "Failed to create PCM queue");
+        cleanup_bt_stack();
         return false;
     }
     if (xTaskCreate(pcm_output_task, "bt_pcm_out", 4096, nullptr, 5,
                     &s_state.pcm_task) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create PCM output task");
-        vQueueDelete(s_state.pcm_queue);
-        s_state.pcm_queue = nullptr;
+        cleanup_bt_stack();
         return false;
     }
 
@@ -306,35 +493,14 @@ bool NativeBluetoothAudio::SetMode(Mode mode) {
 void NativeBluetoothAudio::Shutdown() {
 #if CONFIG_BT_ENABLED
     if (!s_state.initialized) {
+        cleanup_bt_stack();
         return;
     }
 
     ESP_LOGI(TAG, "Shutting down native Bluetooth audio");
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE,
                                                            ESP_BT_NON_DISCOVERABLE));
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_a2d_sink_deinit());
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_avrc_ct_deinit());
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bluedroid_disable());
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bluedroid_deinit());
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_controller_disable());
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_controller_deinit());
-
-    if (s_state.pcm_task != nullptr) {
-        vTaskDelete(s_state.pcm_task);
-        s_state.pcm_task = nullptr;
-    }
-    if (s_state.pcm_queue != nullptr) {
-        PcmBlock block;
-        while (xQueueReceive(s_state.pcm_queue, &block, 0) == pdTRUE) {
-            free_pcm_block(block);
-        }
-        vQueueDelete(s_state.pcm_queue);
-        s_state.pcm_queue = nullptr;
-    }
-
-    s_state.initialized = false;
-    s_state.connected = false;
-    s_state.playing = false;
+    cleanup_bt_stack();
 #endif
 }
 

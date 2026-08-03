@@ -136,6 +136,24 @@ void AudioService::Stop() {
     audio_queue_cv_.notify_all();
 }
 
+bool AudioService::StopAndWait(uint32_t timeout_ms) {
+    Stop();
+
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    while ((xEventGroupGetBits(event_group_) & AS_EVENT_ALL_TASKS_RUNNING) != 0) {
+        if (timeout_ms == 0 || xTaskGetTickCount() >= deadline) {
+            ESP_LOGW(TAG, "Audio service stop timeout, bits=0x%lx",
+                     xEventGroupGetBits(event_group_) & AS_EVENT_ALL_TASKS_RUNNING);
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    audio_input_task_handle_ = nullptr;
+    audio_output_task_handle_ = nullptr;
+    opus_codec_task_handle_ = nullptr;
+    return true;
+}
+
 bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples) {
     if (!codec_->input_enabled()) {
         esp_timer_stop(audio_power_timer_);
