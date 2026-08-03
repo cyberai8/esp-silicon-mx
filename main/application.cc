@@ -522,9 +522,11 @@ void Application::Start() {
     // Check for new firmware version or get the MQTT broker address
     // Ota ota;
     CheckNewVersion(ota);
+#if CONFIG_USE_AFE_WAKE_WORD || CONFIG_USE_CUSTOM_WAKE_WORD || CONFIG_USE_ESP_WAKE_WORD
     //加载唤醒词模型
     GetAudioService().SetModelsList(esp_srmodel_init("model"));
     GetAudioService().EnableWakeWordDetection(false);
+#endif
 
     // Initialize the protocol
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);

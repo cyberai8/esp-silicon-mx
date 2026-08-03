@@ -2,11 +2,16 @@
 #include "audio_service.h"
 
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <sstream>
 
 #define DETECTION_RUNNING_EVENT 1
 
 #define TAG "AfeWakeWord"
+
+namespace {
+constexpr size_t kAudioDetectionTaskStackSize = 6144;
+}
 
 AfeWakeWord::AfeWakeWord()
     : afe_data_(nullptr),
@@ -17,8 +22,9 @@ AfeWakeWord::AfeWakeWord()
 }
 
 AfeWakeWord::~AfeWakeWord() {
-    if (afe_data_ != nullptr) {
-        afe_iface_->destroy(afe_data_);
+    if (audio_detection_task_ != nullptr) {
+        vTaskDelete(audio_detection_task_);
+        audio_detection_task_ = nullptr;
     }
 
     if (wake_word_encode_task_stack_ != nullptr) {
@@ -27,6 +33,19 @@ AfeWakeWord::~AfeWakeWord() {
 
     if (wake_word_encode_task_buffer_ != nullptr) {
         heap_caps_free(wake_word_encode_task_buffer_);
+    }
+
+    if (afe_data_ != nullptr) {
+        afe_iface_->destroy(afe_data_);
+        afe_data_ = nullptr;
+    }
+
+    if (audio_detection_task_stack_ != nullptr) {
+        heap_caps_free(audio_detection_task_stack_);
+    }
+
+    if (audio_detection_task_buffer_ != nullptr) {
+        heap_caps_free(audio_detection_task_buffer_);
     }
 
     if (models_ != nullptr) {
@@ -63,6 +82,10 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
             }
         }
     }
+    if (wakenet_model_ == nullptr || wake_words_.empty()) {
+        ESP_LOGE(TAG, "No WakeNet model found in srmodels");
+        return false;
+    }
 
     std::string input_format;
     for (int i = 0; i < codec_->input_channels() - ref_num; i++) {
@@ -72,6 +95,10 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
         input_format.push_back('R');
     }
     afe_config_t* afe_config = afe_config_init(input_format.c_str(), models_, AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
+    if (afe_config == nullptr) {
+        ESP_LOGE(TAG, "Failed to initialize AFE config");
+        return false;
+    }
     afe_config->aec_init = codec_->input_reference();
     afe_config->aec_mode = AEC_MODE_SR_HIGH_PERF;
     afe_config->afe_perferred_core = 1;
@@ -79,13 +106,58 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
     
     afe_iface_ = esp_afe_handle_from_config(afe_config);
-    afe_data_ = afe_iface_->create_from_config(afe_config);
+    if (afe_iface_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to get AFE interface");
+        afe_config_free(afe_config);
+        return false;
+    }
 
-    xTaskCreate([](void* arg) {
+    audio_detection_task_stack_ = static_cast<StackType_t*>(
+        heap_caps_aligned_alloc(16, kAudioDetectionTaskStackSize,
+                                MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
+    audio_detection_task_buffer_ = static_cast<StaticTask_t*>(
+        heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    if (audio_detection_task_stack_ == nullptr || audio_detection_task_buffer_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate audio detection task stack/buffer");
+        if (audio_detection_task_stack_ != nullptr) {
+            heap_caps_free(audio_detection_task_stack_);
+            audio_detection_task_stack_ = nullptr;
+        }
+        if (audio_detection_task_buffer_ != nullptr) {
+            heap_caps_free(audio_detection_task_buffer_);
+            audio_detection_task_buffer_ = nullptr;
+        }
+        afe_config_free(afe_config);
+        return false;
+    }
+
+    afe_data_ = afe_iface_->create_from_config(afe_config);
+    afe_config_free(afe_config);
+    if (afe_data_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create AFE data");
+        heap_caps_free(audio_detection_task_stack_);
+        audio_detection_task_stack_ = nullptr;
+        heap_caps_free(audio_detection_task_buffer_);
+        audio_detection_task_buffer_ = nullptr;
+        return false;
+    }
+
+    audio_detection_task_ = xTaskCreateStatic([](void* arg) {
         auto this_ = (AfeWakeWord*)arg;
         this_->AudioDetectionTask();
         vTaskDelete(NULL);
-    }, "audio_detection", 4096, this, 3, nullptr);
+    }, "audio_detection", kAudioDetectionTaskStackSize, this, 3,
+       audio_detection_task_stack_, audio_detection_task_buffer_);
+    if (audio_detection_task_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create audio detection task");
+        heap_caps_free(audio_detection_task_stack_);
+        audio_detection_task_stack_ = nullptr;
+        heap_caps_free(audio_detection_task_buffer_);
+        audio_detection_task_buffer_ = nullptr;
+        afe_iface_->destroy(afe_data_);
+        afe_data_ = nullptr;
+        return false;
+    }
 
     return true;
 }
@@ -95,6 +167,9 @@ void AfeWakeWord::OnWakeWordDetected(std::function<void(const std::string& wake_
 }
 
 void AfeWakeWord::Start() {
+    if (afe_data_ == nullptr || audio_detection_task_ == nullptr) {
+        return;
+    }
     xEventGroupSetBits(event_group_, DETECTION_RUNNING_EVENT);
 }
 

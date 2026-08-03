@@ -65,7 +65,17 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
 #endif
 
     afe_iface_ = esp_afe_handle_from_config(afe_config);
+    if (afe_iface_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to get AFE interface");
+        return;
+    }
+
     afe_data_ = afe_iface_->create_from_config(afe_config);
+    if (afe_data_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create AFE data");
+        afe_iface_ = nullptr;
+        return;
+    }
     
     xTaskCreate([](void* arg) {
         auto this_ = (AfeAudioProcessor*)arg;
@@ -119,6 +129,11 @@ void AfeAudioProcessor::OnVadStateChange(std::function<void(bool speaking)> call
 }
 
 void AfeAudioProcessor::AudioProcessorTask() {
+    if (afe_iface_ == nullptr || afe_data_ == nullptr) {
+        ESP_LOGE(TAG, "Audio processor task started without AFE data");
+        return;
+    }
+
     auto fetch_size = afe_iface_->get_fetch_chunksize(afe_data_);
     auto feed_size = afe_iface_->get_feed_chunksize(afe_data_);
     ESP_LOGI(TAG, "Audio communication task started, feed size: %d fetch size: %d",
@@ -173,6 +188,11 @@ void AfeAudioProcessor::AudioProcessorTask() {
 }
 
 void AfeAudioProcessor::EnableDeviceAec(bool enable) {
+    if (afe_iface_ == nullptr || afe_data_ == nullptr) {
+        ESP_LOGW(TAG, "AFE is not initialized");
+        return;
+    }
+
     if (enable) {
 #if CONFIG_USE_DEVICE_AEC
         afe_iface_->disable_vad(afe_data_);

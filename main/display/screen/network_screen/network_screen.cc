@@ -2,6 +2,7 @@
 #include "i18n.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -883,20 +884,72 @@ struct SavedActionCtx {
     int index;
 };
 
+enum class SavedActionType {
+    SetDefault,
+    Remove,
+    Clear,
+};
+
+struct SavedActionTaskCtx {
+    SavedActionType type;
+    int index;
+};
+
+std::atomic_bool s_saved_action_in_progress{false};
+
+void saved_action_task(void* arg) {
+    auto* ctx = static_cast<SavedActionTaskCtx*>(arg);
+
+    switch (ctx->type) {
+        case SavedActionType::SetDefault:
+            SsidManager::GetInstance().SetDefaultSsid(ctx->index);
+            post_status(I18n::T("已设置为默认网络"), kColorSuccess);
+            break;
+        case SavedActionType::Remove:
+            SsidManager::GetInstance().RemoveSsid(ctx->index);
+            post_status(I18n::T("已删除该网络"), kColorSuccess);
+            break;
+        case SavedActionType::Clear:
+            SsidManager::GetInstance().Clear();
+            post_status(I18n::T("已清空所有已保存网络"), kColorSuccess);
+            break;
+    }
+
+    refresh_saved_list();
+    s_saved_action_in_progress.store(false);
+    delete ctx;
+    vTaskDelete(nullptr);
+}
+
+void schedule_saved_action(SavedActionType type, int index, const char* pending_text) {
+    bool expected = false;
+    if (!s_saved_action_in_progress.compare_exchange_strong(expected, true)) {
+        post_status(I18n::T("正在处理已保存网络…"), kColorScanning);
+        return;
+    }
+
+    post_status(pending_text, kColorScanning);
+
+    auto* ctx = new SavedActionTaskCtx{type, index};
+    if (xTaskCreate(saved_action_task, "saved_wifi_nvs", 4096, ctx, 4, nullptr) != pdPASS) {
+        delete ctx;
+        s_saved_action_in_progress.store(false);
+        post_status(I18n::T("无法启动保存网络任务"), kColorError);
+    }
+}
+
 void on_saved_set_default(lv_event_t* e) {
     auto* ctx = static_cast<SavedActionCtx*>(lv_event_get_user_data(e));
     if (ctx == nullptr) return;
-    SsidManager::GetInstance().SetDefaultSsid(ctx->index);
-    post_status(I18n::T("已设置为默认网络"), kColorSuccess);
-    refresh_saved_list();
+    schedule_saved_action(SavedActionType::SetDefault, ctx->index,
+                          I18n::T("正在设置默认网络…"));
 }
 
 void on_saved_remove(lv_event_t* e) {
     auto* ctx = static_cast<SavedActionCtx*>(lv_event_get_user_data(e));
     if (ctx == nullptr) return;
-    SsidManager::GetInstance().RemoveSsid(ctx->index);
-    post_status(I18n::T("已删除该网络"), kColorSuccess);
-    refresh_saved_list();
+    schedule_saved_action(SavedActionType::Remove, ctx->index,
+                          I18n::T("正在删除该网络…"));
 }
 
 void on_saved_btn_delete(lv_event_t* e) {
@@ -904,9 +957,8 @@ void on_saved_btn_delete(lv_event_t* e) {
 }
 
 void on_clear_all_saved(lv_event_t* /*e*/) {
-    SsidManager::GetInstance().Clear();
-    post_status(I18n::T("已清空所有已保存网络"), kColorSuccess);
-    refresh_saved_list();
+    schedule_saved_action(SavedActionType::Clear, -1,
+                          I18n::T("正在清空已保存网络…"));
 }
 
 void rebuild_saved_list_now() {

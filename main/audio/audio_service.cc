@@ -8,10 +8,13 @@
 #include "processors/no_audio_processor.h"
 #endif
 
-#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4 || CONFIG_IDF_TARGET_ESP32S31
+#if CONFIG_USE_AFE_WAKE_WORD
 #include "wake_words/afe_wake_word.h"
+#endif
+#if CONFIG_USE_CUSTOM_WAKE_WORD
 #include "wake_words/custom_wake_word.h"
-#else
+#endif
+#if CONFIG_USE_ESP_WAKE_WORD
 #include "wake_words/esp_wake_word.h"
 #endif
 
@@ -448,10 +451,17 @@ void AudioService::EncodeWakeWord() {
 }
 
 const std::string& AudioService::GetLastWakeWord() const {
+    static const std::string empty_wake_word;
+    if (!wake_word_) {
+        return empty_wake_word;
+    }
     return wake_word_->GetLastDetectedWakeWord();
 }
 
 std::unique_ptr<AudioStreamPacket> AudioService::PopWakeWordPacket() {
+    if (!wake_word_) {
+        return nullptr;
+    }
     auto packet = std::make_unique<AudioStreamPacket>();
     if (wake_word_->GetWakeWordOpus(packet->payload)) {
         return packet;
@@ -487,6 +497,11 @@ void AudioService::EnableVoiceProcessing(bool enable) {
         if (!audio_processor_initialized_) {
             audio_processor_->Initialize(codec_, OPUS_FRAME_DURATION_MS, models_list_);
             audio_processor_initialized_ = true;
+        }
+
+        if (audio_processor_->GetFeedSize() == 0) {
+            ESP_LOGE(TAG, "Audio processor is unavailable");
+            return;
         }
 
         /* We should make sure no audio is playing */
@@ -659,20 +674,26 @@ void AudioService::CheckAndUpdateAudioPowerState() {
 void AudioService::SetModelsList(srmodel_list_t* models_list) {
     models_list_ = models_list;
 
-#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4 || CONFIG_IDF_TARGET_ESP32S31
+#if CONFIG_USE_CUSTOM_WAKE_WORD
     if (esp_srmodel_filter(models_list_, ESP_MN_PREFIX, NULL) != nullptr) {
         wake_word_ = std::make_unique<CustomWakeWord>();
-    } else if (esp_srmodel_filter(models_list_, ESP_WN_PREFIX, NULL) != nullptr) {
+    } else {
+        wake_word_ = nullptr;
+    }
+#elif CONFIG_USE_AFE_WAKE_WORD
+    if (esp_srmodel_filter(models_list_, ESP_WN_PREFIX, NULL) != nullptr) {
         wake_word_ = std::make_unique<AfeWakeWord>();
     } else {
         wake_word_ = nullptr;
     }
-#else
+#elif CONFIG_USE_ESP_WAKE_WORD
     if (esp_srmodel_filter(models_list_, ESP_WN_PREFIX, NULL) != nullptr) {
         wake_word_ = std::make_unique<EspWakeWord>();
     } else {
         wake_word_ = nullptr;
     }
+#else
+    wake_word_ = nullptr;
 #endif
 
     if (wake_word_) {
@@ -685,7 +706,7 @@ void AudioService::SetModelsList(srmodel_list_t* models_list) {
 }
 
 bool AudioService::IsAfeWakeWord() {
-#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4 || CONFIG_IDF_TARGET_ESP32S31
+#if CONFIG_USE_AFE_WAKE_WORD
     return wake_word_ != nullptr && dynamic_cast<AfeWakeWord*>(wake_word_.get()) != nullptr;
 #else
     return false;
