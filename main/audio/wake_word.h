@@ -17,6 +17,7 @@ public:
     virtual void OnWakeWordDetected(std::function<void(const std::string& wake_word)> callback) = 0;
     virtual void Start() = 0;
     virtual void Stop() = 0;
+    virtual void ReleaseResources() = 0;
     virtual size_t GetFeedSize() = 0;
     virtual void EncodeWakeWordData() = 0;
     virtual bool GetWakeWordOpus(std::vector<uint8_t>& opus) = 0;

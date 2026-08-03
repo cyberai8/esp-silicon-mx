@@ -18,6 +18,11 @@ CustomWakeWord::CustomWakeWord()
 }
 
 CustomWakeWord::~CustomWakeWord() {
+    ReleaseResources();
+}
+
+void CustomWakeWord::ReleaseResources() {
+    running_ = false;
     if (multinet_model_data_ != nullptr && multinet_ != nullptr) {
         multinet_->destroy(multinet_model_data_);
         multinet_model_data_ = nullptr;
@@ -32,8 +37,16 @@ CustomWakeWord::~CustomWakeWord() {
     }
 
     if (models_ != nullptr) {
+        if (owns_model_list_) {
         esp_srmodel_deinit(models_);
+        }
+        models_ = nullptr;
     }
+    owns_model_list_ = false;
+    mn_name_ = nullptr;
+    commands_.clear();
+    wake_word_pcm_.clear();
+    wake_word_opus_.clear();
 }
 
 void CustomWakeWord::ParseWakenetModelConfig() {
@@ -91,12 +104,14 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
     if (models_list == nullptr) {
         language_ = "cn";
         models_ = esp_srmodel_init("model");
+        owns_model_list_ = true;
 #ifdef CONFIG_CUSTOM_WAKE_WORD
         threshold_ = CONFIG_CUSTOM_WAKE_WORD_THRESHOLD / 100.0f;
         commands_.push_back({CONFIG_CUSTOM_WAKE_WORD, CONFIG_CUSTOM_WAKE_WORD_DISPLAY, "wake"});
 #endif
     } else {
         models_ = models_list;
+        owns_model_list_ = false;
         ParseWakenetModelConfig();
     }
 

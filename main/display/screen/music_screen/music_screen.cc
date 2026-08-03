@@ -7,9 +7,12 @@
 #include <vector>
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "application.h"
+#include "board.h"
 #include "config.h"
 #if BOARD_HAS_EXTERNAL_BT
 #include "SimpleUart.hpp"
@@ -97,6 +100,9 @@ struct MusicUi {
 MusicUi s_ui;
 bool s_screen_active = false;
 std::string s_rx_buffer;
+#if !BOARD_HAS_EXTERNAL_BT
+bool s_restore_wake_word_after_native_bt = false;
+#endif
 
 void sync_album_eaf(bool playing) {
     if (s_ui.album_eaf == nullptr) {
@@ -678,6 +684,15 @@ void MusicScreen::LifecycleCallback(screen_lifecycle_event_t event) {
 #else
         ESP_LOGI(TAG, "load: music_screen -> native BT speaker mode");
         s_rx_buffer.clear();
+        auto& audio_service = Application::GetInstance().GetAudioService();
+        s_restore_wake_word_after_native_bt = audio_service.ReleaseWakeWordDetection();
+        if (auto* codec = Board::GetInstance().GetAudioCodec()) {
+            codec->EnableInput(false);
+        }
+        vTaskDelay(pdMS_TO_TICKS(120));
+        ESP_LOGI(TAG, "after releasing wake word: internal free=%u largest=%u",
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
         auto& bt = NativeBluetoothAudio::GetInstance();
         bt.SetStateCallback(on_native_bt_state_changed);
         if (bt.SetMode(NativeBluetoothAudio::Mode::kSpeakerSink)) {
@@ -700,8 +715,14 @@ void MusicScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         // 切回模式 1 同样需要 700ms 间隔，放后台 task 异步执行。
         xTaskCreate(switch_to_mode1_task, "mus_mode1", 4096, nullptr, 5, nullptr);
 #else
-        ESP_LOGI(TAG, "unload: music_screen -> native BT remains available");
-        NativeBluetoothAudio::GetInstance().SetStateCallback(nullptr);
+        ESP_LOGI(TAG, "unload: music_screen -> native BT shutdown");
+        auto& bt = NativeBluetoothAudio::GetInstance();
+        bt.SetStateCallback(nullptr);
+        bt.Shutdown();
+        if (s_restore_wake_word_after_native_bt) {
+            Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
+            s_restore_wake_word_after_native_bt = false;
+        }
         s_screen_active = false;
         s_rx_buffer.clear();
 #endif

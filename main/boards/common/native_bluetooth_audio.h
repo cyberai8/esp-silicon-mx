@@ -25,6 +25,7 @@ public:
     bool IsSupported() const;
     bool Initialize();
     bool SetMode(Mode mode);
+    void Shutdown();
     bool SendCommand(Command command);
     void SetStateCallback(StateCallback callback);
     bool IsConnected() const;

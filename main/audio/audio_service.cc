@@ -509,6 +509,21 @@ void AudioService::EnableWakeWordDetection(bool enable) {
     }
 }
 
+bool AudioService::ReleaseWakeWordDetection() {
+    bool was_running = IsWakeWordRunning();
+    if (!wake_word_) {
+        return false;
+    }
+
+    EnableWakeWordDetection(false);
+    vTaskDelay(pdMS_TO_TICKS(80));
+    wake_word_->ReleaseResources();
+    wake_word_initialized_ = false;
+    xEventGroupClearBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
+    ESP_LOGI(TAG, "Wake word resources released");
+    return was_running;
+}
+
 void AudioService::EnableVoiceProcessing(bool enable) {
     ESP_LOGD(TAG, "%s voice processing", enable ? "Enabling" : "Disabling");
     if (enable) {

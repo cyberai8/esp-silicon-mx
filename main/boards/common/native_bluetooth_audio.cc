@@ -227,12 +227,10 @@ bool NativeBluetoothAudio::Initialize() {
         return true;
     }
 
-    s_state.pcm_queue = xQueueCreate(kPcmQueueDepth, sizeof(PcmBlock));
-    if (s_state.pcm_queue == nullptr) {
-        ESP_LOGE(TAG, "Failed to create PCM queue");
-        return false;
-    }
-    xTaskCreate(pcm_output_task, "bt_pcm_out", 4096, nullptr, 5, &s_state.pcm_task);
+    ESP_LOGI(TAG, "BT init heap: internal free=%u largest=%u spiram free=%u",
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
 
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     esp_err_t err = esp_bt_controller_init(&bt_cfg);
@@ -263,6 +261,19 @@ bool NativeBluetoothAudio::Initialize() {
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_a2d_sink_init());
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_a2d_sink_register_data_callback(a2d_data_cb));
 
+    s_state.pcm_queue = xQueueCreate(kPcmQueueDepth, sizeof(PcmBlock));
+    if (s_state.pcm_queue == nullptr) {
+        ESP_LOGE(TAG, "Failed to create PCM queue");
+        return false;
+    }
+    if (xTaskCreate(pcm_output_task, "bt_pcm_out", 4096, nullptr, 5,
+                    &s_state.pcm_task) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create PCM output task");
+        vQueueDelete(s_state.pcm_queue);
+        s_state.pcm_queue = nullptr;
+        return false;
+    }
+
     s_state.initialized = true;
     ESP_LOGI(TAG, "Native Bluetooth A2DP sink initialized as %s", kDeviceName);
     return true;
@@ -289,6 +300,41 @@ bool NativeBluetoothAudio::SetMode(Mode mode) {
 #else
     (void)mode;
     return false;
+#endif
+}
+
+void NativeBluetoothAudio::Shutdown() {
+#if CONFIG_BT_ENABLED
+    if (!s_state.initialized) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Shutting down native Bluetooth audio");
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE,
+                                                           ESP_BT_NON_DISCOVERABLE));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_a2d_sink_deinit());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_avrc_ct_deinit());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bluedroid_disable());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bluedroid_deinit());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_controller_disable());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_controller_deinit());
+
+    if (s_state.pcm_task != nullptr) {
+        vTaskDelete(s_state.pcm_task);
+        s_state.pcm_task = nullptr;
+    }
+    if (s_state.pcm_queue != nullptr) {
+        PcmBlock block;
+        while (xQueueReceive(s_state.pcm_queue, &block, 0) == pdTRUE) {
+            free_pcm_block(block);
+        }
+        vQueueDelete(s_state.pcm_queue);
+        s_state.pcm_queue = nullptr;
+    }
+
+    s_state.initialized = false;
+    s_state.connected = false;
+    s_state.playing = false;
 #endif
 }
 

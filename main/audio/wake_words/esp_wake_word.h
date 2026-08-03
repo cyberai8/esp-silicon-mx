@@ -23,6 +23,7 @@ public:
     void OnWakeWordDetected(std::function<void(const std::string& wake_word)> callback);
     void Start();
     void Stop();
+    void ReleaseResources();
     size_t GetFeedSize();
     void EncodeWakeWordData();
     bool GetWakeWordOpus(std::vector<uint8_t>& opus);
@@ -34,6 +35,7 @@ private:
     srmodel_list_t *wakenet_model_ = nullptr;
     AudioCodec* codec_ = nullptr;
     std::atomic<bool> running_ = false;
+    bool owns_model_list_ = false;
 
     std::function<void(const std::string& wake_word)> wake_word_detected_callback_;
     std::string last_detected_wake_word_;

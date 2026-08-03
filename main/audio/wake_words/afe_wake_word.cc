@@ -22,6 +22,11 @@ AfeWakeWord::AfeWakeWord()
 }
 
 AfeWakeWord::~AfeWakeWord() {
+    ReleaseResources();
+    vEventGroupDelete(event_group_);
+}
+
+void AfeWakeWord::ReleaseResources() {
     if (audio_detection_task_ != nullptr) {
         vTaskDelete(audio_detection_task_);
         audio_detection_task_ = nullptr;
@@ -49,10 +54,16 @@ AfeWakeWord::~AfeWakeWord() {
     }
 
     if (models_ != nullptr) {
+        if (owns_model_list_) {
         esp_srmodel_deinit(models_);
+        }
+        models_ = nullptr;
     }
-
-    vEventGroupDelete(event_group_);
+    owns_model_list_ = false;
+    wakenet_model_ = nullptr;
+    wake_words_.clear();
+    wake_word_pcm_.clear();
+    wake_word_opus_.clear();
 }
 
 bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
@@ -61,8 +72,10 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
 
     if (models_list == nullptr) {
         models_ = esp_srmodel_init("model");
+        owns_model_list_ = true;
     } else {
         models_ = models_list;
+        owns_model_list_ = false;
     }
 
     if (models_ == nullptr || models_->num == -1) {

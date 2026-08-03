@@ -8,19 +8,35 @@ EspWakeWord::EspWakeWord() {
 }
 
 EspWakeWord::~EspWakeWord() {
+    ReleaseResources();
+}
+
+void EspWakeWord::ReleaseResources() {
+    running_ = false;
     if (wakenet_data_ != nullptr) {
         wakenet_iface_->destroy(wakenet_data_);
+        wakenet_data_ = nullptr;
+    }
+    wakenet_iface_ = nullptr;
+    if (owns_model_list_ && wakenet_model_ != nullptr) {
         esp_srmodel_deinit(wakenet_model_);
     }
+    wakenet_model_ = nullptr;
+    owns_model_list_ = false;
 }
 
 bool EspWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     codec_ = codec;
+    if (wakenet_data_ != nullptr) {
+        return true;
+    }
 
     if (models_list == nullptr) {
         wakenet_model_ = esp_srmodel_init("model");
+        owns_model_list_ = true;
     } else {
         wakenet_model_ = models_list;
+        owns_model_list_ = false;
     }
 
     if (wakenet_model_ == nullptr || wakenet_model_->num == -1) {
@@ -49,7 +65,7 @@ bool EspWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     wakenet_data_ = wakenet_iface_->create(model_name, DET_MODE_95);
     if (wakenet_data_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create WakeNet data for model: %s", model_name);
-        wakenet_iface_ = nullptr;
+        ReleaseResources();
         return false;
     }
 
