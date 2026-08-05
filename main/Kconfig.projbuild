@@ -124,6 +124,13 @@ config BOARD_TYPE_ESP32_S31_KORVO_1
     help
         Espressif ESP32-S31-Korvo-1：片上 Wi-Fi/BT、RGB 800x480、ES8389、GT1151。
 
+config BOARD_TYPE_ESP_VOCAT
+    bool "ESP-VoCat (esp-vocat)"
+    default y if IDF_TARGET_ESP32S3
+    depends on IDF_TARGET_ESP32S3
+    help
+        ESP-VoCat 喵伴：ESP32-S3、360x360 ST77916 QSPI 圆屏、CST816S 触摸、ES8311/ES7210、BQ27220、ML307。
+
 choice DISPLAY_STYLE
     prompt "Select display style"
     default USE_DEFAULT_MESSAGE_STYLE

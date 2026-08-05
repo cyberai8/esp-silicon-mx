@@ -1,0 +1,27 @@
+{
+    "manufacturer": "esp-college",
+    "type": "esp-vocat",
+    "target": "esp32s3",
+    "preview": true,
+    "builds": [
+        {
+            "name": "esp-vocat",
+            "sdkconfig_append": [
+                "CONFIG_BOARD_TYPE_ESP_VOCAT=y",
+                "CONFIG_PARTITION_TABLE_CUSTOM=y",
+                "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/v1/16m_claw4_s31.csv\"",
+                "CONFIG_PARTITION_TABLE_OFFSET=0x9000",
+                "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y",
+                "CONFIG_SPIRAM=y",
+                "CONFIG_SPIRAM_MODE_OCT=y",
+                "CONFIG_SPIRAM_SPEED_80M=y",
+                "CONFIG_MMAP_FILE_NAME_LENGTH=32",
+                "CONFIG_FLASH_EXPRESSION_ASSETS=y",
+                "CONFIG_CODEC_ES8311_SUPPORT=y",
+                "CONFIG_CODEC_ES7210_SUPPORT=y",
+                "CONFIG_BT_ENABLED=n",
+                "CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE=n"
+            ]
+        }
+    ]
+}

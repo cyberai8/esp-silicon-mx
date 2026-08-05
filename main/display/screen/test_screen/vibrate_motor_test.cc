@@ -1,4 +1,5 @@
 #include "vibrate_motor_test.h"
+#include "config.h"
 #include "i18n.h"
 
 #include "esp_log.h"
@@ -12,7 +13,12 @@ namespace {
 constexpr const char* TAG = "VibrateMotorTest";
 constexpr uint32_t kConfirmDelayMs = 1000;
 
-constexpr gpio_num_t       kVibrateGpio = GPIO_NUM_22;
+#ifndef VIBRATE_MOTOR_GPIO
+#define VIBRATE_MOTOR_GPIO GPIO_NUM_NC
+#endif
+
+constexpr gpio_num_t       kVibrateGpio = VIBRATE_MOTOR_GPIO;
+constexpr bool             kHasVibrateMotor = kVibrateGpio != GPIO_NUM_NC;
 constexpr ledc_mode_t      kLedcMode    = LEDC_LOW_SPEED_MODE;
 constexpr ledc_timer_t     kLedcTimer   = LEDC_TIMER_1;
 constexpr ledc_channel_t   kLedcChannel = LEDC_CHANNEL_1;
@@ -50,6 +56,10 @@ void ScheduleConfirmDialog() {
 }
 
 void LedcInitOnce() {
+    if (!kHasVibrateMotor) {
+        ESP_LOGW(TAG, "vibrate motor not available on this board");
+        return;
+    }
     if (s_ledc_inited) {
         return;
     }
@@ -119,6 +129,12 @@ namespace VibrateMotorTest {
 void BuildRow(lv_obj_t* list) {
     lv_obj_t* ctrl = nullptr;
     TestUiCreateRowShell(list, I18n::T("震动马达"), &s_status_icon, &ctrl);
+    if (!kHasVibrateMotor) {
+        lv_obj_t* label = TestUiCreateValueLabel(ctrl);
+        lv_label_set_text(label, I18n::T("不支持"));
+        TestUiUpdateStatus(s_status_icon, false);
+        return;
+    }
     TestUiCreateSwitch(ctrl, OnSwitchChanged, nullptr);
 }
 

@@ -32,6 +32,8 @@ constexpr const char* kDeviceName = "Xingzhi-S31";
 constexpr uint32_t kPcmQueueDepth = 8;
 constexpr size_t kMinInternalFreeBeforeBtInit = 50000;
 constexpr size_t kMinLargestBlockBeforeBtInit = 20000;
+constexpr uint32_t kReconnectInitialDelayMs = 1500;
+constexpr uint32_t kReconnectIntervalMs = 5000;
 
 struct PcmBlock {
     uint8_t* data = nullptr;
@@ -45,8 +47,15 @@ struct BtState {
     bool a2dp_initialized = false;
     bool connected = false;
     bool playing = false;
+#if CONFIG_BT_ENABLED
     bool has_remote_bda = false;
     esp_bd_addr_t remote_bda = {0};
+    bool reconnect_enabled = false;
+    bool has_last_remote_bda = false;
+    esp_bd_addr_t last_remote_bda = {0};
+#else
+    bool reconnect_enabled = false;
+#endif
     int sample_rate = 48000;
     int channels = 2;
     uint8_t avrc_tl = 0;
@@ -57,6 +66,7 @@ struct BtState {
     std::string album;
     QueueHandle_t pcm_queue = nullptr;
     TaskHandle_t pcm_task = nullptr;
+    TaskHandle_t reconnect_task = nullptr;
 };
 
 BtState s_state;
@@ -111,6 +121,28 @@ void format_bda(const esp_bd_addr_t bda, char* out, size_t out_size) {
     }
     std::snprintf(out, out_size, "%02x:%02x:%02x:%02x:%02x:%02x",
                   bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
+}
+
+bool bda_is_valid(const esp_bd_addr_t bda) {
+    if (bda == nullptr) {
+        return false;
+    }
+    for (int i = 0; i < ESP_BD_ADDR_LEN; ++i) {
+        if (bda[i] != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void set_scan_mode(esp_bt_connection_mode_t connectable,
+                   esp_bt_discovery_mode_t discoverable,
+                   const char* reason) {
+    esp_err_t err = esp_bt_gap_set_scan_mode(connectable, discoverable);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Set scan mode failed (%s): %s",
+                 reason != nullptr ? reason : "bt", esp_err_to_name(err));
+    }
 }
 
 void keep_acl_active(const esp_bd_addr_t bda, const char* reason) {
@@ -171,7 +203,54 @@ void drain_pcm_queue() {
     }
 }
 
+void reconnect_task(void* /*arg*/) {
+    vTaskDelay(pdMS_TO_TICKS(kReconnectInitialDelayMs));
+
+    while (s_state.reconnect_enabled) {
+        if (s_state.output_active && !s_state.connected &&
+            s_state.has_last_remote_bda &&
+            s_state.a2dp_initialized) {
+            char bda_text[18];
+            format_bda(s_state.last_remote_bda, bda_text, sizeof(bda_text));
+            set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE,
+                          "reconnect");
+            esp_err_t err = esp_a2d_sink_connect(s_state.last_remote_bda);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "A2DP reconnect requested: peer=%s", bda_text);
+            } else {
+                ESP_LOGW(TAG, "A2DP reconnect request failed: peer=%s err=%s",
+                         bda_text, esp_err_to_name(err));
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(kReconnectIntervalMs));
+    }
+
+    s_state.reconnect_task = nullptr;
+    vTaskDelete(nullptr);
+}
+
+void start_reconnect_task() {
+    if (!s_state.initialized || !s_state.a2dp_initialized) {
+        return;
+    }
+    s_state.reconnect_enabled = true;
+    if (s_state.reconnect_task != nullptr) {
+        return;
+    }
+    if (xTaskCreate(reconnect_task, "bt_reconnect", 3072, nullptr, 4,
+                    &s_state.reconnect_task) != pdPASS) {
+        s_state.reconnect_task = nullptr;
+        ESP_LOGW(TAG, "Failed to create A2DP reconnect task");
+    }
+}
+
+void stop_reconnect_task() {
+    s_state.reconnect_enabled = false;
+}
+
 void cleanup_bt_stack() {
+    stop_reconnect_task();
+    vTaskDelay(pdMS_TO_TICKS(20));
     delete_pcm_output();
 
     if (s_state.a2dp_initialized) {
@@ -207,6 +286,8 @@ void cleanup_bt_stack() {
     s_state.playing = false;
     s_state.has_remote_bda = false;
     std::memset(s_state.remote_bda, 0, sizeof(s_state.remote_bda));
+    s_state.has_last_remote_bda = false;
+    std::memset(s_state.last_remote_bda, 0, sizeof(s_state.last_remote_bda));
     s_state.title.clear();
     s_state.artist.clear();
     s_state.album.clear();
@@ -357,11 +438,23 @@ void a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t* param) {
                 std::memcpy(s_state.remote_bda, param->conn_stat.remote_bda,
                             sizeof(s_state.remote_bda));
                 s_state.has_remote_bda = true;
+                std::memcpy(s_state.last_remote_bda, param->conn_stat.remote_bda,
+                            sizeof(s_state.last_remote_bda));
+                s_state.has_last_remote_bda = true;
+                stop_reconnect_task();
                 keep_acl_active(s_state.remote_bda, "a2dp connected");
             } else {
+                if (bda_is_valid(param->conn_stat.remote_bda)) {
+                    std::memcpy(s_state.last_remote_bda, param->conn_stat.remote_bda,
+                                sizeof(s_state.last_remote_bda));
+                    s_state.has_last_remote_bda = true;
+                }
                 s_state.playing = false;
                 s_state.has_remote_bda = false;
                 std::memset(s_state.remote_bda, 0, sizeof(s_state.remote_bda));
+                if (s_state.output_active) {
+                    start_reconnect_task();
+                }
             }
             ESP_LOGI(TAG, "A2DP %s", s_state.connected ? "connected" : "disconnected");
             notify_state_changed();
@@ -624,13 +717,17 @@ bool NativeBluetoothAudio::SetMode(Mode mode) {
     if (mode == Mode::kSpeakerSink) {
         ESP_LOGI(TAG, "Set native BT speaker/sink mode");
         s_state.output_active = true;
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE));
+        set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE,
+                      "speaker mode");
+        start_reconnect_task();
         return true;
     }
 
     ESP_LOGW(TAG, "Native BT audio-source mode UI is available, A2DP source stream is not wired yet");
     s_state.output_active = false;
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE));
+    stop_reconnect_task();
+    set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE,
+                  "source mode");
     return true;
 #else
     (void)mode;
@@ -647,8 +744,9 @@ void NativeBluetoothAudio::Suspend() {
     ESP_LOGI(TAG, "Suspending native Bluetooth audio");
     s_state.output_active = false;
     s_state.playing = false;
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE,
-                                                           ESP_BT_NON_DISCOVERABLE));
+    stop_reconnect_task();
+    set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE,
+                  "suspend");
     drain_pcm_queue();
 #endif
 }
@@ -661,8 +759,9 @@ void NativeBluetoothAudio::Shutdown() {
     }
 
     ESP_LOGI(TAG, "Shutting down native Bluetooth audio");
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE,
-                                                           ESP_BT_NON_DISCOVERABLE));
+    stop_reconnect_task();
+    set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE,
+                  "shutdown");
     cleanup_bt_stack();
 #endif
 }

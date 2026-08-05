@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -101,6 +102,9 @@ struct MusicUi {
     lv_obj_t* lbl_lyric[kLyricLineCount] = {nullptr, nullptr, nullptr};
     lv_obj_t* img_play_icon = nullptr;
     lv_obj_t* album_eaf = nullptr;
+#if !BOARD_HAS_EXTERNAL_BT
+    lv_timer_t* native_bt_ui_timer = nullptr;
+#endif
     // 进入界面时蓝牙端通常还没在播放，默认按钮显示"▶ 播放"，
     // 用户点击后才切到"❚❚ 暂停"图标。
     bool playing = false;
@@ -112,6 +116,19 @@ std::string s_rx_buffer;
 #if !BOARD_HAS_EXTERNAL_BT
 bool s_restore_wake_word_after_native_bt = false;
 bool s_restart_audio_service_after_native_bt = false;
+struct NativeBtUiCache {
+    std::string title;
+    std::string artist;
+    std::string album;
+    std::string status;
+    bool track_dirty = false;
+    bool status_dirty = false;
+    bool play_dirty = false;
+    bool connected = false;
+    bool playing = false;
+};
+std::mutex s_native_bt_ui_mutex;
+NativeBtUiCache s_native_bt_ui_cache;
 #endif
 void sync_album_eaf(bool playing) {
     if (s_ui.album_eaf == nullptr) {
@@ -143,31 +160,40 @@ struct AsyncTrackInfoMsg {
     char album[128];
 };
 
-void async_set_track_info(void* user_data) {
-    auto* msg = static_cast<AsyncTrackInfoMsg*>(user_data);
-    if (s_screen_active) {
-        if (s_ui.lbl_song != nullptr && msg->title[0] != '\0') {
-            lv_label_set_text(s_ui.lbl_song, msg->title);
-        }
-        if (s_ui.lbl_artist != nullptr) {
-            lv_label_set_text(s_ui.lbl_artist, msg->artist);
-            if (msg->artist[0] == '\0') {
-                lv_obj_add_flag(s_ui.lbl_artist, LV_OBJ_FLAG_HIDDEN);
-            } else {
-                lv_obj_remove_flag(s_ui.lbl_artist, LV_OBJ_FLAG_HIDDEN);
-                screen_make_input_passive(s_ui.lbl_artist);
-            }
-        }
-        if (s_ui.lbl_album != nullptr) {
-            lv_label_set_text(s_ui.lbl_album, msg->album);
-            if (msg->album[0] == '\0') {
-                lv_obj_add_flag(s_ui.lbl_album, LV_OBJ_FLAG_HIDDEN);
-            } else {
-                lv_obj_remove_flag(s_ui.lbl_album, LV_OBJ_FLAG_HIDDEN);
-                screen_make_input_passive(s_ui.lbl_album);
-            }
+void apply_track_info_to_ui(const char* title, const char* artist, const char* album) {
+    if (!s_screen_active) {
+        return;
+    }
+    const char* safe_title = title != nullptr ? title : "";
+    const char* safe_artist = artist != nullptr ? artist : "";
+    const char* safe_album = album != nullptr ? album : "";
+
+    if (s_ui.lbl_song != nullptr && safe_title[0] != '\0') {
+        lv_label_set_text(s_ui.lbl_song, safe_title);
+    }
+    if (s_ui.lbl_artist != nullptr) {
+        lv_label_set_text(s_ui.lbl_artist, safe_artist);
+        if (safe_artist[0] == '\0') {
+            lv_obj_add_flag(s_ui.lbl_artist, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(s_ui.lbl_artist, LV_OBJ_FLAG_HIDDEN);
+            screen_make_input_passive(s_ui.lbl_artist);
         }
     }
+    if (s_ui.lbl_album != nullptr) {
+        lv_label_set_text(s_ui.lbl_album, safe_album);
+        if (safe_album[0] == '\0') {
+            lv_obj_add_flag(s_ui.lbl_album, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(s_ui.lbl_album, LV_OBJ_FLAG_HIDDEN);
+            screen_make_input_passive(s_ui.lbl_album);
+        }
+    }
+}
+
+void async_set_track_info(void* user_data) {
+    auto* msg = static_cast<AsyncTrackInfoMsg*>(user_data);
+    apply_track_info_to_ui(msg->title, msg->artist, msg->album);
     delete msg;
 }
 
@@ -234,19 +260,24 @@ struct AsyncPlayStateMsg {
     bool playing;
 };
 
+void apply_play_state_to_ui(bool playing) {
+    if (!s_screen_active || s_ui.img_play_icon == nullptr) {
+        return;
+    }
+    s_ui.playing = playing;
+    lv_image_set_src(s_ui.img_play_icon,
+                     playing ? "A:ic_s_player_pause.spng"
+                             : "A:ic_s_player_play.spng");
+    sync_album_eaf(playing);
+}
+
 void async_set_play_icon(void* user_data) {
     auto* msg = static_cast<AsyncPlayStateMsg*>(user_data);
-    if (s_screen_active && s_ui.img_play_icon != nullptr) {
-        s_ui.playing = msg->playing;
-        lv_image_set_src(s_ui.img_play_icon,
-                         msg->playing ? "A:ic_s_player_pause.spng"
-                                      : "A:ic_s_player_play.spng");
-        sync_album_eaf(msg->playing);
-    }
+    apply_play_state_to_ui(msg->playing);
     delete msg;
 }
 
-void post_play_state(bool playing) {
+[[maybe_unused]] void post_play_state(bool playing) {
     if (!s_screen_active) {
         return;
     }
@@ -459,16 +490,68 @@ bool native_bt_heap_ready() {
            largest >= kNativeBtMinLargestBlock;
 }
 
+void queue_native_bt_track_info(const std::string& title,
+                                const std::string& artist,
+                                const std::string& album) {
+    std::lock_guard<std::mutex> lock(s_native_bt_ui_mutex);
+    s_native_bt_ui_cache.title = title.empty() ? I18n::T("蓝牙音乐") : title;
+    s_native_bt_ui_cache.artist = artist;
+    s_native_bt_ui_cache.album = album;
+    s_native_bt_ui_cache.track_dirty = true;
+}
+
+void queue_native_bt_state(bool connected, bool playing) {
+    std::lock_guard<std::mutex> lock(s_native_bt_ui_mutex);
+    s_native_bt_ui_cache.connected = connected;
+    s_native_bt_ui_cache.playing = playing;
+    s_native_bt_ui_cache.play_dirty = true;
+    if (!connected) {
+        s_native_bt_ui_cache.status = I18n::T("等待手机连接本机蓝牙");
+    } else if (playing) {
+        s_native_bt_ui_cache.status = I18n::T("蓝牙音乐正在播放");
+    } else {
+        s_native_bt_ui_cache.status = I18n::T("蓝牙已连接，等待手机播放");
+    }
+    s_native_bt_ui_cache.status_dirty = true;
+}
+
+void OnNativeBtUiTimer(lv_timer_t* /*timer*/) {
+    NativeBtUiCache cache;
+    {
+        std::lock_guard<std::mutex> lock(s_native_bt_ui_mutex);
+        cache = s_native_bt_ui_cache;
+        s_native_bt_ui_cache.track_dirty = false;
+        s_native_bt_ui_cache.status_dirty = false;
+        s_native_bt_ui_cache.play_dirty = false;
+    }
+
+    if (!s_screen_active) {
+        return;
+    }
+    if (cache.track_dirty) {
+        apply_track_info_to_ui(cache.title.c_str(), cache.artist.c_str(),
+                               cache.album.c_str());
+    }
+    if (cache.play_dirty) {
+        apply_play_state_to_ui(cache.playing);
+    }
+    if (cache.status_dirty && !cache.status.empty()) {
+        push_lyric_line(cache.status.c_str());
+    }
+}
+
 void restore_audio_service_after_native_bt() {
     auto& audio_service = Application::GetInstance().GetAudioService();
-    if (s_restart_audio_service_after_native_bt) {
+    if (s_restart_audio_service_after_native_bt || !audio_service.IsStarted()) {
+        ESP_LOGI(TAG, "restore audio service after native BT");
         audio_service.Start();
-        s_restart_audio_service_after_native_bt = false;
     }
-    if (s_restore_wake_word_after_native_bt) {
+    if (s_restore_wake_word_after_native_bt || !audio_service.IsWakeWordRunning()) {
+        ESP_LOGI(TAG, "restore wake word after native BT");
         audio_service.EnableWakeWordDetection(true);
-        s_restore_wake_word_after_native_bt = false;
     }
+    s_restart_audio_service_after_native_bt = false;
+    s_restore_wake_word_after_native_bt = false;
 }
 
 void on_native_bt_metadata_changed(const NativeBluetoothAudio::Metadata& metadata) {
@@ -480,18 +563,11 @@ void on_native_bt_metadata_changed(const NativeBluetoothAudio::Metadata& metadat
         metadata.artist != nullptr ? metadata.artist : "";
     const std::string album =
         metadata.album != nullptr ? metadata.album : "";
-    post_track_info(title, artist, album);
+    queue_native_bt_track_info(title, artist, album);
 }
 
 void on_native_bt_state_changed(bool connected, bool playing) {
-    post_play_state(playing);
-    if (!connected) {
-        post_lyric(I18n::T("等待手机连接本机蓝牙"));
-    } else if (playing) {
-        post_lyric(I18n::T("蓝牙音乐正在播放"));
-    } else {
-        post_lyric(I18n::T("蓝牙已连接，等待手机播放"));
-    }
+    queue_native_bt_state(connected, playing);
 }
 #endif
 
@@ -564,6 +640,12 @@ void OnSwipeBack() {
 
 void OnScreenUnloaded(lv_event_t* /*e*/) {
     s_screen_active = false;
+#if !BOARD_HAS_EXTERNAL_BT
+    if (s_ui.native_bt_ui_timer != nullptr) {
+        lv_timer_delete(s_ui.native_bt_ui_timer);
+        s_ui.native_bt_ui_timer = nullptr;
+    }
+#endif
     s_ui = MusicUi{};
 }
 
@@ -784,6 +866,13 @@ lv_obj_t* MusicScreen::Create() {
     BuildAlbum(scr);
     BuildLyric(scr);
     BuildControls(scr);
+#if !BOARD_HAS_EXTERNAL_BT
+    {
+        std::lock_guard<std::mutex> lock(s_native_bt_ui_mutex);
+        s_native_bt_ui_cache = NativeBtUiCache{};
+    }
+    s_ui.native_bt_ui_timer = lv_timer_create(OnNativeBtUiTimer, 200, nullptr);
+#endif
     // BackButton 最后建，保证它在 z-order 顶层、可被点中。
     BuildBackButton(scr);
 
@@ -807,9 +896,9 @@ void MusicScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         ESP_LOGI(TAG, "load: music_screen -> native BT speaker mode");
         s_rx_buffer.clear();
         auto& audio_service = Application::GetInstance().GetAudioService();
+        s_restart_audio_service_after_native_bt = true;
         s_restore_wake_word_after_native_bt = audio_service.ReleaseWakeWordDetection();
-        s_restart_audio_service_after_native_bt = audio_service.IsStarted();
-        if (s_restart_audio_service_after_native_bt) {
+        if (audio_service.IsStarted()) {
             if (!audio_service.StopAndWait(1200)) {
                 ESP_LOGW(TAG, "audio service did not fully stop before native BT init");
             }

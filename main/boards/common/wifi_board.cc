@@ -71,21 +71,17 @@ void WifiBoard::EnterWifiConfigMode() {
 
 void WifiBoard::StartNetwork() {
     // User can press BOOT button while starting to enter WiFi configuration mode
-    // if (wifi_config_mode_) {
-    //     EnterWifiConfigMode();
-    //     return;
-    // }
+    if (wifi_config_mode_) {
+        EnterWifiConfigMode();
+        return;
+    }
 
     // If no WiFi SSID is configured, enter WiFi configuration mode
     auto& ssid_manager = SsidManager::GetInstance();
     auto ssid_list = ssid_manager.GetSsidList();
     if (ssid_list.empty()) {
-        // wifi_config_mode_ = true;
-        // EnterWifiConfigMode();
-        ESP_LOGI(TAG, "请在WIFI配置连接网络");
-        while (true) {
-            vTaskDelay(pdMS_TO_TICKS(10000));
-        }
+        wifi_config_mode_ = true;
+        EnterWifiConfigMode();
         return;
     }
 
@@ -112,8 +108,8 @@ void WifiBoard::StartNetwork() {
     // Try to connect to WiFi, if failed, launch the WiFi configuration AP
     if (!wifi_station.WaitForConnected(60 * 1000)) {
         wifi_station.Stop();
-        // wifi_config_mode_ = true;
-        // EnterWifiConfigMode();
+        wifi_config_mode_ = true;
+        EnterWifiConfigMode();
         return;
     }
 }

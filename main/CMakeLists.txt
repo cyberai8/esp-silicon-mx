@@ -102,8 +102,8 @@ set(INCLUDE_DIRS "." "i18n" "display" "display/font" "display/lvgl_display" "dis
 
 # Add board common files
 file(GLOB BOARD_COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/boards/common/*.cc)
-if(CONFIG_IDF_TARGET_ESP32S31)
-    # S31 无 MIPI CSI / P4 TinyUSB MSC / NT26 UHCI 4G
+if(CONFIG_IDF_TARGET_ESP32S31 OR CONFIG_BOARD_TYPE_ESP_VOCAT)
+    # S31 / ESP-VoCat first pass：无 P4 MIPI CSI / P4 TinyUSB MSC / NT26 UHCI 4G
     list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/esp32_camera\\.cc$")
     # usb_virtual_disk.cc 在非 P4 下已有空实现，S31 继续编译以供 SD 页链接
     list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/nt26_board\\.cc$")
@@ -139,6 +139,11 @@ if(CONFIG_BOARD_TYPE_METALIO_CLAW_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
 elseif(CONFIG_BOARD_TYPE_ESP32_S31_KORVO_1)
     set(BOARD_TYPE "esp32-s31-korvo-1")
+    set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
+    set(BUILTIN_ICON_FONT font_awesome_20_4)
+    set(DEFAULT_EMOJI_COLLECTION twemoji_64)
+elseif(CONFIG_BOARD_TYPE_ESP_VOCAT)
+    set(BOARD_TYPE "esp-vocat")
     set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
@@ -307,8 +312,8 @@ if(CONFIG_IDF_TARGET_ESP32)
                              )
 endif()
 
-# ESP32-S31：MetalioClaw4 相机页是 P4 MIPI-CSI 路径，改用空壳桩
-if(CONFIG_IDF_TARGET_ESP32S31)
+# ESP32-S31 / ESP-VoCat：MetalioClaw4 相机页是 P4 MIPI-CSI 路径，改用空壳桩
+if(CONFIG_IDF_TARGET_ESP32S31 OR CONFIG_BOARD_TYPE_ESP_VOCAT)
     list(REMOVE_ITEM SOURCES
         "display/screen/camera_screen/camera_screen.cc"
         "display/screen/test_screen/camera_test.cc"

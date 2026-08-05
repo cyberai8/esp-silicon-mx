@@ -23,9 +23,9 @@ struct Nt26CeregState {
     }
 };
 
-#if defined(CONFIG_IDF_TARGET_ESP32S31)
+#if defined(CONFIG_IDF_TARGET_ESP32S31) || defined(CONFIG_BOARD_TYPE_ESP_VOCAT)
 
-// S31 Korvo-1 has no NT26/4G modem. Keep a polymorphic stub so UI code that
+// WiFi-only boards have no NT26/4G modem. Keep a polymorphic stub so UI code that
 // dynamic_casts Board → Nt26Board still compiles; GetNt26Board() returns null.
 class Nt26Board : public Board {
 public:
@@ -102,6 +102,6 @@ public:
                                         bool bypass_init_check = false);
 };
 
-#endif // CONFIG_IDF_TARGET_ESP32S31
+#endif // CONFIG_IDF_TARGET_ESP32S31 || CONFIG_BOARD_TYPE_ESP_VOCAT
 
 #endif // NT26_BOARD_H

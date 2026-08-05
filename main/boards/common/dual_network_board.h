@@ -9,9 +9,9 @@ enum class NetworkType {
     ML307
 };
 
-#if defined(CONFIG_IDF_TARGET_ESP32S31)
+#if defined(CONFIG_IDF_TARGET_ESP32S31) || defined(CONFIG_BOARD_TYPE_ESP_VOCAT)
 
-// S31 is WiFi-only (no DualNetworkBoard instances). Stub keeps dynamic_cast OK.
+// WiFi-only boards (no DualNetworkBoard instances). Stub keeps dynamic_cast OK.
 class DualNetworkBoard : public Board {
 public:
     ~DualNetworkBoard() override = default;
@@ -19,7 +19,7 @@ public:
         return NetworkType::WIFI;
     }
     void SwitchNetworkType() {
-        // S31 is WiFi-only; keep stub so network_screen compiles.
+        // WiFi-only board; keep stub so network_screen compiles.
     }
     NetworkType GetNetworkType() const { return NetworkType::WIFI; }
     Board& GetCurrentBoard() const { return *const_cast<DualNetworkBoard*>(this); }
@@ -81,6 +81,6 @@ public:
     virtual std::string GetDeviceStatusJson() override;
 };
 
-#endif // CONFIG_IDF_TARGET_ESP32S31
+#endif // CONFIG_IDF_TARGET_ESP32S31 || CONFIG_BOARD_TYPE_ESP_VOCAT
 
 #endif // DUAL_NETWORK_BOARD_H

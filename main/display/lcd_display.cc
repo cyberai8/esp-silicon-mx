@@ -10,6 +10,7 @@
 #include <esp_log.h>
 #include <esp_err.h>
 #include <esp_lvgl_port.h>
+#include <esp_lvgl_port_touch.h>
 #include <esp_psram.h>
 #include <cstring>
 
@@ -92,12 +93,6 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
                            int width, int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y, bool swap_xy)
     : LcdDisplay(panel_io, panel, width, height) {
 
-    // draw white
-    std::vector<uint16_t> buffer(width_, 0xFFFF);
-    for (int y = 0; y < height_; y++) {
-        esp_lcd_panel_draw_bitmap(panel_, 0, y, width_, y + 1, buffer.data());
-    }
-
     // Set the display to on
     ESP_LOGI(TAG, "Turning display on");
     {
@@ -170,6 +165,29 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     }
 
     SetupUI();
+}
+
+bool SpiLcdDisplay::AddTouch(esp_lcd_touch_handle_t touch_handle) {
+    if (display_ == nullptr || touch_handle == nullptr) {
+        ESP_LOGW(TAG, "Cannot add touch: display=%p touch=%p", display_, touch_handle);
+        return false;
+    }
+
+    const lvgl_port_touch_cfg_t touch_cfg = {
+        .disp = display_,
+        .handle = touch_handle,
+        .scale = {
+            .x = 1.0f,
+            .y = 1.0f,
+        },
+    };
+    lv_indev_t* indev = lvgl_port_add_touch(&touch_cfg);
+    if (indev == nullptr) {
+        ESP_LOGE(TAG, "Failed to add LCD touch");
+        return false;
+    }
+    ESP_LOGI(TAG, "LCD touch added");
+    return true;
 }
 
 

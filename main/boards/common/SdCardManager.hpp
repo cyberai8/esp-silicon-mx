@@ -18,6 +18,10 @@
 
 #include "config.h"  // SDMMC_*_PIN（板级提供）
 
+#ifndef SDMMC_BUS_WIDTH
+#define SDMMC_BUS_WIDTH 4
+#endif
+
 #ifdef SDMMC_LDO_CHAN_ID
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #endif
@@ -267,11 +271,13 @@ private:
         slot_config.clk = SDMMC_CLK_PIN;
         slot_config.cmd = SDMMC_CMD_PIN;
         slot_config.d0 = SDMMC_D0_PIN;
+#if SDMMC_BUS_WIDTH >= 4
         slot_config.d1 = SDMMC_D1_PIN;
         slot_config.d2 = SDMMC_D2_PIN;
         slot_config.d3 = SDMMC_D3_PIN;
 #endif
-        slot_config.width = 4;
+#endif
+        slot_config.width = SDMMC_BUS_WIDTH;
         slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
         return slot_config;
     }

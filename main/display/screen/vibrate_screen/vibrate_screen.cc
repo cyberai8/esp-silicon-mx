@@ -1,4 +1,5 @@
 #include "vibrate_screen.h"
+#include "config.h"
 #include "i18n.h"
 
 #include <cstdio>
@@ -27,7 +28,12 @@ constexpr const char* TAG = "VibrateScreen";
 // （见 main/boards/common/backlight.cc）。如果共用 channel 0，写 duty 实际会
 // 改背光亮度，且会把 channel 0 的 GPIO 输出重新映射，导致 “拉滑条 -> 背光
 // 变暗 / 马达不动” 的现象。
-constexpr gpio_num_t            kVibrateGpio    = GPIO_NUM_22;
+#ifndef VIBRATE_MOTOR_GPIO
+#define VIBRATE_MOTOR_GPIO GPIO_NUM_NC
+#endif
+
+constexpr gpio_num_t            kVibrateGpio    = VIBRATE_MOTOR_GPIO;
+constexpr bool                  kHasVibrateMotor = kVibrateGpio != GPIO_NUM_NC;
 constexpr ledc_mode_t           kLedcMode       = LEDC_LOW_SPEED_MODE;
 constexpr ledc_timer_t          kLedcTimer      = LEDC_TIMER_1;
 constexpr ledc_channel_t        kLedcChannel    = LEDC_CHANNEL_1;
@@ -92,6 +98,10 @@ int64_t     s_pattern_t0_us = 0;        // 模式启动时间，pattern 周期�
 // LEDC 工具
 // ---------------------------------------------------------------------------
 void ledc_init_once() {
+    if (!kHasVibrateMotor) {
+        ESP_LOGW(TAG, "vibrate motor not available on this board");
+        return;
+    }
     if (s_ledc_inited) {
         return;
     }

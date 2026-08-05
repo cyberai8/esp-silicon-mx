@@ -303,23 +303,24 @@ constexpr int kPanelH = DISPLAY_HEIGHT;
 constexpr int kPanelSize = (kPanelW < kPanelH) ? kPanelW : kPanelH;
 constexpr bool kLayoutTall = (kPanelH >= 700);                 // 720x720
 constexpr bool kLayoutWide = (kPanelW >= 750 && kPanelH < 700);  // 800x480
+constexpr bool kLayoutRoundSmall = (kPanelW == 360 && kPanelH == 360);
 // 资源图标固定 128x128 圆角；横屏也用原生尺寸，避免 STRETCH 变换把圆角拉成叶片形。
 constexpr int kIconAssetSize = 128;
-constexpr int kStatusBarHeight = kLayoutTall ? 48 : (kLayoutWide ? 28 : 36);
+constexpr int kStatusBarHeight = kLayoutTall ? 48 : (kLayoutWide ? 28 : 32);
 // 横屏：指示器浮在 pager 上方，不额外占纵向空间，才能放下 128 图标+完整文字
 constexpr int kIndicatorAreaHeight = kLayoutTall ? 40 : (kLayoutWide ? 0 : 28);
 constexpr int kPagerHeight =
     kPanelH - kStatusBarHeight - kIndicatorAreaHeight;
-constexpr int kAppsPerPage = 9;           // 3x3
-constexpr int kPageCols = 3;
-constexpr int kPageRows = 3;
+constexpr int kPageCols = kLayoutRoundSmall ? 2 : 3;
+constexpr int kPageRows = kLayoutRoundSmall ? 2 : 3;
+constexpr int kAppsPerPage = kPageCols * kPageRows;
 constexpr int kIconSize = kIconAssetSize;
-constexpr int kCellWidth = kLayoutTall ? 160 : (kLayoutWide ? 168 : 100);
+constexpr int kCellWidth = kLayoutTall ? 160 : (kLayoutWide ? 168 : 150);
 constexpr int kNameGap = kLayoutTall ? 6 : (kLayoutWide ? 2 : 4);
-constexpr int kNameAreaH = kLayoutTall ? 24 : (kLayoutWide ? 20 : 18);
+constexpr int kNameAreaH = kLayoutTall ? 24 : (kLayoutWide ? 20 : 22);
 constexpr int kCellHeight = kIconSize + kNameGap + kNameAreaH;
-constexpr int kGridColGap = kLayoutTall ? 60 : (kLayoutWide ? 40 : 24);
-constexpr int kGridRowGap = kLayoutTall ? 36 : (kLayoutWide ? 0 : 12);
+constexpr int kGridColGap = kLayoutTall ? 60 : (kLayoutWide ? 40 : 12);
+constexpr int kGridRowGap = kLayoutTall ? 36 : (kLayoutWide ? 0 : 8);
 constexpr int kPagePadHor =
     (kPanelW - kPageCols * kCellWidth - (kPageCols - 1) * kGridColGap) / 2;
 constexpr int kPageContentH =
@@ -328,21 +329,21 @@ constexpr int kPagePadVer =
     (kPagerHeight > kPageContentH) ? (kPagerHeight - kPageContentH) / 2 : 0;
 
 constexpr uint32_t kStatusBarBg = 0x000000;
-constexpr int kMaxPages = 6;  // hard cap; bump if app list grows
+constexpr int kMaxPages = 8;  // hard cap; bump if app list grows
 
 // Grid descriptors -- static so the array pointers passed to LVGL outlive
 // the call.  Initialized at namespace scope; LVGL reads them lazily during
 // each page's relayout, so we never have to refresh them.
-int32_t s_col_dsc[kPageCols + 1] = {
+int32_t s_col_dsc[4] = {
     kCellWidth,
     kCellWidth,
-    kCellWidth,
+    kPageCols == 3 ? kCellWidth : LV_GRID_TEMPLATE_LAST,
     LV_GRID_TEMPLATE_LAST,
 };
-int32_t s_row_dsc[kPageRows + 1] = {
+int32_t s_row_dsc[4] = {
     kCellHeight,
     kCellHeight,
-    kCellHeight,
+    kPageRows == 3 ? kCellHeight : LV_GRID_TEMPLATE_LAST,
     LV_GRID_TEMPLATE_LAST,
 };
 
@@ -801,24 +802,32 @@ constexpr AppEntry kApps[] = {
     {"chat",           "聊天",     LaunchChat,          chat_lifecycle_cb,          true},
     {"wifi",           "网络配置", LaunchWifi,          wifi_lifecycle_cb,          false},
     {"digital_people", "数字人",   LaunchDigitalPeople, digital_people_lifecycle_cb, true},
+#if !defined(BOARD_ESP_VOCAT)
     {"call",           "电话",     LaunchCall,          call_lifecycle_cb,          false},
+#endif
     {"music",          "音乐",     LaunchMusic,         music_lifecycle_cb,         false},
     {"calendar",       "日历",     LaunchCalendar,      calendar_lifecycle_cb,      false},
     {"openclaw",       "OpenClaw", LaunchOpenClaw,      openclaw_lifecycle_cb,      true},
+#if !defined(BOARD_ESP_VOCAT)
     {"espclaw",        "ESPClaw",  LaunchEspClaw,       nullptr,                    false},
     {"camera",         "相机",     LaunchCamera,        camera_lifecycle_cb,        false},
     {"gps",            "地图",     LaunchGps,           gps_lifecycle_cb,           true},
     {"spirit_level",   "水平仪",   LaunchLevel,         level_lifecycle_cb,         false},
     {"magnet",         "磁场",     LaunchMagnet,        magnet_lifecycle_cb,        false},
     {"vibrate",        "震动",     LaunchVibrate,       vibrate_lifecycle_cb,       false},
+#endif
     {"calculator",     "计算器",   LaunchCalculator,    calculator_lifecycle_cb,    false},
     {"weather",        "天气",     LaunchWeather,       weather_lifecycle_cb,       true},
     {"sd",             "SD卡",     LaunchSdCard,        sd_card_lifecycle_cb,       false},
+#if !defined(BOARD_ESP_VOCAT)
     {"pin",            "引脚测试", LaunchPinTest,       pin_test_lifecycle_cb,      false},
+#endif
     {"2048",           "2048",     LaunchGame2048,      game_2048_lifecycle_cb,     false},
     {"info",           "信息",     LaunchInfo,          info_lifecycle_cb,          false},
     {"theme",          "主题",     LaunchTheme,         theme_lifecycle_cb,         false},
+#if !defined(BOARD_ESP_VOCAT)
     {"test",           "测试",     LaunchTest,          test_lifecycle_cb,          false},
+#endif
     {"settings",       "设置",     LaunchSettings,      settings_lifecycle_cb,      false},
     {"radio",          "电台",     LaunchRadio,         radio_lifecycle_cb,         true},
     {"recording",      "录音",     LaunchRecording,     recording_lifecycle_cb,     false},
