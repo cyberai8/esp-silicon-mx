@@ -51,7 +51,11 @@ constexpr const char* TAG = "MusicScreen";
 //   ~y=694 │  蓝牙音箱模式 · 手机连本机 …   │  使用提示，font 20, dim
 //   y=720  └────────────────────────────────┘
 // ---------------------------------------------------------------------------
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+constexpr auto kPanelSize = DISPLAY_WIDTH;
+#else
 constexpr int32_t kPanelSize = 720;
+#endif
 
 constexpr uint32_t kColorBg = 0x0E1116;
 constexpr uint32_t kColorBgGrad = 0x161A22;

@@ -3,12 +3,18 @@
 #include "application.h"
 #include "audio/codecs/box_audio_codec.h"
 #include "backlight.h"
+#include "bq27220_gauge.h"
 #include "button.h"
-#include "display/lcd_display.h"
+#include "display/lv_adapter_display.h"
+#include "display/screen/home_screen/home_screen.h"
+#include "dual_network_board.h"
 #include "led/gpio_led.h"
+#include "SdCardManager.hpp"
 #include "settings.h"
 #include "wifi_board.h"
 
+#include <atomic>
+#include <cstdlib>
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_master.h>
@@ -18,6 +24,7 @@
 #include <esp_lcd_st77916.h>
 #include <esp_lcd_touch_cst816s.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -213,6 +220,7 @@ static const st77916_lcd_init_cmd_t vendor_specific_init_yysj[] = {
     {0xF3, (uint8_t []){0x01}, 1, 0},
     {0xF0, (uint8_t []){0x00}, 1, 0},
     {0x21, (uint8_t []){}, 0, 0},
+    {0x35, (uint8_t []){0x00}, 1, 0},
     {0x11, (uint8_t []){}, 0, 0},
     {0x00, (uint8_t []){}, 0, 120},
 };
@@ -240,24 +248,32 @@ public:
     }
 };
 
-class EspVocat : public WifiBoard {
+class EspVocat : public DualNetworkBoard {
 public:
-    EspVocat() : boot_button_(BOOT_BUTTON_GPIO) {
+    // default_net_type=0 → Wi-Fi first; Settings can switch to ML307 4G.
+    EspVocat()
+        : DualNetworkBoard(ML307_TX_PIN, ML307_RX_PIN, GPIO_NUM_NC, 0),
+          boot_button_(BOOT_BUTTON_GPIO),
+          head_touch_button_(HEAD_TOUCH_GPIO, HEAD_TOUCH_ACTIVE_LEVEL != 0) {
         ESP_LOGI(TAG, "Boot ESP-VoCat");
         InitializePowerLatch();
+        InitializeMl307Enable();
         InitializeBacklightOff();
-        InitializePowerKeyGpio();
+        InitializePowerKey();
         InitializeButtons();
         InitializeI2c();
+        InitializeBatteryGauge();
+        StartupBatteryGate();
         InitializeSpi();
-        InitializeSt77916Display();
+        InitializeSt77916Panel();
         InitializeCst816sTouch();
+        InitializeLvAdapterDisplay();
+        InitializeSdCard();
+        InitializeMotion();
         ScheduleBacklightRestoreAfterUiSettle();
     }
 
-    std::string GetBoardType() override {
-        return "esp-vocat";
-    }
+    std::string GetBoardType() override { return "esp-vocat"; }
 
     AudioCodec* GetAudioCodec() override {
         static BoxAudioCodec audio_codec(
@@ -276,9 +292,7 @@ public:
         return &audio_codec;
     }
 
-    Display* GetDisplay() override {
-        return display_;
-    }
+    Display* GetDisplay() override { return display_; }
 
     Backlight* GetBacklight() override {
         static VocatPwmBacklight backlight(DISPLAY_BACKLIGHT_PIN,
@@ -287,19 +301,37 @@ public:
     }
 
     Led* GetLed() override {
-        static GpioLed led(SPEAKING_LED_GPIO, SPEAKING_LED_ACTIVE_LEVEL == 0);
+        // Must not share LEDC_CHANNEL_0 with PwmBacklight.
+        static GpioLed led(SPEAKING_LED_GPIO, SPEAKING_LED_ACTIVE_LEVEL == 0,
+                           LEDC_TIMER_1, LEDC_CHANNEL_1);
         return &led;
+    }
+
+    bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
+        return Bq27220Gauge::GetInstance().GetBatteryLevel(level, charging, discharging);
+    }
+
+    // Called from HomeScreen shutdown path: release PG2 after UI shows.
+    void ReleasePowerHold() {
+        ESP_LOGW(TAG, "Releasing PG2 hold GPIO%d", PG2_HOLD_GPIO);
+        gpio_set_level(PG2_HOLD_GPIO, PG2_HOLD_ACTIVE_LEVEL ? 0 : 1);
     }
 
 private:
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     Button boot_button_;
+    Button head_touch_button_;
     Display* display_ = nullptr;
     esp_lcd_panel_handle_t panel_handle_ = nullptr;
-    esp_lcd_panel_handle_t raw_panel_handle_ = nullptr;
     esp_lcd_panel_io_handle_t panel_io_handle_ = nullptr;
     esp_lcd_touch_handle_t touch_handle_ = nullptr;
-    static constexpr uint32_t kBacklightUiSettleDelayMs = 1800;
+    esp_timer_handle_t backlight_restore_timer_ = nullptr;
+    std::atomic_bool power_off_started_{false};
+    i2c_master_dev_handle_t qmi_dev_ = nullptr;
+
+    static constexpr uint32_t kLcdPixelClockHz = 40 * 1000 * 1000;
+    static constexpr uint32_t kBacklightUiSettleDelayMs = 2500;
+    static constexpr uint16_t kLowBatteryMv = 3300;
 
     void InitializePowerLatch() {
         gpio_config_t io_conf = {};
@@ -310,8 +342,23 @@ private:
         io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
         ESP_ERROR_CHECK(gpio_config(&io_conf));
         gpio_set_level(PG2_HOLD_GPIO, PG2_HOLD_ACTIVE_LEVEL);
-        ESP_LOGI(TAG, "PG2 hold GPIO%d=%d", PG2_HOLD_GPIO,
-                 PG2_HOLD_ACTIVE_LEVEL);
+        ESP_LOGI(TAG, "PG2 latch ready GPIO%d=%d", PG2_HOLD_GPIO, PG2_HOLD_ACTIVE_LEVEL);
+    }
+
+    void InitializeMl307Enable() {
+        if (ML307_EN_PIN == GPIO_NUM_NC) {
+            return;
+        }
+        gpio_config_t io_conf = {};
+        io_conf.intr_type = GPIO_INTR_DISABLE;
+        io_conf.mode = GPIO_MODE_OUTPUT;
+        io_conf.pin_bit_mask = 1ULL << ML307_EN_PIN;
+        io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+        ESP_ERROR_CHECK(gpio_config(&io_conf));
+        // Keep modem powered so DualNetwork can switch to 4G without reboot GPIO race.
+        gpio_set_level(ML307_EN_PIN, 1);
+        ESP_LOGI(TAG, "ML307 EN GPIO%d=1", ML307_EN_PIN);
     }
 
     void InitializeBacklightOff() {
@@ -322,30 +369,40 @@ private:
         io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
         io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
         ESP_ERROR_CHECK(gpio_config(&io_conf));
-        gpio_set_level(DISPLAY_BACKLIGHT_PIN,
-                       DISPLAY_BACKLIGHT_OUTPUT_INVERT ? 1 : 0);
+        gpio_set_level(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT ? 1 : 0);
         ESP_LOGI(TAG, "Backlight held off on GPIO%d", DISPLAY_BACKLIGHT_PIN);
     }
 
     void ScheduleBacklightRestoreAfterUiSettle() {
-        ESP_LOGI(TAG, "Backlight restore scheduled after LCD UI settle (%u ms)",
-                 static_cast<unsigned>(kBacklightUiSettleDelayMs));
-        BaseType_t ret = xTaskCreate([](void* arg) {
-            auto* self = static_cast<EspVocat*>(arg);
-            vTaskDelay(pdMS_TO_TICKS(kBacklightUiSettleDelayMs));
-            auto* backlight = static_cast<VocatPwmBacklight*>(self->GetBacklight());
-            backlight->RestoreBrightnessImmediately();
-            ESP_LOGI(TAG, "Backlight restored after LCD UI settle");
-            vTaskDelete(nullptr);
-        }, "vocat_bl_on", 2048, this, 2, nullptr);
-
-        if (ret != pdPASS) {
-            ESP_LOGW(TAG, "Failed to create backlight restore task, restore now");
-            GetBacklight()->RestoreBrightness();
+        if (backlight_restore_timer_ != nullptr) {
+            return;
         }
+        const esp_timer_create_args_t timer_args = {
+            .callback =
+                [](void* arg) {
+                    auto* self = static_cast<EspVocat*>(arg);
+                    auto* backlight =
+                        static_cast<VocatPwmBacklight*>(self->GetBacklight());
+                    backlight->RestoreBrightnessImmediately();
+                    ESP_LOGI(TAG, "Backlight restored after LCD UI settle");
+                },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "vocat_bl_on",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&timer_args, &backlight_restore_timer_));
+        ESP_ERROR_CHECK(esp_timer_start_once(backlight_restore_timer_,
+                                             kBacklightUiSettleDelayMs * 1000));
+        ESP_LOGI(TAG, "Backlight restore scheduled (%u ms)",
+                 static_cast<unsigned>(kBacklightUiSettleDelayMs));
     }
 
-    void InitializePowerKeyGpio() {
+    bool IsPowerKeyPressed() const {
+        return gpio_get_level(PG1_POWER_KEY_GPIO) == PG1_POWER_KEY_ACTIVE_LEVEL;
+    }
+
+    void InitializePowerKey() {
         gpio_config_t io_conf = {};
         io_conf.intr_type = GPIO_INTR_DISABLE;
         io_conf.mode = GPIO_MODE_INPUT;
@@ -353,18 +410,52 @@ private:
         io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
         io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
         ESP_ERROR_CHECK(gpio_config(&io_conf));
-        ESP_LOGI(TAG, "PG1 power key GPIO%d active=%d", PG1_POWER_KEY_GPIO,
-                 PG1_POWER_KEY_ACTIVE_LEVEL);
+        ESP_LOGI(TAG, "PG1 power key ready GPIO%d", PG1_POWER_KEY_GPIO);
+
+        xTaskCreate(
+            [](void* arg) {
+                auto* self = static_cast<EspVocat*>(arg);
+                bool armed = !self->IsPowerKeyPressed();
+                int pressed_ms = 0;
+                for (;;) {
+                    const bool down = self->IsPowerKeyPressed();
+                    if (!armed) {
+                        if (!down) {
+                            armed = true;
+                        }
+                    } else if (down) {
+                        pressed_ms += KEY_GPIO_POLL_MS;
+                        if (pressed_ms >= KEY_SW1_LONG_PRESS_MS) {
+                            ESP_LOGW(TAG, "PG1 long-press → soft shutdown");
+                            HomeScreen::RequestSystemShutdown("电源键关机");
+                            for (;;) {
+                                vTaskDelay(pdMS_TO_TICKS(1000));
+                            }
+                        }
+                    } else {
+                        pressed_ms = 0;
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(KEY_GPIO_POLL_MS));
+                }
+            },
+            "vocat_pwr_key", 3072, this, 5, nullptr);
     }
 
     void InitializeButtons() {
-        boot_button_.OnClick([]() {
-            Application::GetInstance().ToggleChatState();
-        });
+        boot_button_.OnClick([]() { Application::GetInstance().ToggleChatState(); });
         boot_button_.OnDoubleClick([this]() {
             ESP_LOGW(TAG, "BOOT double click: reset Wi-Fi configuration");
-            ResetWifiConfiguration();
+            if (GetNetworkType() == NetworkType::WIFI) {
+                static_cast<WifiBoard&>(GetCurrentBoard()).ResetWifiConfiguration();
+            }
         });
+
+        if (HEAD_TOUCH_GPIO != GPIO_NUM_NC) {
+            head_touch_button_.OnClick([]() {
+                Application::GetInstance().ToggleChatState();
+            });
+            ESP_LOGI(TAG, "Head touch GPIO%d ready", HEAD_TOUCH_GPIO);
+        }
     }
 
     void InitializeI2c() {
@@ -380,8 +471,34 @@ private:
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_config, &i2c_bus_));
         s_board_i2c_bus = i2c_bus_;
-        ESP_LOGI(TAG, "I2C0 ready: SDA=%d SCL=%d", AUDIO_CODEC_I2C_SDA_PIN,
-                 AUDIO_CODEC_I2C_SCL_PIN);
+        ESP_LOGI(TAG, "I2C ready");
+    }
+
+    void InitializeBatteryGauge() {
+        if (Bq27220Gauge::GetInstance().Begin(i2c_bus_)) {
+            ESP_LOGI(TAG, "BQ27220 gauge ready");
+        } else {
+            ESP_LOGW(TAG, "BQ27220 not found (optional)");
+        }
+    }
+
+    void StartupBatteryGate() {
+        uint16_t mv = 0;
+        if (!Bq27220Gauge::GetInstance().GetVoltageMv(mv)) {
+            return;
+        }
+        int16_t ma = 0;
+        Bq27220Gauge::GetInstance().ReadCurrentMa(ma);
+        ESP_LOGI(TAG, "Startup battery %umV %dmA", mv, ma);
+        if (mv < kLowBatteryMv && ma <= 5) {
+            ESP_LOGW(TAG, "Low battery at boot → soft shutdown");
+            // Delay so log flushes; UI may not be up yet.
+            vTaskDelay(pdMS_TO_TICKS(200));
+            ReleasePowerHold();
+            for (;;) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+        }
     }
 
     void InitializeSpi() {
@@ -405,58 +522,47 @@ private:
         ESP_LOGI(TAG, "QSPI SPI bus ready");
     }
 
-    void InitializeSt77916Display() {
+    void InitializeSt77916Panel() {
         const esp_lcd_panel_io_spi_config_t io_config = {
             .cs_gpio_num = QSPI_PIN_NUM_LCD_CS,
             .dc_gpio_num = -1,
             .spi_mode = 0,
-            .pclk_hz = 20 * 1000 * 1000,
-            .trans_queue_depth = 10,
+            .pclk_hz = kLcdPixelClockHz,
+            .trans_queue_depth = 16,
             .on_color_trans_done = nullptr,
             .user_ctx = nullptr,
             .lcd_cmd_bits = 32,
             .lcd_param_bits = 8,
-            .flags = {
-                .quad_mode = true,
-            },
+            .flags = {.quad_mode = true},
         };
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(
-            static_cast<esp_lcd_spi_bus_handle_t>(QSPI_LCD_HOST),
-            &io_config, &panel_io_handle_));
+            static_cast<esp_lcd_spi_bus_handle_t>(QSPI_LCD_HOST), &io_config,
+            &panel_io_handle_));
 
         st77916_vendor_config_t vendor_config = {
             .init_cmds = vendor_specific_init_yysj,
-            .init_cmds_size = sizeof(vendor_specific_init_yysj) / sizeof(st77916_lcd_init_cmd_t),
-            .flags = {
-                .use_qspi_interface = 1,
-            },
+            .init_cmds_size =
+                sizeof(vendor_specific_init_yysj) / sizeof(st77916_lcd_init_cmd_t),
+            .flags = {.use_qspi_interface = 1},
         };
         const esp_lcd_panel_dev_config_t panel_config = {
             .reset_gpio_num = QSPI_PIN_NUM_LCD_RST,
             .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
             .bits_per_pixel = QSPI_LCD_BIT_PER_PIXEL,
-            .flags = {
-                .reset_active_high = false,
-            },
+            .flags = {.reset_active_high = false},
             .vendor_config = &vendor_config,
         };
-        ESP_ERROR_CHECK(esp_lcd_new_panel_st77916(
-            panel_io_handle_, &panel_config, &raw_panel_handle_));
-        ESP_ERROR_CHECK(esp_lcd_panel_reset(raw_panel_handle_));
-        ESP_ERROR_CHECK(esp_lcd_panel_init(raw_panel_handle_));
-        ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(raw_panel_handle_, DISPLAY_SWAP_XY));
-        ESP_ERROR_CHECK(esp_lcd_panel_mirror(raw_panel_handle_, DISPLAY_MIRROR_X,
+        ESP_ERROR_CHECK(esp_lcd_new_panel_st77916(panel_io_handle_, &panel_config,
+                                                   &panel_handle_));
+        ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle_));
+        ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle_));
+        ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_handle_, DISPLAY_SWAP_XY));
+        ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle_, DISPLAY_MIRROR_X,
                                              DISPLAY_MIRROR_Y));
-
-        panel_handle_ = raw_panel_handle_;
-
-        display_ = new SpiLcdDisplay(panel_io_handle_, panel_handle_,
-                                     DISPLAY_WIDTH, DISPLAY_HEIGHT,
-                                     DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y,
-                                     DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y,
-                                     DISPLAY_SWAP_XY);
-        ESP_LOGI(TAG, "ST77916 LCD ready %dx%d pclk=20MHz TE=disabled",
-                 DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        ESP_LOGI(TAG, "ST77916 panel ready %dx%d pclk=%uMHz TE=GPIO%d",
+                 DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                 static_cast<unsigned>(kLcdPixelClockHz / 1000000),
+                 QSPI_PIN_NUM_LCD_TE);
     }
 
     void InitializeCst816sTouch() {
@@ -469,14 +575,11 @@ private:
             .dc_bit_offset = 0,
             .lcd_cmd_bits = 8,
             .lcd_param_bits = 0,
-            .flags = {
-                .dc_low_on_data = 0,
-                .disable_control_phase = 1,
-            },
+            .flags = {.dc_low_on_data = 0, .disable_control_phase = 1},
             .scl_speed_hz = 100000,
         };
-        esp_err_t err = esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config,
-                                                 &tp_io_handle);
+        esp_err_t err =
+            esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config, &tp_io_handle);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "CST816S panel_io failed: %s", esp_err_to_name(err));
             return;
@@ -487,29 +590,108 @@ private:
             .y_max = DISPLAY_HEIGHT,
             .rst_gpio_num = TP_PIN_NUM_RST,
             .int_gpio_num = TP_PIN_NUM_INT,
-            .levels = {
-                .reset = 0,
-                .interrupt = 0,
-            },
-            .flags = {
-                .swap_xy = DISPLAY_SWAP_XY,
-                .mirror_x = DISPLAY_MIRROR_X,
-                .mirror_y = DISPLAY_MIRROR_Y,
-            },
+            .levels = {.reset = 0, .interrupt = 0},
+            .flags = {.swap_xy = DISPLAY_SWAP_XY,
+                      .mirror_x = DISPLAY_MIRROR_X,
+                      .mirror_y = DISPLAY_MIRROR_Y},
         };
-        err = esp_lcd_touch_new_i2c_cst816s(tp_io_handle, &tp_cfg,
-                                            &touch_handle_);
+        err = esp_lcd_touch_new_i2c_cst816s(tp_io_handle, &tp_cfg, &touch_handle_);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "CST816S init failed: %s", esp_err_to_name(err));
             touch_handle_ = nullptr;
             return;
         }
+        ESP_LOGI(TAG, "CST816S touch ready");
+    }
 
-        auto* spi_display = static_cast<SpiLcdDisplay*>(display_);
-        if (spi_display != nullptr && spi_display->AddTouch(touch_handle_)) {
-            ESP_LOGI(TAG, "CST816S touch ready");
+    void InitializeLvAdapterDisplay() {
+        // TE_SYNC 在本板 QSPI 上会 spi transmit (queue) color failed → 黑屏。
+        // 先用 NONE + strip 刷新把 UI 跑通；撕裂可后续再调。
+        display_ = new LVAdapterDisplay(panel_handle_, panel_io_handle_, touch_handle_,
+                                        DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                                        ESP_LV_ADAPTER_PANEL_IF_OTHER, nullptr);
+        ESP_LOGI(TAG, "LVAdapterDisplay Home UI ready (360 round, te=off)");
+    }
+
+    void InitializeSdCard() {
+        if (!SdCardManager::GetInstance().Mount()) {
+            ESP_LOGW(TAG, "SD card mount failed (optional)");
+        } else {
+            ESP_LOGI(TAG, "SD card mounted");
         }
     }
+
+    bool ProbeQmi8658(uint8_t addr) {
+        if (i2c_master_probe(i2c_bus_, addr, 50) != ESP_OK) {
+            return false;
+        }
+        i2c_device_config_t dev_cfg = {
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+            .device_address = addr,
+            .scl_speed_hz = 400000,
+        };
+        if (i2c_master_bus_add_device(i2c_bus_, &dev_cfg, &qmi_dev_) != ESP_OK) {
+            return false;
+        }
+        uint8_t reg = 0x00;  // WHO_AM_I
+        uint8_t who = 0;
+        if (i2c_master_transmit_receive(qmi_dev_, &reg, 1, &who, 1, 50) != ESP_OK) {
+            i2c_master_bus_rm_device(qmi_dev_);
+            qmi_dev_ = nullptr;
+            return false;
+        }
+        // QMI8658A WHO_AM_I is typically 0x05
+        if (who != 0x05) {
+            ESP_LOGW(TAG, "QMI8658 WHO_AM_I=0x%02X at 0x%02X (unexpected)", who, addr);
+        }
+        ESP_LOGI(TAG, "QMI8658A detected at 0x%02X who=0x%02X", addr, who);
+        return true;
+    }
+
+    void InitializeMotion() {
+        // Light probe only; shake UX can be expanded later.
+        const uint8_t addrs[] = {0x6A, 0x6B};
+        for (uint8_t addr : addrs) {
+            if (ProbeQmi8658(addr)) {
+                xTaskCreate(
+                    [](void* arg) {
+                        auto* self = static_cast<EspVocat*>(arg);
+                        uint8_t reg = 0x35;  // AX_L
+                        int16_t prev_ax = 0;
+                        for (;;) {
+                            uint8_t raw[6] = {};
+                            if (self->qmi_dev_ != nullptr &&
+                                i2c_master_transmit_receive(self->qmi_dev_, &reg, 1, raw,
+                                                            6, 50) == ESP_OK) {
+                                const int16_t ax =
+                                    static_cast<int16_t>((raw[1] << 8) | raw[0]);
+                                if (prev_ax != 0) {
+                                    const int delta = abs(static_cast<int>(ax) - prev_ax);
+                                    if (delta > 12000) {
+                                        ESP_LOGI(TAG, "QMI8658 shake score=%d", delta);
+                                        Application::GetInstance().ToggleChatState();
+                                        vTaskDelay(pdMS_TO_TICKS(1500));
+                                    }
+                                }
+                                prev_ax = ax;
+                            }
+                            vTaskDelay(pdMS_TO_TICKS(80));
+                        }
+                    },
+                    "vocat_qmi", 3072, this, 3, nullptr);
+                return;
+            }
+        }
+        ESP_LOGW(TAG, "QMI8658A not found");
+    }
 };
+
+// HomeScreen soft-shutdown hook for PG2 latch boards.
+extern "C" void board_release_power_hold_if_supported() {
+    auto* board = dynamic_cast<EspVocat*>(&Board::GetInstance());
+    if (board != nullptr) {
+        board->ReleasePowerHold();
+    }
+}
 
 DECLARE_BOARD(EspVocat);

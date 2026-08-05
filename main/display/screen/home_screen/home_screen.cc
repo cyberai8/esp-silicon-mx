@@ -22,6 +22,10 @@
 #include "nt26_board.h"
 #include "IOExpander.hpp"
 #include "bq27220_gauge.h"
+
+#if defined(BOARD_ESP_VOCAT)
+extern "C" void board_release_power_hold_if_supported();
+#endif
 #include "settings.h"
 #include "settings_screen/settings_screen.h"
 #include "calculator_screen/calculator_screen.h"
@@ -304,55 +308,61 @@ constexpr int kPanelSize = (kPanelW < kPanelH) ? kPanelW : kPanelH;
 constexpr bool kLayoutTall = (kPanelH >= 700);                 // 720x720
 constexpr bool kLayoutWide = (kPanelW >= 750 && kPanelH < 700);  // 800x480
 constexpr bool kLayoutRoundSmall = (kPanelW == 360 && kPanelH == 360);
-// 资源图标固定 128x128 圆角；横屏也用原生尺寸，避免 STRETCH 变换把圆角拉成叶片形。
+// 360 圆屏：每页 2 个 App；图标保持资源原生 128x128（与图一一致，禁止缩小拉伸）。
 constexpr int kIconAssetSize = 128;
-constexpr int kStatusBarHeight = kLayoutTall ? 48 : (kLayoutWide ? 28 : 32);
-// 横屏：指示器浮在 pager 上方，不额外占纵向空间，才能放下 128 图标+完整文字
-constexpr int kIndicatorAreaHeight = kLayoutTall ? 40 : (kLayoutWide ? 0 : 28);
+constexpr int kStatusBarHeight =
+    kLayoutTall ? 48 : (kLayoutWide ? 28 : (kLayoutRoundSmall ? 36 : 32));
+constexpr int kIndicatorAreaHeight =
+    kLayoutTall ? 40 : (kLayoutWide ? 0 : (kLayoutRoundSmall ? 30 : 28));
 constexpr int kPagerHeight =
     kPanelH - kStatusBarHeight - kIndicatorAreaHeight;
 constexpr int kPageCols = kLayoutRoundSmall ? 2 : 3;
-constexpr int kPageRows = kLayoutRoundSmall ? 2 : 3;
+constexpr int kPageRows = kLayoutRoundSmall ? 1 : 3;
 constexpr int kAppsPerPage = kPageCols * kPageRows;
 constexpr int kIconSize = kIconAssetSize;
-constexpr int kCellWidth = kLayoutTall ? 160 : (kLayoutWide ? 168 : 150);
-constexpr int kNameGap = kLayoutTall ? 6 : (kLayoutWide ? 2 : 4);
-constexpr int kNameAreaH = kLayoutTall ? 24 : (kLayoutWide ? 20 : 22);
+constexpr int kCellWidth =
+    kLayoutTall ? 160 : (kLayoutWide ? 168 : (kLayoutRoundSmall ? 148 : 150));
+constexpr int kNameGap = kLayoutTall ? 6 : (kLayoutWide ? 2 : (kLayoutRoundSmall ? 6 : 4));
+constexpr int kNameAreaH =
+    kLayoutTall ? 24 : (kLayoutWide ? 20 : (kLayoutRoundSmall ? 22 : 22));
 constexpr int kCellHeight = kIconSize + kNameGap + kNameAreaH;
-constexpr int kGridColGap = kLayoutTall ? 60 : (kLayoutWide ? 40 : 12);
-constexpr int kGridRowGap = kLayoutTall ? 36 : (kLayoutWide ? 0 : 8);
-constexpr int kPagePadHor =
-    (kPanelW - kPageCols * kCellWidth - (kPageCols - 1) * kGridColGap) / 2;
+constexpr int kGridColGap =
+    kLayoutTall ? 60 : (kLayoutWide ? 40 : (kLayoutRoundSmall ? 12 : 12));
+constexpr int kGridRowGap =
+    kLayoutTall ? 36 : (kLayoutWide ? 0 : 8);
+constexpr int kPagePadHor = kLayoutRoundSmall
+    ? (kPanelW - kPageCols * kCellWidth - (kPageCols - 1) * kGridColGap) / 2
+    : (kPanelW - kPageCols * kCellWidth - (kPageCols - 1) * kGridColGap) / 2;
 constexpr int kPageContentH =
     kPageRows * kCellHeight + (kPageRows - 1) * kGridRowGap;
 constexpr int kPagePadVer =
     (kPagerHeight > kPageContentH) ? (kPagerHeight - kPageContentH) / 2 : 0;
 
 constexpr uint32_t kStatusBarBg = 0x000000;
-constexpr int kMaxPages = 8;  // hard cap; bump if app list grows
+constexpr int kMaxPages = 16;  // round 每页 2 个 App，页数更多
 
 // Grid descriptors -- static so the array pointers passed to LVGL outlive
 // the call.  Initialized at namespace scope; LVGL reads them lazily during
 // each page's relayout, so we never have to refresh them.
 int32_t s_col_dsc[4] = {
     kCellWidth,
-    kCellWidth,
-    kPageCols == 3 ? kCellWidth : LV_GRID_TEMPLATE_LAST,
+    kPageCols >= 2 ? kCellWidth : LV_GRID_TEMPLATE_LAST,
+    kPageCols >= 3 ? kCellWidth : LV_GRID_TEMPLATE_LAST,
     LV_GRID_TEMPLATE_LAST,
 };
 int32_t s_row_dsc[4] = {
     kCellHeight,
-    kCellHeight,
-    kPageRows == 3 ? kCellHeight : LV_GRID_TEMPLATE_LAST,
+    kPageRows >= 2 ? kCellHeight : LV_GRID_TEMPLATE_LAST,
+    kPageRows >= 3 ? kCellHeight : LV_GRID_TEMPLATE_LAST,
     LV_GRID_TEMPLATE_LAST,
 };
 
 // Indicator dot geometry
-constexpr int kDotSize = 8;
-constexpr int kDotGap = 12;
-constexpr int kIndicatorPadHor = 14;
-constexpr int kIndicatorPadVer = 8;
-constexpr int kIndicatorYOffset = 12;  // distance from panel bottom
+constexpr int kDotSize = kLayoutRoundSmall ? 6 : 8;
+constexpr int kDotGap = kLayoutRoundSmall ? 8 : 12;
+constexpr int kIndicatorPadHor = kLayoutRoundSmall ? 10 : 14;
+constexpr int kIndicatorPadVer = kLayoutRoundSmall ? 6 : 8;
+constexpr int kIndicatorYOffset = kLayoutRoundSmall ? 18 : 12;  // distance from panel bottom
 constexpr uint32_t kIndicatorBg = 0x000000;
 constexpr uint32_t kDotColor = 0xFFFFFF;
 
@@ -1335,15 +1345,20 @@ void UpdateHomeStatusBar(HomeStatusState* st) {
     const int net_type = GetSavedNetworkType();
     if (st->network_type_lbl != nullptr) {
         lv_label_set_text(st->network_type_lbl, net_type == 1 ? "4G" : "WiFi");
+        lv_obj_remove_flag(st->network_type_lbl, LV_OBJ_FLAG_HIDDEN);
     }
 
-    // SIM ????4G ????????? / ?????WiFi ???????????    // ????????????????invalidate??
-if (st->sim_slot_lbl != nullptr) {
+    // SIM：4G 时显示在左侧 WiFi/4G 旁；圆屏用短文案
+    if (st->sim_slot_lbl != nullptr) {
         if (net_type == 1) {
             const int slot = GetSavedSimSlot();
             if (st->last_net_type != net_type || st->last_sim_slot != slot) {
-                lv_label_set_text(st->sim_slot_lbl,
-                                  slot == 1 ? I18n::T("外置卡") : I18n::T("内置卡"));
+                if (kLayoutRoundSmall) {
+                    lv_label_set_text(st->sim_slot_lbl, slot == 1 ? "外" : "内");
+                } else {
+                    lv_label_set_text(st->sim_slot_lbl,
+                                      slot == 1 ? I18n::T("外置卡") : I18n::T("内置卡"));
+                }
                 st->last_sim_slot = slot;
             }
             lv_obj_remove_flag(st->sim_slot_lbl, LV_OBJ_FLAG_HIDDEN);
@@ -1515,10 +1530,12 @@ void OnHomeStatusDeleted(lv_event_t* e) {
 }
 
 lv_obj_t* CreateStatusBar(lv_obj_t* screen, HomeStatusState* st) {
-    // ????????????????LVGL flex ??SIZE_CONTENT + SPACE_BETWEEN
-    // ????????????????????100% ?????????????    //   - ?? 300px?????????+ 4G + ?????    //   - ?? 400px?????100% ????HH:MM?? ~18 ????????    //   - ?????? flex SPACE_BETWEEN ????
-    constexpr int kStatusLeftWidth  = 300;
-    constexpr int kStatusRightWidth = 400;
+    // 大屏：左网络 / 右电量宽区 + 居中时间。
+    // 360 圆屏：左右收窄、加大水平边距；左侧保留 WiFi 图标+文字，右侧电量。
+    constexpr int kStatusLeftWidth  = kLayoutRoundSmall ? 118 : 300;
+    constexpr int kStatusRightWidth = kLayoutRoundSmall ? 56 : 400;
+    constexpr int kStatusPadHor     = kLayoutRoundSmall ? 28 : 10;
+    constexpr int kStatusPadVer     = kLayoutRoundSmall ? 4 : 8;
 
     lv_obj_t* bar = lv_obj_create(screen);
     st->bar = bar;
@@ -1527,8 +1544,8 @@ lv_obj_t* CreateStatusBar(lv_obj_t* screen, HomeStatusState* st) {
     lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_set_style_bg_color(bar, lv_color_hex(kStatusBarBg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(bar, LV_OPA_50, LV_PART_MAIN);
-    lv_obj_set_style_pad_hor(bar, 10, LV_PART_MAIN);
-    lv_obj_set_style_pad_ver(bar, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(bar, kStatusPadHor, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(bar, kStatusPadVer, LV_PART_MAIN);
     lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
@@ -1542,7 +1559,7 @@ lv_obj_t* CreateStatusBar(lv_obj_t* screen, HomeStatusState* st) {
     lv_obj_set_flex_flow(left, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(left, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(left, 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(left, kLayoutRoundSmall ? 4 : 10, LV_PART_MAIN);
 
     st->network_icon_lbl = lv_label_create(left);
     lv_label_set_text(st->network_icon_lbl, FONT_AWESOME_WIFI);
@@ -1558,8 +1575,8 @@ lv_obj_t* CreateStatusBar(lv_obj_t* screen, HomeStatusState* st) {
     lv_obj_set_style_text_color(st->network_type_lbl, lv_color_hex(0xFFFFFF),
                                 LV_PART_MAIN);
 
-    // SIM ????????/ ????????????????G????????    // ?????UpdateHomeStatusBar ???????????????
-st->sim_slot_lbl = lv_label_create(left);
+    // SIM：圆屏放在 WiFi 文字旁（4G 时显示），空间不够时 Update 里再裁
+    st->sim_slot_lbl = lv_label_create(left);
     lv_label_set_long_mode(st->sim_slot_lbl, LV_LABEL_LONG_CLIP);
     lv_obj_set_width(st->sim_slot_lbl, LV_SIZE_CONTENT);
     lv_label_set_text(st->sim_slot_lbl, "");
@@ -1568,10 +1585,7 @@ st->sim_slot_lbl = lv_label_create(left);
                                 LV_PART_MAIN);
     lv_obj_add_flag(st->sim_slot_lbl, LV_OBJ_FLAG_HIDDEN);
 
-    // ---- ????????????????????????????----
-    // ??????font_awesome ??????????????/ ??????    // ????????400px??????????????????    // ???? 100% ??????????"?? --%"????????flex
-    // ?????????
-lv_obj_t* right = lv_obj_create(bar);
+    lv_obj_t* right = lv_obj_create(bar);
     lv_obj_remove_style_all(right);
     lv_obj_set_size(right, kStatusRightWidth, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(right, LV_OPA_TRANSP, LV_PART_MAIN);
@@ -1580,20 +1594,17 @@ lv_obj_t* right = lv_obj_create(bar);
     lv_obj_set_flex_align(right, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
 #if HOME_STATUS_SHOW_BATTERY_ICON
-    // ??????????Font Awesome ?????????
     st->battery_icon_lbl = lv_label_create(right);
     lv_label_set_text(st->battery_icon_lbl, FONT_AWESOME_BATTERY_FULL);
     lv_obj_set_style_text_font(st->battery_icon_lbl, &font_awesome_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_color(st->battery_icon_lbl, lv_color_hex(0xFFFFFF),
                                 LV_PART_MAIN);
 #else
-    // ?????????? + ????+ ????????
     lv_obj_set_style_pad_column(right, 14, LV_PART_MAIN);
 
     st->battery_pct_lbl = lv_label_create(right);
     lv_label_set_long_mode(st->battery_pct_lbl, LV_LABEL_LONG_CLIP);
-    lv_obj_set_width(st->battery_pct_lbl, 380);
-    // lv_label_set_text(st->battery_pct_lbl, I18n::T("?? --%"));
+    lv_obj_set_width(st->battery_pct_lbl, kLayoutRoundSmall ? 64 : 380);
     lv_obj_set_style_text_align(st->battery_pct_lbl, LV_TEXT_ALIGN_RIGHT,
                                 LV_PART_MAIN);
     lv_obj_set_style_text_font(st->battery_pct_lbl, &font_puhui_20_4, LV_PART_MAIN);
@@ -1601,8 +1612,7 @@ lv_obj_t* right = lv_obj_create(bar);
                                 LV_PART_MAIN);
 #endif
 
-    // ?? + ??????FLOATING ???? bar ??flex ????????    // ???????????????????????????????
-lv_obj_t* center = lv_obj_create(bar);
+    lv_obj_t* center = lv_obj_create(bar);
     lv_obj_add_flag(center, LV_OBJ_FLAG_FLOATING);
     lv_obj_remove_style_all(center);
     lv_obj_set_size(center, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -1611,12 +1621,12 @@ lv_obj_t* center = lv_obj_create(bar);
     lv_obj_set_flex_flow(center, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(center, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(center, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(center, kLayoutRoundSmall ? 4 : 8, LV_PART_MAIN);
     lv_obj_align(center, LV_ALIGN_CENTER, 0, 0);
 
     st->time_lbl = lv_label_create(center);
     lv_label_set_long_mode(st->time_lbl, LV_LABEL_LONG_CLIP);
-    lv_obj_set_width(st->time_lbl, 80);
+    lv_obj_set_width(st->time_lbl, kLayoutRoundSmall ? 56 : 80);
     lv_label_set_text(st->time_lbl, "--:--");
     lv_obj_set_style_text_align(st->time_lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(st->time_lbl, &font_puhui_20_4, LV_PART_MAIN);
@@ -2191,9 +2201,15 @@ void ShowShutdownScreen(ShutdownScreenMode mode, const char* reason) {
     lv_screen_load(s_shutdown_screen);
 }
 
-// 关机脉冲 task：Claw4 用 TCA9555 打 PWR_KEY_PULSE；S31 无该芯片，避免死循环刷日志。
+// 关机脉冲 task：Claw4 用 TCA9555 打 PWR_KEY_PULSE；VoCat 释放 PG2；S31 无硬件断电。
 void PwrShutdownPulseTask(void* /*arg*/) {
-#if defined(CONFIG_IDF_TARGET_ESP32S31)
+#if defined(BOARD_ESP_VOCAT)
+    vTaskDelay(pdMS_TO_TICKS(1200));
+    board_release_power_hold_if_supported();
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+#elif defined(CONFIG_IDF_TARGET_ESP32S31)
     ESP_LOGW(TAG_HOME, "S31 has no IOExpander; stay on shutdown screen");
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -2211,7 +2227,7 @@ void PwrShutdownPulseTask(void* /*arg*/) {
 }
 
 void BeginSystemShutdown(const char* reason) {
-#if defined(CONFIG_IDF_TARGET_ESP32S31)
+#if defined(CONFIG_IDF_TARGET_ESP32S31) && !defined(BOARD_ESP_VOCAT)
     ESP_LOGW(TAG_HOME, "S31 has no IOExpander; skip software power-off");
     IdlePower_Stop();
     ShowShutdownScreen(ShutdownScreenMode::kUnsupported, reason);
@@ -2223,7 +2239,6 @@ void BeginSystemShutdown(const char* reason) {
     }
     shutting_down = true;
 
-    // ESP_LOGW(TAG_HOME, "%s????PWR_KEY_PULSE ????", reason);
     IdlePower_Stop();
     ShowShutdownScreen(ShutdownScreenMode::kPoweringOff, reason);
     xTaskCreate(PwrShutdownPulseTask, "pwr_off_pulse", 2048, nullptr, 5, nullptr);

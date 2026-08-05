@@ -21,6 +21,19 @@ project(xiaozhi)
 idf_build_set_property(COMPILE_OPTIONS "-Wno-error=stringop-truncation" APPEND)
 idf_build_set_property(COMPILE_OPTIONS "-Wno-error=overflow" APPEND)
 
+# managed_components/ is gitignored and refreshed by the component manager.
+# Keep udp_receive stack >= 8192: MqttProtocol AES decrypt runs on that task and
+# overflows the upstream 2048B default during speaking (see crash logs).
+set(_ESP_UDP_CC "${CMAKE_SOURCE_DIR}/managed_components/78__esp-ml307/src/esp/esp_udp.cc")
+if(EXISTS "${_ESP_UDP_CC}")
+    file(READ "${_ESP_UDP_CC}" _esp_udp_src)
+    if(_esp_udp_src MATCHES "\"udp_receive\", 2048")
+        string(REPLACE "\"udp_receive\", 2048" "\"udp_receive\", 8192" _esp_udp_src "${_esp_udp_src}")
+        file(WRITE "${_ESP_UDP_CC}" "${_esp_udp_src}")
+        message(STATUS "Patched 78/esp-ml307 udp_receive stack: 2048 -> 8192")
+    endif()
+endif()
+
 # Override esp-sr packed model with custom wakeword when present
 if(EXISTS "${CMAKE_SOURCE_DIR}/wakeword/srmodels.bin")
     if(TARGET srmodels_bin)

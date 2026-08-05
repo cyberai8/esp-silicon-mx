@@ -1,4 +1,5 @@
 #include "chat_screen.h"
+#include "config.h"
 #include "i18n.h"
 
 #include <cctype>
@@ -34,6 +35,7 @@ constexpr const char* TAG = "ChatScreen";
 //   └───────────────────────────────────────────┘ 720
 // ---------------------------------------------------------------------------
 #if CONFIG_BOARD_TYPE_ESP32_S31_KORVO_1
+constexpr bool    kRoundLayout     = false;
 constexpr int32_t kPanelW          = 800;
 constexpr int32_t kPanelH          = 480;
 constexpr int32_t kHeaderH         = 64;
@@ -56,7 +58,40 @@ constexpr int32_t kModeBtnW        = 88;
 constexpr int32_t kModeBtnH        = 44;
 constexpr int32_t kHeaderRightPad  = 16;
 constexpr int32_t kHeaderCtrlGap   = 8;
+#elif defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+// 360 圆屏：顶栏双行 + 四周安全边距，避免圆弧裁切。
+constexpr bool    kRoundLayout     = true;
+constexpr int32_t kPanelW          = DISPLAY_WIDTH;
+constexpr int32_t kPanelH          = DISPLAY_HEIGHT;
+constexpr int32_t kHeaderTopInset  = 30;   // 避开顶部圆弧
+constexpr int32_t kHeaderSideInset = 36;   // 左右圆弧安全区
+constexpr int32_t kHeaderRow1H     = 36;
+constexpr int32_t kHeaderRow2H     = 34;
+constexpr int32_t kHeaderGap       = 4;
+constexpr int32_t kHeaderBottomPad = 6;
+constexpr int32_t kHeaderH =
+    kHeaderTopInset + kHeaderRow1H + kHeaderGap + kHeaderRow2H + kHeaderBottomPad;
+constexpr int32_t kBackBtnSize     = 34;
+constexpr int32_t kListPadH        = 28;
+constexpr int32_t kListPadTop      = 8;
+constexpr int32_t kListPadBottom   = 56;  // 给右下角切换钮留空
+constexpr int32_t kRowGap          = 6;
+constexpr int32_t kBubblePadX      = 10;
+constexpr int32_t kBubblePadY      = 6;
+constexpr int32_t kBubbleRadius    = 12;
+constexpr int32_t kSideMargin      = 4;
+constexpr int32_t kMaxMessages     = 8;
+constexpr int32_t kToggleBtnSize   = 44;
+constexpr int32_t kToggleIconSize  = 28;
+constexpr int32_t kToggleBtnMargin = 28;
+constexpr int32_t kClearBtnW       = 52;
+constexpr int32_t kClearBtnH       = 30;
+constexpr int32_t kModeBtnW        = 52;
+constexpr int32_t kModeBtnH        = 30;
+constexpr int32_t kHeaderRightPad  = 0;
+constexpr int32_t kHeaderCtrlGap   = 6;
 #else
+constexpr bool    kRoundLayout     = false;
 constexpr int32_t kPanelW          = 720;
 constexpr int32_t kPanelH          = 720;
 constexpr int32_t kHeaderH         = 88;
@@ -95,6 +130,10 @@ constexpr int32_t kEmotionBubbleBorder = 0;
 constexpr int32_t kEmotionBubbleSide   = 28;
 constexpr int32_t kCaptionBottom       = 22;
 constexpr int32_t kEmotionEafLift      = 56;
+#elif defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+constexpr int32_t kEmotionBubbleSide   = 24;
+constexpr int32_t kCaptionBottom       = 28;
+constexpr int32_t kEmotionEafLift      = 20;
 #else
 constexpr int32_t kEmotionBubbleSide   = 24;
 constexpr int32_t kCaptionBottom       = 36;   // 底部字幕距底边
@@ -158,6 +197,8 @@ char s_emotion_path_buf[kEmotionPathBufSize];
 
 const lv_font_t* chat_font() {
 #if CONFIG_BOARD_TYPE_ESP32_S31_KORVO_1
+    return &font_puhui_20_4;
+#elif defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
     return &font_puhui_20_4;
 #else
     return &font_puhui_30_4;
@@ -515,10 +556,12 @@ void open_activation_blocked_dialog() {
     auto& app = Application::GetInstance();
     const bool has_code = app.HasPendingActivation();
 
-    constexpr int32_t kCardW = 520;
-    const int32_t kCardH = has_code ? 420 : 340;
-    constexpr int32_t kBackBtnW = 200;
-    constexpr int32_t kBackBtnH = 72;
+    const int32_t kCardW = kRoundLayout ? 280 : 520;
+    const int32_t kCardH = kRoundLayout ? (has_code ? 240 : 200)
+                                       : (has_code ? 420 : 340);
+    const int32_t kBackBtnW = kRoundLayout ? 120 : 200;
+    const int32_t kBackBtnH = kRoundLayout ? 44 : 72;
+    const int32_t kCardPad = kRoundLayout ? 16 : 28;
 
     lv_obj_t* mask = lv_obj_create(s_ui.screen);
     screen_strip_obj_chrome(mask);
@@ -538,20 +581,22 @@ void open_activation_blocked_dialog() {
     lv_obj_set_style_bg_color(card, lv_color_hex(0x1B2030), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 24, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 28, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, kCardPad, LV_PART_MAIN);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t* title = lv_label_create(card);
     lv_label_set_text(title, I18n::T("设备未激活"));
     lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(title,
+                               kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_remove_flag(title, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t* desc = lv_label_create(card);
     lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(desc, kCardW - 56);
+    lv_obj_set_width(desc, kCardW - kCardPad * 2);
     lv_label_set_text(desc, I18n::T("请先完成设备激活后再使用聊天。"));
     lv_obj_set_style_text_color(desc, lv_color_hex(0x9AA3B2), LV_PART_MAIN);
     lv_obj_set_style_text_font(desc, &font_puhui_20_4, LV_PART_MAIN);
@@ -567,7 +612,9 @@ void open_activation_blocked_dialog() {
         lv_label_set_text(code_lbl, code_buf);
         lv_obj_set_style_text_color(code_lbl, lv_color_hex(0xFBBF24),
                                     LV_PART_MAIN);
-        lv_obj_set_style_text_font(code_lbl, &font_puhui_30_4, LV_PART_MAIN);
+        lv_obj_set_style_text_font(
+            code_lbl, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+            LV_PART_MAIN);
         lv_obj_align(code_lbl, LV_ALIGN_BOTTOM_MID, 0, -(kBackBtnH + 24));
         lv_obj_remove_flag(code_lbl, LV_OBJ_FLAG_CLICKABLE);
     }
@@ -586,7 +633,9 @@ void open_activation_blocked_dialog() {
     lv_obj_t* back_lbl = lv_label_create(back);
     lv_label_set_text(back_lbl, I18n::T("返回"));
     lv_obj_set_style_text_color(back_lbl, lv_color_hex(0xE5E7EB), LV_PART_MAIN);
-    lv_obj_set_style_text_font(back_lbl, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(
+        back_lbl, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+        LV_PART_MAIN);
     lv_obj_center(back_lbl);
     lv_obj_remove_flag(back_lbl, LV_OBJ_FLAG_CLICKABLE);
 }
@@ -802,61 +851,129 @@ void build_header(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, LV_PART_MAIN);
     screen_make_input_passive(divider);
 
-    lv_obj_t* back = lv_button_create(header);
-    lv_obj_remove_style_all(back);
-    lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
-    lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
-    lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
-                              LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(back, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
-    lv_obj_add_event_cb(back, [](lv_event_t* /*e*/) { on_swipe_back(); },
-                        LV_EVENT_CLICKED, nullptr);
-    screen_swipe_back_ignore(back, true);
+    if constexpr (kRoundLayout) {
+        // 圆屏双行：上 返回+标题+状态；下 表情/聊天/清空 居中，避开圆弧裁切。
+        lv_obj_t* row1 = lv_obj_create(header);
+        screen_strip_obj_chrome(row1);
+        lv_obj_set_size(row1, kPanelW - kHeaderSideInset * 2, kHeaderRow1H);
+        lv_obj_set_pos(row1, kHeaderSideInset, kHeaderTopInset);
+        lv_obj_set_style_bg_opa(row1, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_remove_flag(row1, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_flex_flow(row1, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row1, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(row1, 6, LV_PART_MAIN);
 
-    lv_obj_t* back_icon = lv_image_create(back);
-    lv_image_set_src(back_icon, "A:ic_app_back.spng");
-    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(back_icon);
+        lv_obj_t* back = lv_button_create(row1);
+        lv_obj_remove_style_all(back);
+        lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
+        lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
+                                  LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(back, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
+        lv_obj_add_event_cb(back, [](lv_event_t* /*e*/) { on_swipe_back(); },
+                            LV_EVENT_CLICKED, nullptr);
+        screen_swipe_back_ignore(back, true);
 
-    lv_obj_t* title = lv_label_create(header);
-    lv_label_set_text(title, I18n::T("聊天"));
-    lv_obj_set_style_text_color(title, lv_color_hex(kColorHeaderText),
-                                LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 16 + kBackBtnSize + 12, 0);
+        lv_obj_t* back_icon = lv_image_create(back);
+        lv_image_set_src(back_icon, "A:ic_app_back.spng");
+        lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(back_icon);
 
-    s_ui.status_state_lbl = lv_label_create(header);
-    lv_label_set_text(s_ui.status_state_lbl, I18n::T("待唤醒"));
-    lv_obj_set_style_text_font(s_ui.status_state_lbl, &font_puhui_20_4,
-                               LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_ui.status_state_lbl,
-                                lv_color_hex(kColorStateIdle), LV_PART_MAIN);
-    lv_obj_align_to(s_ui.status_state_lbl, title, LV_ALIGN_OUT_RIGHT_MID, 12, 0);
-    screen_make_input_passive(s_ui.status_state_lbl);
+        lv_obj_t* title = lv_label_create(row1);
+        lv_label_set_text(title, I18n::T("聊天"));
+        lv_obj_set_style_text_color(title, lv_color_hex(kColorHeaderText),
+                                    LV_PART_MAIN);
+        lv_obj_set_style_text_font(title, &font_puhui_20_4, LV_PART_MAIN);
+
+        s_ui.status_state_lbl = lv_label_create(row1);
+        lv_label_set_text(s_ui.status_state_lbl, I18n::T("待唤醒"));
+        lv_obj_set_style_text_font(s_ui.status_state_lbl, &font_puhui_20_4,
+                                   LV_PART_MAIN);
+        lv_obj_set_style_text_color(s_ui.status_state_lbl,
+                                    lv_color_hex(kColorStateIdle), LV_PART_MAIN);
+        screen_make_input_passive(s_ui.status_state_lbl);
+
+        lv_obj_t* row2 = lv_obj_create(header);
+        screen_strip_obj_chrome(row2);
+        lv_obj_set_size(row2, kPanelW - kHeaderSideInset * 2, kHeaderRow2H);
+        lv_obj_set_pos(row2, kHeaderSideInset,
+                       kHeaderTopInset + kHeaderRow1H + kHeaderGap);
+        lv_obj_set_style_bg_opa(row2, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_remove_flag(row2, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_flex_flow(row2, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row2, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(row2, kHeaderCtrlGap, LV_PART_MAIN);
+
+        s_ui.mode_emotion_btn = create_header_text_btn(
+            row2, kModeBtnW, kModeBtnH, I18n::T("表情"), on_mode_clicked,
+            reinterpret_cast<void*>(static_cast<uintptr_t>(ViewMode::Emotion)));
+        s_ui.mode_chat_btn = create_header_text_btn(
+            row2, kModeBtnW, kModeBtnH, I18n::T("聊天"), on_mode_clicked,
+            reinterpret_cast<void*>(static_cast<uintptr_t>(ViewMode::Chat)));
+        create_header_text_btn(row2, kClearBtnW, kClearBtnH, I18n::T("清空"),
+                               on_clear_clicked, nullptr);
+    } else {
+        lv_obj_t* back = lv_button_create(header);
+        lv_obj_remove_style_all(back);
+        lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
+        lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
+        lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
+                                  LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(back, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
+        lv_obj_add_event_cb(back, [](lv_event_t* /*e*/) { on_swipe_back(); },
+                            LV_EVENT_CLICKED, nullptr);
+        screen_swipe_back_ignore(back, true);
+
+        lv_obj_t* back_icon = lv_image_create(back);
+        lv_image_set_src(back_icon, "A:ic_app_back.spng");
+        lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(back_icon);
+
+        lv_obj_t* title = lv_label_create(header);
+        lv_label_set_text(title, I18n::T("聊天"));
+        lv_obj_set_style_text_color(title, lv_color_hex(kColorHeaderText),
+                                    LV_PART_MAIN);
+        lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
+        lv_obj_align(title, LV_ALIGN_LEFT_MID, 16 + kBackBtnSize + 12, 0);
+
+        s_ui.status_state_lbl = lv_label_create(header);
+        lv_label_set_text(s_ui.status_state_lbl, I18n::T("待唤醒"));
+        lv_obj_set_style_text_font(s_ui.status_state_lbl, &font_puhui_20_4,
+                                   LV_PART_MAIN);
+        lv_obj_set_style_text_color(s_ui.status_state_lbl,
+                                    lv_color_hex(kColorStateIdle), LV_PART_MAIN);
+        lv_obj_align_to(s_ui.status_state_lbl, title, LV_ALIGN_OUT_RIGHT_MID, 12,
+                        0);
+        screen_make_input_passive(s_ui.status_state_lbl);
+
+        lv_obj_t* clear = create_header_text_btn(
+            header, kClearBtnW, kClearBtnH, I18n::T("清空"), on_clear_clicked,
+            nullptr);
+        lv_obj_align(clear, LV_ALIGN_RIGHT_MID, -kHeaderRightPad, 0);
+
+        s_ui.mode_chat_btn = create_header_text_btn(
+            header, kModeBtnW, kModeBtnH, I18n::T("聊天"), on_mode_clicked,
+            reinterpret_cast<void*>(static_cast<uintptr_t>(ViewMode::Chat)));
+        lv_obj_align_to(s_ui.mode_chat_btn, clear, LV_ALIGN_OUT_LEFT_MID,
+                        -kHeaderCtrlGap, 0);
+
+        s_ui.mode_emotion_btn = create_header_text_btn(
+            header, kModeBtnW, kModeBtnH, I18n::T("表情"), on_mode_clicked,
+            reinterpret_cast<void*>(static_cast<uintptr_t>(ViewMode::Emotion)));
+        lv_obj_align_to(s_ui.mode_emotion_btn, s_ui.mode_chat_btn,
+                        LV_ALIGN_OUT_LEFT_MID, -kHeaderCtrlGap, 0);
+    }
 
     s_last_device_state = kDeviceStateUnknown;
     chat_update_device_state_label();
     s_ui.state_timer = lv_timer_create(on_chat_status_timer, 500, nullptr);
-
-    lv_obj_t* clear =
-        create_header_text_btn(header, kClearBtnW, kClearBtnH, I18n::T("清空"),
-                               on_clear_clicked, nullptr);
-    lv_obj_align(clear, LV_ALIGN_RIGHT_MID, -kHeaderRightPad, 0);
-
-    s_ui.mode_chat_btn = create_header_text_btn(
-        header, kModeBtnW, kModeBtnH, I18n::T("聊天"), on_mode_clicked,
-        reinterpret_cast<void*>(static_cast<uintptr_t>(ViewMode::Chat)));
-    lv_obj_align_to(s_ui.mode_chat_btn, clear, LV_ALIGN_OUT_LEFT_MID,
-                    -kHeaderCtrlGap, 0);
-
-    s_ui.mode_emotion_btn = create_header_text_btn(
-        header, kModeBtnW, kModeBtnH, I18n::T("表情"), on_mode_clicked,
-        reinterpret_cast<void*>(static_cast<uintptr_t>(ViewMode::Emotion)));
-    lv_obj_align_to(s_ui.mode_emotion_btn, s_ui.mode_chat_btn,
-                    LV_ALIGN_OUT_LEFT_MID, -kHeaderCtrlGap, 0);
 }
 
 void build_message_list(lv_obj_t* parent) {
@@ -877,15 +994,23 @@ void build_message_list(lv_obj_t* parent) {
 
     s_ui.empty_hint = lv_label_create(parent);
     lv_label_set_text(s_ui.empty_hint, I18n::T(kEmptyHint));
-    lv_obj_set_width(s_ui.empty_hint, kPanelW * 80 / 100);
+    lv_obj_set_width(s_ui.empty_hint,
+                     kRoundLayout ? (kPanelW * 70 / 100) : (kPanelW * 80 / 100));
     lv_label_set_long_mode(s_ui.empty_hint, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(s_ui.empty_hint, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_ui.empty_hint, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_ui.empty_hint,
+                               kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
     lv_obj_set_style_text_color(s_ui.empty_hint, lv_color_hex(kColorHintText),
                                 LV_PART_MAIN);
-    lv_obj_align(s_ui.empty_hint, LV_ALIGN_TOP_MID, 0,
-                 kHeaderH + (kPanelH - kHeaderH) / 2 - 50);
+    if constexpr (kRoundLayout) {
+        // 相对内容区垂直居中，避免顶栏加高后偏下
+        lv_obj_align(s_ui.empty_hint, LV_ALIGN_CENTER, 0, kHeaderH / 4);
+    } else {
+        lv_obj_align(s_ui.empty_hint, LV_ALIGN_TOP_MID, 0,
+                     kHeaderH + (kPanelH - kHeaderH) / 2 - 50);
+    }
     screen_make_input_passive(s_ui.empty_hint);
 }
 

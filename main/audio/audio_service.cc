@@ -80,6 +80,9 @@ void AudioService::Start() {
     service_stopped_ = false;
     xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING | AS_EVENT_WAKE_WORD_RUNNING |
         AS_EVENT_AUDIO_PROCESSOR_RUNNING | AS_EVENT_ALL_TASKS_RUNNING);
+    auto now = std::chrono::steady_clock::now();
+    last_input_time_ = now;
+    last_output_time_ = now;
 
     esp_timer_start_periodic(audio_power_timer_, 1000000);
 
@@ -519,6 +522,13 @@ void AudioService::EnableWakeWordDetection(bool enable) {
             }
             wake_word_initialized_ = true;
         }
+        if (!codec_->input_enabled()) {
+            esp_timer_stop(audio_power_timer_);
+            esp_timer_start_periodic(audio_power_timer_,
+                                     AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
+            codec_->EnableInput(true);
+        }
+        last_input_time_ = std::chrono::steady_clock::now();
         wake_word_->Start();
         xEventGroupSetBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
     } else {
@@ -711,7 +721,16 @@ void AudioService::CheckAndUpdateAudioPowerState() {
     auto now = std::chrono::steady_clock::now();
     auto input_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_input_time_).count();
     auto output_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_output_time_).count();
-    if (input_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->input_enabled()) {
+    EventBits_t bits = xEventGroupGetBits(event_group_);
+    bool input_active = !service_stopped_ &&
+        (bits & (AS_EVENT_AUDIO_TESTING_RUNNING | AS_EVENT_WAKE_WORD_RUNNING |
+                 AS_EVENT_AUDIO_PROCESSOR_RUNNING));
+    if (input_active) {
+        if (!codec_->input_enabled()) {
+            codec_->EnableInput(true);
+        }
+        last_input_time_ = now;
+    } else if (input_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->input_enabled()) {
         codec_->EnableInput(false);
     }
     if (output_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->output_enabled()) {

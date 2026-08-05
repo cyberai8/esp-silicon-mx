@@ -1,4 +1,5 @@
 #include "standby_screen.h"
+#include "config.h"
 #include "i18n.h"
 
 #include <cstdio>
@@ -18,30 +19,40 @@ LV_FONT_DECLARE(font_puhui_number_120_4);
 namespace {
 
 constexpr const char* TAG = "StandbyScreen";
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+constexpr bool kRoundSmall = true;
+constexpr int kPanelSize = DISPLAY_WIDTH;
+#else
+constexpr bool kRoundSmall = false;
 constexpr int kPanelSize = 720;
+#endif
 
-constexpr int kChargeFxW = 560;
-constexpr int kChargeFxH = 360;
-constexpr int kParticleCount = 52;
+constexpr int kChargeFxW = kRoundSmall ? kPanelSize : 560;
+constexpr int kChargeFxH = kRoundSmall ? 160 : 360;
+constexpr int kParticleCount = kRoundSmall ? 28 : 52;
 constexpr uint32_t kChargeBlueSoft = 0x59B2FF;
 constexpr uint32_t kChargeBlueBright = 0x9AD0FF;
 constexpr uint32_t kChargeEffectMs = 10000;
 constexpr uint32_t kParticleTickMs = 33;
 
-// 翻页时钟：HH MM SS 三组，组内个十位紧挨，组间留空。
-constexpr int kDigitCount = 6;
-constexpr int kDigitW = 88;
-constexpr int kDigitH = 148;
+// 翻页时钟：大屏 HH MM SS；圆屏 HH MM，用 120 号数字放大填满安全区。
+constexpr int kDigitCount = kRoundSmall ? 4 : 6;
+constexpr int kDigitW = kRoundSmall ? 68 : 88;
+constexpr int kDigitH = kRoundSmall ? 112 : 148;
 constexpr int kDigitHalf = kDigitH / 2;
-constexpr int kPairGap = 6;    // 十位与个位间距
-constexpr int kGroupGap = 32;  // 时/分/秒组间距
+constexpr int kPairGap = kRoundSmall ? 3 : 6;
+constexpr int kGroupGap = kRoundSmall ? 16 : 32;
 constexpr uint32_t kCardBg = 0x1C1C1E;
 constexpr uint32_t kCardBgTop = 0x2A2A2E;
 constexpr uint32_t kHingeColor = 0x0A0A0A;
 constexpr uint32_t kDigitColor = 0xF5F5F7;
-// 一整片叶子：上半收起(0→half) + 过铰链翻到下半展开(half→2*half)
 constexpr int32_t kFlipProgressMax = kDigitHalf * 2;
 constexpr uint32_t kFlipDurationMs = 480;
+
+const lv_font_t* StandbyDigitFont() {
+    // 圆屏也用 120 字体，卡片高度 112 可容纳，视觉接近大屏。
+    return &font_puhui_number_120_4;
+}
 
 // msgid 源文案（zh-CN）；显示时再 I18n::T，禁止在静态初始化里调用 T()。
 constexpr const char* kWeekdayMsgIds[7] = {"日", "一", "二", "三", "四", "五", "六"};
@@ -304,7 +315,7 @@ lv_obj_t* CreateHalfClip(lv_obj_t* parent, int y, uint32_t bg) {
 lv_obj_t* CreateDigitLabel(lv_obj_t* parent, int32_t y) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, "0");
-    lv_obj_set_style_text_font(lbl, &font_puhui_number_120_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(lbl, StandbyDigitFont(), LV_PART_MAIN);
     lv_obj_set_style_text_color(lbl, lv_color_hex(kDigitColor), LV_PART_MAIN);
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_width(lbl, kDigitW);
@@ -314,13 +325,13 @@ lv_obj_t* CreateDigitLabel(lv_obj_t* parent, int32_t y) {
 }
 
 void CreateFlipDigit(lv_obj_t* parent, FlipDigit* d) {
-    const int32_t line_h = font_puhui_number_120_4.line_height;
+    const int32_t line_h = StandbyDigitFont()->line_height;
     d->label_ofs_y = (kDigitH - line_h) / 2;
 
     d->card = lv_obj_create(parent);
     lv_obj_remove_style_all(d->card);
     lv_obj_set_size(d->card, kDigitW, kDigitH);
-    lv_obj_set_style_radius(d->card, 12, LV_PART_MAIN);
+    lv_obj_set_style_radius(d->card, kRoundSmall ? 8 : 12, LV_PART_MAIN);
     lv_obj_set_style_bg_color(d->card, lv_color_hex(kCardBg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(d->card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_clip_corner(d->card, true, LV_PART_MAIN);
@@ -410,7 +421,7 @@ void RespawnParticle(Particle* p, bool birth_at_bottom) {
         return;
     }
     // 更宽的出生带 + 略快衰减，同屏活跃点更多、翻滚更密。
-    const float spread = 260.0f;
+    const float spread = kRoundSmall ? 140.0f : 260.0f;
     p->x = kChargeFxW * 0.5f + (ChargeRand01() - 0.5f) * spread;
     p->y = birth_at_bottom ? (kChargeFxH - 8.0f - ChargeRand01() * 36.0f)
                            : (kChargeFxH * (0.30f + ChargeRand01() * 0.60f));
@@ -538,7 +549,7 @@ void StartChargeEffect(int battery_level) {
     lv_obj_set_style_text_color(tip, lv_color_hex(kChargeBlueSoft),
                                 LV_PART_MAIN);
     lv_obj_set_style_text_font(tip, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(tip, LV_ALIGN_BOTTOM_MID, 0, -52);
+    lv_obj_align(tip, LV_ALIGN_BOTTOM_MID, 0, kRoundSmall ? -28 : -52);
     lv_obj_remove_flag(tip, LV_OBJ_FLAG_CLICKABLE);
     s_ui.charge_tip = tip;
 
@@ -573,19 +584,32 @@ void UpdateClockLabels() {
 
     char digits[7] = "000000";
     if (have_time) {
-        std::snprintf(digits, sizeof(digits), "%02d%02d%02d", tm_info.tm_hour,
-                      tm_info.tm_min, tm_info.tm_sec);
+        if (kDigitCount == 4) {
+            std::snprintf(digits, sizeof(digits), "%02d%02d", tm_info.tm_hour,
+                          tm_info.tm_min);
+        } else {
+            std::snprintf(digits, sizeof(digits), "%02d%02d%02d", tm_info.tm_hour,
+                          tm_info.tm_min, tm_info.tm_sec);
+        }
         const int wday = tm_info.tm_wday;
         const char* weekday =
             (wday >= 0 && wday < 7) ? I18n::T(kWeekdayMsgIds[wday]) : "-";
 
         char date_str[64];
-        std::snprintf(date_str, sizeof(date_str), I18n::T("%04d年%02d月%02d日 星期%s"),
-                      tm_info.tm_year + 1900, tm_info.tm_mon + 1,
-                      tm_info.tm_mday, weekday);
+        if (kRoundSmall) {
+            std::snprintf(date_str, sizeof(date_str), I18n::T("%02d/%02d 周%s"),
+                          tm_info.tm_mon + 1, tm_info.tm_mday, weekday);
+        } else {
+            std::snprintf(date_str, sizeof(date_str),
+                          I18n::T("%04d年%02d月%02d日 星期%s"),
+                          tm_info.tm_year + 1900, tm_info.tm_mon + 1,
+                          tm_info.tm_mday, weekday);
+        }
         lv_label_set_text(s_ui.date_lbl, date_str);
     } else {
-        lv_label_set_text(s_ui.date_lbl, I18n::T("----年--月--日 星期-"));
+        lv_label_set_text(s_ui.date_lbl,
+                          kRoundSmall ? I18n::T("--/-- 周-")
+                                      : I18n::T("----年--月--日 星期-"));
     }
 
     // 首次铺底无动画，之后每位变化才翻页。
@@ -656,7 +680,7 @@ lv_obj_t* StandbyScreen::Create() {
     lv_obj_set_size(box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_center(box);
     lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(box, 28, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(box, kRoundSmall ? 18 : 28, LV_PART_MAIN);
     lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
@@ -666,12 +690,18 @@ lv_obj_t* StandbyScreen::Create() {
     s_ui.clock_row = CreateFlipClockRow(box);
 
     s_ui.date_lbl = lv_label_create(box);
-    lv_label_set_text(s_ui.date_lbl, I18n::T("----年--月--日 星期-"));
+    lv_label_set_text(s_ui.date_lbl,
+                      kRoundSmall ? I18n::T("--/-- 周-")
+                                  : I18n::T("----年--月--日 星期-"));
     lv_obj_set_style_text_color(s_ui.date_lbl, lv_color_hex(0xE5E7EB),
                                 LV_PART_MAIN);
     lv_obj_set_style_text_font(s_ui.date_lbl, &font_puhui_30_4, LV_PART_MAIN);
     lv_obj_set_style_text_align(s_ui.date_lbl, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
+    if (kRoundSmall) {
+        lv_obj_set_width(s_ui.date_lbl, kPanelSize - 80);
+        lv_label_set_long_mode(s_ui.date_lbl, LV_LABEL_LONG_CLIP);
+    }
     lv_obj_remove_flag(s_ui.date_lbl, LV_OBJ_FLAG_CLICKABLE);
 
     UpdateClockLabels();

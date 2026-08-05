@@ -1,4 +1,5 @@
 #include "network_screen.h"
+#include "config.h"
 #include "i18n.h"
 
 #include <algorithm>
@@ -40,8 +41,13 @@ constexpr const char* TAG = "NetworkScreen";
 // ---------------------------------------------------------------------------
 // 视觉常量
 // ---------------------------------------------------------------------------
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+constexpr int kPanelW = DISPLAY_WIDTH;
+constexpr int kPanelH = DISPLAY_HEIGHT;
+#else
 constexpr int kPanelW = 720;
 constexpr int kPanelH = 720;
+#endif
 constexpr int kHeaderH = 90;
 
 constexpr uint32_t kColorBg         = 0x0E1116;

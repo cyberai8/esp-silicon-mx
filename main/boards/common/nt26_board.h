@@ -30,12 +30,14 @@ struct Nt26CeregState {
 class Nt26Board : public Board {
 public:
     Nt26Board() = default;
+    Nt26Board(gpio_num_t, gpio_num_t, gpio_num_t, gpio_num_t, gpio_num_t = GPIO_NUM_NC) {}
     ~Nt26Board() override = default;
     std::string GetBoardType() override { return "nt26-stub"; }
     void StartNetwork() override {}
     NetworkInterface* GetNetwork() override { return nullptr; }
     void SetPowerSaveMode(bool) override {}
     AudioCodec* GetAudioCodec() override { return nullptr; }
+    const char* GetNetworkStateIcon() override { return ""; }
     std::string GetDeviceStatusJson() override { return "{}"; }
     std::string GetBoardJson() override { return "{}"; }
     Nt26CeregState GetRegistrationState() { return {}; }

@@ -1,4 +1,5 @@
 #include "weather_screen.h"
+#include "config.h"
 #include "i18n.h"
 
 #include "Weather.hpp"
@@ -25,6 +26,16 @@ LV_FONT_DECLARE(font_puhui_30_4);
 
 namespace {
 
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+constexpr int32_t kPanelW = DISPLAY_WIDTH;
+constexpr int32_t kHeaderH  = 48;
+constexpr int32_t kBackBtnSize = 40;
+constexpr int32_t kHeaderSidePad = 8;
+constexpr int32_t kRegionBtnW = 48;
+constexpr int32_t kRefreshBtnW = 48;
+constexpr int32_t kHeaderBtnH = 36;
+constexpr int32_t kHeaderBtnGap = 4;
+#else
 constexpr int32_t kPanelW = 720;
 constexpr int32_t kHeaderH  = 88;
 constexpr int32_t kBackBtnSize = 72;
@@ -33,6 +44,7 @@ constexpr int32_t kRegionBtnW = 72;
 constexpr int32_t kRefreshBtnW = 72;
 constexpr int32_t kHeaderBtnH = 56;
 constexpr int32_t kHeaderBtnGap = 8;
+#endif
 constexpr int32_t kModalCardW = 560;
 constexpr int32_t kModalCardPad = 24;
 constexpr int32_t kModalDdW = kModalCardW - kModalCardPad * 2;

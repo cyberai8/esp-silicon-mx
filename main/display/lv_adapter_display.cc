@@ -85,7 +85,8 @@ const char* GetEmoteCategory(const char* emote) {
 LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
                                    const esp_lcd_panel_io_handle_t panel_io,
                                    const esp_lcd_touch_handle_t touch_handle, const int width,
-                                   const int height, const esp_lv_adapter_panel_interface_t panel_if) {
+                                   const int height, const esp_lv_adapter_panel_interface_t panel_if,
+                                   const SpiTeConfig* spi_te) {
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
 
     esp_lv_adapter_config_t adapter_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG();
@@ -108,6 +109,29 @@ LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
         disp_cfg.profile.require_double_buffer = true;
         // S31 无 PPA；关掉避免误开
         disp_cfg.profile.enable_ppa_accel = false;
+    } else if (panel_if == ESP_LV_ADAPTER_PANEL_IF_OTHER) {
+        // SPI/QSPI（ESP-VoCat 360 QSPI 等）：OTHER 接口只允许 NONE / TE_SYNC。
+        // TE_SYNC 在本板 QSPI 上会出现 panel_io_spi_tx_color queue 失败导致黑屏，
+        // 默认走 NONE + PSRAM 缓冲；需要 TE 时由板级显式传入 spi_te。
+        const bool use_te = (spi_te != nullptr && spi_te->te_gpio >= 0);
+        if (use_te) {
+            disp_cfg = ESP_LV_ADAPTER_DISPLAY_SPI_WITH_PSRAM_TE_DEFAULT_CONFIG(
+                panel, panel_io, static_cast<uint16_t>(width),
+                static_cast<uint16_t>(height), ESP_LV_ADAPTER_ROTATE_0, spi_te->te_gpio,
+                spi_te->bus_freq_hz, spi_te->data_lines, spi_te->bits_per_pixel);
+        } else {
+            disp_cfg = ESP_LV_ADAPTER_DISPLAY_SPI_WITH_PSRAM_DEFAULT_CONFIG(
+                panel, panel_io, static_cast<uint16_t>(width),
+                static_cast<uint16_t>(height), ESP_LV_ADAPTER_ROTATE_0);
+            // 小屏用较短 strip，减轻单次 QSPI 传输压力（仍为 NONE tear 模式）
+            if (height <= 400) {
+                disp_cfg.profile.buffer_height = 40;
+            }
+        }
+        disp_cfg.profile.enable_ppa_accel = false;
+        ESP_LOGI(TAG, "SPI/QSPI display %dx%d te=%s buf_h=%u", width, height,
+                 use_te ? "on" : "off",
+                 static_cast<unsigned>(disp_cfg.profile.buffer_height));
     } else {
         // 性能调优要点（720x720 MIPI-DSI RGB565 屏，Claw4）：
         //   - enable_ppa_accel: 开启 PPA
@@ -130,17 +154,19 @@ LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
     }
 
     lv_display_t* disp = esp_lv_adapter_register_display(&disp_cfg);
-    esp_lv_adapter_touch_config_t touch_cfg =
-        ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(disp, touch_handle);
-    lv_indev_t* touch_indev = esp_lv_adapter_register_touch(&touch_cfg);
-    touch_feed_init(touch_handle, 20);
-    touch_feed_attach_indev(touch_indev);
+    if (touch_handle != nullptr) {
+        esp_lv_adapter_touch_config_t touch_cfg =
+            ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(disp, touch_handle);
+        lv_indev_t* touch_indev = esp_lv_adapter_register_touch(&touch_cfg);
+        touch_feed_init(touch_handle, 20);
+        touch_feed_attach_indev(touch_indev);
+    }
 
     ESP_ERROR_CHECK(esp_lv_adapter_start());
 
     // 图标走 A:*.spng；缓存驻留解码结果，避免滑动重绘时反复解码。
-    // S31：CLIB malloc + PSRAM，512KB 与官方 Korvo1 对齐；过大只会加重堆抖动。
-#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    // S31 / 360 小屏：512KB；大屏 Claw4：2MB。
+#if defined(CONFIG_IDF_TARGET_ESP32S31) || defined(CONFIG_BOARD_TYPE_ESP_VOCAT)
     lv_image_cache_resize(512 * 1024, true);
 #else
     lv_image_cache_resize(2 * 1024 * 1024, true);

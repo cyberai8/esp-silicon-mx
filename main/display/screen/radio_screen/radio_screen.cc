@@ -1,4 +1,5 @@
 #include "radio_screen.h"
+#include "config.h"
 #include "radio_stations.h"
 #include "i18n.h"
 
@@ -46,7 +47,11 @@ namespace {
 constexpr const char* TAG = "RadioScreen";
 constexpr int kRadioSampleRate = 16000;
 
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+constexpr auto kPanelSize = DISPLAY_WIDTH;
+#else
 constexpr int32_t kPanelSize = 720;
+#endif
 constexpr uint32_t kColorBg = 0x0E1116;
 constexpr uint32_t kColorBgGrad = 0x161A22;
 constexpr uint32_t kColorTextPrimary = 0xFFFFFF;

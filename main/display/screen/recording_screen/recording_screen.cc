@@ -1,4 +1,5 @@
 #include "recording_screen.h"
+#include "config.h"
 #include "i18n.h"
 
 #include <algorithm>
@@ -44,7 +45,11 @@ namespace {
 
 constexpr const char* TAG = "RecordingScreen";
 
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+constexpr auto kPanelSize = DISPLAY_WIDTH;
+#else
 constexpr int32_t kPanelSize = 720;
+#endif
 constexpr int32_t kHeaderH = 90;
 constexpr int32_t kBackBtnSize = 72;
 constexpr int32_t kTabBarH = 64;

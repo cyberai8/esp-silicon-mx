@@ -13,11 +13,21 @@
 
 class LVAdapterDisplay : public Display {
 public:
-    // panel_if: ESP_LV_ADAPTER_PANEL_IF_MIPI_DSI（默认，Claw4）或
-    // ESP_LV_ADAPTER_PANEL_IF_RGB（ESP32-S31 Korvo-1 等 RGB 屏）
+    // panel_if:
+    //   MIPI_DSI — Claw4
+    //   RGB      — ESP32-S31 Korvo-1
+    //   OTHER    — SPI/QSPI（ESP-VoCat ST77916 等）；可选 TE GPIO
+    struct SpiTeConfig {
+        int te_gpio = -1;          // <0: no TE sync
+        uint32_t bus_freq_hz = 40 * 1000 * 1000;
+        uint8_t data_lines = 4;    // QSPI=4, SPI=1
+        uint8_t bits_per_pixel = 16;
+    };
+
     LVAdapterDisplay(esp_lcd_panel_handle_t panel, esp_lcd_panel_io_handle_t panel_io,
                      const esp_lcd_touch_handle_t touch_handle, int width, int height,
-                     esp_lv_adapter_panel_interface_t panel_if = ESP_LV_ADAPTER_PANEL_IF_MIPI_DSI);
+                     esp_lv_adapter_panel_interface_t panel_if = ESP_LV_ADAPTER_PANEL_IF_MIPI_DSI,
+                     const SpiTeConfig* spi_te = nullptr);
     virtual ~LVAdapterDisplay();
 
     virtual void SetEmotion(const char* emotion) override;

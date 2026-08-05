@@ -5,6 +5,8 @@
 
 #include <esp_codec_dev.h>
 #include <esp_codec_dev_defaults.h>
+#include <sdkconfig.h>
+#include <freertos/FreeRTOS.h>
 #include <mutex>
 
 
@@ -21,7 +23,39 @@ private:
     esp_codec_dev_handle_t input_dev_ = nullptr;
     std::mutex data_if_mutex_;
 
+#if CONFIG_BOARD_TYPE_ESP_VOCAT
+    void* i2c_master_handle_ = nullptr;
+    gpio_num_t mclk_ = GPIO_NUM_NC;
+    gpio_num_t bclk_ = GPIO_NUM_NC;
+    gpio_num_t ws_ = GPIO_NUM_NC;
+    gpio_num_t dout_ = GPIO_NUM_NC;
+    gpio_num_t din_ = GPIO_NUM_NC;
+    gpio_num_t pa_pin_ = GPIO_NUM_NC;
+    uint8_t es8311_addr_ = 0;
+    uint8_t es7210_addr_ = 0;
+
+    bool tdm_slot_map_ready_ = false;
+    uint8_t tdm_slot0_ = 0;
+    uint8_t tdm_slot1_ = 1;
+    int tdm_probe_reads_left_ = 12;
+    uint32_t tdm_probe_log_decimate_ = 0;
+    int input_read_fail_count_ = 0;
+    TickType_t last_input_recovery_tick_ = 0;
+    bool input_recovery_in_progress_ = false;
+#endif
+
     void CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din);
+
+    bool OpenOutputDeviceLocked();
+    bool OpenInputDeviceLocked();
+    void CloseOutputDeviceLocked();
+    void CloseInputDeviceLocked();
+#if CONFIG_BOARD_TYPE_ESP_VOCAT
+    bool CreateCodecDevicesLocked();
+    void DeleteCodecDevicesLocked();
+    void HandleReadFailureLocked(esp_err_t ret, int samples);
+    bool RecoverInputStreamLocked();
+#endif
 
     virtual int Read(int16_t* dest, int samples) override;
     virtual int Write(const int16_t* data, int samples) override;

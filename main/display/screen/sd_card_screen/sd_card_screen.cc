@@ -1,4 +1,5 @@
 #include "sd_card_screen.h"
+#include "config.h"
 #include "i18n.h"
 
 #include "home_screen/home_screen.h"
@@ -25,7 +26,11 @@ LV_FONT_DECLARE(font_puhui_20_4);
 namespace {
 
 constexpr const char* TAG_SD = "SdCardScreen";
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+constexpr auto kPanelSize = DISPLAY_WIDTH;
+#else
 constexpr int kPanelSize = 720;
+#endif
 constexpr int kHeaderH = 80;
 constexpr int kBackBtnSize = 72;
 constexpr int kHeaderSidePad = 16;  // 与其它页面 header 返回钮左边距一致

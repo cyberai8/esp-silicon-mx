@@ -666,7 +666,11 @@ void Application::Start() {
 
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
+#if !CONFIG_BOARD_TYPE_ESP_VOCAT
+    // Home/chat launcher owns wake-word lifecycle (enabled when entering chat).
+    // Classic LcdDisplay boards (e.g. ESP-VoCat) keep wake word on in idle.
     audio_service_.EnableWakeWordDetection(false);
+#endif
 
     has_server_time_ = ota.HasServerTime();
     if (protocol_started) {
@@ -753,6 +757,8 @@ void Application::OnWakeWordDetected() {
     }
 
     if (device_state_ == kDeviceStateIdle) {
+        // Detection already Stop()'d fetch; clear FEED before encode/connect.
+        audio_service_.EnableWakeWordDetection(false);
         audio_service_.EncodeWakeWord();
 
         if (!protocol_->IsAudioChannelOpened()) {
@@ -827,6 +833,8 @@ void Application::SetDeviceState(DeviceState state) {
             display->SetStatus(Lang::Strings::CONNECTING);
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "");
+            // Fetch already stopped on detect; stop Feed so AFE ringbuffer does not fill during hello wait.
+            audio_service_.EnableWakeWordDetection(false);
             break;
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
@@ -947,6 +955,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
     }
 
     if (device_state_ == kDeviceStateIdle) {
+        audio_service_.EnableWakeWordDetection(false);
         audio_service_.EncodeWakeWord();
 
         if (!protocol_->IsAudioChannelOpened()) {

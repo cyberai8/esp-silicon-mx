@@ -15,6 +15,7 @@
 #include <cstring>
 
 #include "board.h"
+#include "touch_feed.h"
 
 #define TAG "LcdDisplay"
 
@@ -128,12 +129,13 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     lvgl_port_init(&port_cfg);
 
     ESP_LOGI(TAG, "Adding LCD display");
+    constexpr uint32_t kSpiDrawBufferLines = 40;
     const lvgl_port_display_cfg_t display_cfg = {
         .io_handle = panel_io_,
         .panel_handle = panel_,
         .control_handle = nullptr,
-        .buffer_size = static_cast<uint32_t>(width_ * 20),
-        .double_buffer = false,
+        .buffer_size = static_cast<uint32_t>(width_ * kSpiDrawBufferLines),
+        .double_buffer = true,
         .trans_size = 0,
         .hres = static_cast<uint32_t>(width_),
         .vres = static_cast<uint32_t>(height_),
@@ -186,7 +188,9 @@ bool SpiLcdDisplay::AddTouch(esp_lcd_touch_handle_t touch_handle) {
         ESP_LOGE(TAG, "Failed to add LCD touch");
         return false;
     }
-    ESP_LOGI(TAG, "LCD touch added");
+    touch_feed_init(touch_handle, 20);
+    touch_feed_attach_indev(indev);
+    ESP_LOGI(TAG, "LCD touch added with manual polling feed");
     return true;
 }
 

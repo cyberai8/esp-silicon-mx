@@ -102,14 +102,18 @@ set(INCLUDE_DIRS "." "i18n" "display" "display/font" "display/lvgl_display" "dis
 
 # Add board common files
 file(GLOB BOARD_COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/boards/common/*.cc)
-if(CONFIG_IDF_TARGET_ESP32S31 OR CONFIG_BOARD_TYPE_ESP_VOCAT)
-    # S31 / ESP-VoCat first pass：无 P4 MIPI CSI / P4 TinyUSB MSC / NT26 UHCI 4G
+if(CONFIG_IDF_TARGET_ESP32S31)
+    # S31：无 P4 MIPI CSI / NT26 UHCI 4G / ML307 DualNetwork
     list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/esp32_camera\\.cc$")
-    # usb_virtual_disk.cc 在非 P4 下已有空实现，S31 继续编译以供 SD 页链接
     list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/nt26_board\\.cc$")
     list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/uart_eth_modem\\.cc$")
     list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/dual_network_board\\.cc$")
     list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/ml307_board\\.cc$")
+elseif(CONFIG_BOARD_TYPE_ESP_VOCAT)
+    # VoCat：无相机 / NT26；启用 DualNetwork + ML307 UART 4G
+    list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/esp32_camera\\.cc$")
+    list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/nt26_board\\.cc$")
+    list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/uart_eth_modem\\.cc$")
 endif()
 list(APPEND SOURCES ${BOARD_COMMON_SOURCES})
 list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/common)
@@ -144,7 +148,8 @@ elseif(CONFIG_BOARD_TYPE_ESP32_S31_KORVO_1)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
 elseif(CONFIG_BOARD_TYPE_ESP_VOCAT)
     set(BOARD_TYPE "esp-vocat")
-    set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
+    # Classic SpiLcdDisplay chat UI needs full CJK glyphs; basic lacks common Chinese chars.
+    set(BUILTIN_TEXT_FONT font_puhui_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
 elseif(CONFIG_IDF_TARGET_ESP32S31)
