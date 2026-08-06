@@ -25,14 +25,39 @@ namespace {
 
 constexpr const char* TAG = "SettingsScreen";
 
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+constexpr bool kRoundLayout = true;
+constexpr int kPanelW = DISPLAY_WIDTH;
+constexpr int kPanelH = DISPLAY_HEIGHT;
+constexpr int kHeaderTopInset = 28;
+constexpr int kHeaderContentH = 36;
+constexpr int kHeaderH = kHeaderTopInset + kHeaderContentH;
+constexpr int kBackBtnSize = 36;
+constexpr int kHeaderSideInset = 32;
+constexpr int kTabBarSize = 40;  // 圆屏用顶部 Tab
+constexpr int kTabItemH = 36;
+constexpr int kTabItemGap = 4;
+constexpr int kBodyH = kPanelH - kHeaderH;
+constexpr int kSliderCardH = 96;
+constexpr int kTabPadHor = 40;   // 内容左右安全区（≈280 宽）
+constexpr int kTabPadTop = 6;
+constexpr int kTabPadBottom = 36;
+#else
+constexpr bool kRoundLayout = false;
 constexpr int kPanelW = DISPLAY_WIDTH;
 constexpr int kPanelH = DISPLAY_HEIGHT;
 constexpr int kHeaderH = (kPanelH >= 700) ? 90 : 64;
 constexpr int kBackBtnSize = (kPanelH >= 700) ? 72 : 48;
-constexpr int kTabBarW = (kPanelW >= 700) ? 120 : 100;
+constexpr int kHeaderSideInset = 16;
+constexpr int kTabBarSize = (kPanelW >= 700) ? 120 : 100;
 constexpr int kTabItemH = (kPanelH >= 700) ? 64 : 48;
 constexpr int kTabItemGap = 10;
 constexpr int kBodyH = kPanelH - kHeaderH;
+constexpr int kSliderCardH = 180;
+constexpr int kTabPadHor = 24;
+constexpr int kTabPadTop = 24;
+constexpr int kTabPadBottom = 24;
+#endif
 
 constexpr uint32_t kColorBg = 0x0E1116;
 constexpr uint32_t kColorText = 0xFFFFFF;
@@ -231,9 +256,11 @@ void BuildSliderPanel(lv_obj_t* parent, const char* title, const char* hint,
                       const char* range_hint, int initial_value,
                       lv_obj_t** pct_label_out, lv_obj_t** slider_out,
                       int slider_min, int slider_max, lv_event_cb_t slider_cb,
-                      int card_height = 180) {
-    lv_obj_set_style_pad_all(parent, 24, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(parent, 20, LV_PART_MAIN);
+                      int card_height = kSliderCardH) {
+    lv_obj_set_style_pad_hor(parent, kTabPadHor, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(parent, kTabPadTop, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(parent, kTabPadBottom, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(parent, kRoundLayout ? 8 : 20, LV_PART_MAIN);
     lv_obj_set_flex_flow(parent, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(parent, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
@@ -256,7 +283,9 @@ void BuildSliderPanel(lv_obj_t* parent, const char* title, const char* hint,
     lv_obj_set_width(pct, LV_PCT(100));
     lv_label_set_long_mode(pct, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_color(pct, lv_color_hex(kColorValue), LV_PART_MAIN);
-    lv_obj_set_style_text_font(pct, &font_puhui_number_50_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(
+        pct, kRoundLayout ? &font_puhui_30_4 : &font_puhui_number_50_4,
+        LV_PART_MAIN);
     lv_obj_set_style_text_align(pct, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     const int value_y = card_height <= 150 ? -10 : -16;
     const int hint_y = card_height <= 150 ? -12 : -20;
@@ -300,12 +329,14 @@ void BuildBrightnessTab(lv_obj_t* tab, int initial_brightness) {
                      initial_brightness, &s_ui.brightness_pct_label,
                      &s_ui.brightness_slider,
                      static_cast<int>(kBacklightMinPercent), 100,
-                     OnBrightnessSliderChanged);
+                     OnBrightnessSliderChanged, kSliderCardH);
 
     lv_obj_t* foot = lv_label_create(tab);
-    lv_label_set_text(foot, I18n::T("亮度设置会自动保存"));
+    lv_label_set_text(foot, I18n::T(kRoundLayout ? "自动保存" : "亮度设置会自动保存"));
     lv_obj_set_style_text_color(foot, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(foot, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_align(foot, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(foot, LV_PCT(100));
 }
 
 void UpdateMinutesLabel(lv_obj_t* label, int minutes, const char* never_text) {
@@ -330,34 +361,40 @@ void OnEnterStandbySliderChanged(lv_event_t* e) {
 
 void BuildStandbyTab(lv_obj_t* tab) {
     const int initial_standby = HomeScreen::GetIdleStandbyMinutes();
-    constexpr int kStandbyCardH = 132;
+    const int standby_card_h = kRoundLayout ? 100 : 132;
 
-    BuildSliderPanel(tab, I18n::T("进入待机"), I18n::T("首页无操作后进入待机页"),
-                     I18n::T("0 ~ 60 分钟"), initial_standby,
-                     &s_ui.enter_standby_min_label, &s_ui.enter_standby_slider,
-                     0, 60, OnEnterStandbySliderChanged, kStandbyCardH);
+    BuildSliderPanel(tab, I18n::T("进入待机"),
+                     I18n::T(kRoundLayout ? "无操作后进入待机"
+                                         : "首页无操作后进入待机页"),
+                     I18n::T(kRoundLayout ? "0 ~ 60 分" : "0 ~ 60 分钟"),
+                     initial_standby, &s_ui.enter_standby_min_label,
+                     &s_ui.enter_standby_slider, 0, 60,
+                     OnEnterStandbySliderChanged, standby_card_h);
     UpdateMinutesLabel(s_ui.enter_standby_min_label, initial_standby,
                        I18n::T("永不进入"));
 
-    // 待机 Tab 内容更密：略收紧行距，并加大底部留白。
-    lv_obj_set_style_pad_row(tab, 14, LV_PART_MAIN);
-    lv_obj_set_style_pad_bottom(tab, 56, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(tab, kRoundLayout ? 8 : 14, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(tab, kTabPadBottom, LV_PART_MAIN);
 
     lv_obj_t* foot = lv_label_create(tab);
-    lv_label_set_text(foot, I18n::T("待机设置会自动保存"));
+    lv_label_set_text(foot, I18n::T(kRoundLayout ? "自动保存" : "待机设置会自动保存"));
     lv_obj_set_style_text_color(foot, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(foot, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_align(foot, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(foot, LV_PCT(100));
 }
 
 void BuildVolumeTab(lv_obj_t* tab, int initial_volume) {
     BuildSliderPanel(tab, I18n::T("拖动调节"), I18n::T("当前音量"), "0% ~ 100%",
                      initial_volume, &s_ui.volume_pct_label, &s_ui.volume_slider,
-                     0, 100, OnVolumeSliderChanged);
+                     0, 100, OnVolumeSliderChanged, kSliderCardH);
 
     lv_obj_t* foot = lv_label_create(tab);
-    lv_label_set_text(foot, I18n::T("音量设置会自动保存"));
+    lv_label_set_text(foot, I18n::T(kRoundLayout ? "自动保存" : "音量设置会自动保存"));
     lv_obj_set_style_text_color(foot, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(foot, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_align(foot, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(foot, LV_PCT(100));
 }
 
 void BuildHeader(lv_obj_t* parent) {
@@ -368,29 +405,40 @@ void BuildHeader(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t* back = lv_button_create(header);
-    lv_obj_remove_style_all(back);
-    lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
-    lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
-    lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
-                              LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(back, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
-    lv_obj_add_event_cb(back, OnBackClicked, LV_EVENT_CLICKED, nullptr);
-    screen_swipe_back_ignore(back, true);
+    if constexpr (!kRoundLayout) {
+        // 方屏保留左上返回键；圆屏与网络配置一致：无箭头，右滑退出。
+        lv_obj_t* back = lv_button_create(header);
+        lv_obj_remove_style_all(back);
+        lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
+        lv_obj_align(back, LV_ALIGN_LEFT_MID, kHeaderSideInset, 0);
+        lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
+                                  LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(back, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
+        lv_obj_add_event_cb(back, OnBackClicked, LV_EVENT_CLICKED, nullptr);
+        screen_swipe_back_ignore(back, true);
 
-    lv_obj_t* back_icon = lv_image_create(back);
-    lv_image_set_src(back_icon, "A:ic_app_back.spng");
-    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(back_icon);
+        lv_obj_t* back_icon = lv_image_create(back);
+        lv_image_set_src(back_icon, "A:ic_app_back.spng");
+        lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(back_icon);
+    }
 
     lv_obj_t* title = lv_label_create(header);
     lv_label_set_text(title, I18n::T("设置"));
     lv_obj_set_style_text_color(title, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 16 + kBackBtnSize + 16, 0);
+    lv_obj_set_style_text_font(title,
+                               kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
+    if constexpr (kRoundLayout) {
+        const int title_y = kHeaderTopInset + (kHeaderContentH - 20) / 2;
+        lv_obj_align(title, LV_ALIGN_TOP_MID, 0, title_y);
+    } else {
+        lv_obj_align(title, LV_ALIGN_LEFT_MID,
+                     kHeaderSideInset + kBackBtnSize + 16, 0);
+    }
 }
 
 void GoHomeAfterLocaleChange() {
@@ -414,8 +462,10 @@ void OnLanguageCardClicked(lv_event_t* e) {
 }
 
 void BuildLanguageTab(lv_obj_t* tab) {
-    lv_obj_set_style_pad_all(tab, 24, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(tab, 16, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(tab, kTabPadHor, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(tab, kTabPadTop, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(tab, kTabPadBottom, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(tab, kRoundLayout ? 10 : 16, LV_PART_MAIN);
     lv_obj_set_flex_flow(tab, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(tab, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
@@ -437,7 +487,7 @@ void BuildLanguageTab(lv_obj_t* tab) {
         lv_obj_t* card = lv_obj_create(tab);
         screen_strip_obj_chrome(card);
         lv_obj_set_width(card, LV_PCT(100));
-        lv_obj_set_height(card, 88);
+        lv_obj_set_height(card, kRoundLayout ? 64 : 88);
         lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_radius(card, 20, LV_PART_MAIN);
@@ -459,8 +509,11 @@ void BuildLanguageTab(lv_obj_t* tab) {
         lv_label_set_text(name, info->native_name);
         lv_obj_set_style_text_color(name, lv_color_hex(kColorText),
                                     LV_PART_MAIN);
-        lv_obj_set_style_text_font(name, &font_puhui_30_4, LV_PART_MAIN);
-        lv_obj_align(name, LV_ALIGN_LEFT_MID, 20, -10);
+        lv_obj_set_style_text_font(
+            name, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+            LV_PART_MAIN);
+        lv_obj_align(name, LV_ALIGN_LEFT_MID, kRoundLayout ? 12 : 20,
+                     kRoundLayout ? -8 : -10);
 
         lv_obj_t* code = lv_label_create(card);
         lv_label_set_text(code, info->english_name);
@@ -480,18 +533,31 @@ void BuildLanguageTab(lv_obj_t* tab) {
     }
 
     lv_obj_t* foot = lv_label_create(tab);
-    lv_label_set_text(foot, I18n::T("切换后立即生效并返回主页"));
+    lv_label_set_text(foot,
+                      I18n::T(kRoundLayout ? "立即生效并返回主页"
+                                          : "切换后立即生效并返回主页"));
     lv_obj_set_style_text_color(foot, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(foot, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_align(foot, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(foot, LV_PCT(100));
 }
 
 void FixTabBarItemHeights(lv_obj_t* tabview) {
     lv_obj_t* bar = lv_tabview_get_tab_bar(tabview);
-    lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_row(bar, kTabItemGap, LV_PART_MAIN);
-    lv_obj_set_style_pad_top(bar, 20, LV_PART_MAIN);
-    lv_obj_set_style_pad_hor(bar, 8, LV_PART_MAIN);
+    if constexpr (kRoundLayout) {
+        // 顶部横向 Tab：均分宽度，避免左侧栏挤占内容区。
+        lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(bar, kTabItemGap, LV_PART_MAIN);
+        lv_obj_set_style_pad_hor(bar, 28, LV_PART_MAIN);
+        lv_obj_set_style_pad_ver(bar, 2, LV_PART_MAIN);
+    } else {
+        lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_START);
+        lv_obj_set_style_pad_row(bar, kTabItemGap, LV_PART_MAIN);
+        lv_obj_set_style_pad_top(bar, 20, LV_PART_MAIN);
+        lv_obj_set_style_pad_hor(bar, 8, LV_PART_MAIN);
+    }
 
     const uint32_t count = lv_tabview_get_tab_count(tabview);
     for (uint32_t i = 0; i < count; ++i) {
@@ -499,9 +565,14 @@ void FixTabBarItemHeights(lv_obj_t* tabview) {
         if (btn == nullptr) {
             continue;
         }
-        lv_obj_set_flex_grow(btn, 0);
-        lv_obj_set_width(btn, lv_pct(100));
-        lv_obj_set_height(btn, kTabItemH);
+        if constexpr (kRoundLayout) {
+            lv_obj_set_flex_grow(btn, 1);
+            lv_obj_set_height(btn, kTabItemH);
+        } else {
+            lv_obj_set_flex_grow(btn, 0);
+            lv_obj_set_width(btn, lv_pct(100));
+            lv_obj_set_height(btn, kTabItemH);
+        }
         lv_obj_set_style_radius(btn, 12, LV_PART_MAIN);
     }
 }
@@ -592,8 +663,10 @@ void BuildChargeTab(lv_obj_t* tab) {
     s_ui.charge_tab = tab;
     lv_obj_clean(tab);
 
-    lv_obj_set_style_pad_all(tab, 24, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(tab, 16, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(tab, kTabPadHor, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(tab, kTabPadTop, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(tab, kTabPadBottom, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(tab, kRoundLayout ? 10 : 16, LV_PART_MAIN);
     lv_obj_set_flex_flow(tab, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(tab, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
@@ -624,7 +697,7 @@ void BuildChargeTab(lv_obj_t* tab) {
         lv_obj_t* card = lv_obj_create(tab);
         screen_strip_obj_chrome(card);
         lv_obj_set_width(card, LV_PCT(100));
-        lv_obj_set_height(card, 88);
+        lv_obj_set_height(card, kRoundLayout ? 64 : 88);
         lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_radius(card, 20, LV_PART_MAIN);
@@ -643,14 +716,18 @@ void BuildChargeTab(lv_obj_t* tab) {
         lv_obj_t* name = lv_label_create(card);
         lv_label_set_text(name, I18n::T(mode.title));
         lv_obj_set_style_text_color(name, lv_color_hex(kColorText), LV_PART_MAIN);
-        lv_obj_set_style_text_font(name, &font_puhui_30_4, LV_PART_MAIN);
-        lv_obj_align(name, LV_ALIGN_LEFT_MID, 20, -10);
+        lv_obj_set_style_text_font(
+            name, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+            LV_PART_MAIN);
+        lv_obj_align(name, LV_ALIGN_LEFT_MID, kRoundLayout ? 12 : 20,
+                     kRoundLayout ? -8 : -10);
 
         lv_obj_t* sub = lv_label_create(card);
         lv_label_set_text(sub, I18n::T(mode.subtitle));
         lv_obj_set_style_text_color(sub, lv_color_hex(kColorSubtle), LV_PART_MAIN);
         lv_obj_set_style_text_font(sub, &font_puhui_20_4, LV_PART_MAIN);
-        lv_obj_align(sub, LV_ALIGN_LEFT_MID, 20, 18);
+        lv_obj_align(sub, LV_ALIGN_LEFT_MID, kRoundLayout ? 12 : 20,
+                     kRoundLayout ? 14 : 18);
 
         if (selected) {
             lv_obj_t* mark = lv_label_create(card);
@@ -676,8 +753,12 @@ void BuildTabView(lv_obj_t* parent) {
     s_ui.tabview = tv;
     lv_obj_set_size(tv, kPanelW, kBodyH);
     lv_obj_set_pos(tv, 0, kHeaderH);
-    lv_tabview_set_tab_bar_position(tv, LV_DIR_LEFT);
-    lv_tabview_set_tab_bar_size(tv, kTabBarW);
+    if constexpr (kRoundLayout) {
+        lv_tabview_set_tab_bar_position(tv, LV_DIR_TOP);
+    } else {
+        lv_tabview_set_tab_bar_position(tv, LV_DIR_LEFT);
+    }
+    lv_tabview_set_tab_bar_size(tv, kTabBarSize);
 
     lv_obj_set_style_bg_color(tv, lv_color_hex(kColorBg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(tv, LV_OPA_COVER, LV_PART_MAIN);
@@ -698,7 +779,11 @@ void BuildTabView(lv_obj_t* parent) {
                                 LV_PART_ITEMS | LV_STATE_CHECKED);
 
     lv_obj_t* content = lv_tabview_get_content(tv);
-    screen_swipe_back_ignore(content, true);
+    // 方屏：内容区忽略右滑，避免横滑切 Tab 误退出。
+    // 圆屏：无返回箭头，允许内容区右滑回桌面。
+    if constexpr (!kRoundLayout) {
+        screen_swipe_back_ignore(content, true);
+    }
 
     lv_obj_t* tab_brightness = lv_tabview_add_tab(tv, I18n::T("亮度"));
     BuildBrightnessTab(tab_brightness, initial_brightness);
@@ -718,8 +803,10 @@ void BuildTabView(lv_obj_t* parent) {
         BuildChargeTab(tab_charge);
     }
 
+#if !defined(BOARD_ESP_VOCAT)
     lv_obj_t* tab_bluetooth = lv_tabview_add_tab(tv, I18n::T("蓝牙"));
     BuildBluetoothTab(tab_bluetooth);
+#endif
 
     FixTabBarItemHeights(tv);
 }

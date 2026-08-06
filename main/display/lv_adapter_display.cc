@@ -87,10 +87,21 @@ LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
                                    const esp_lcd_touch_handle_t touch_handle, const int width,
                                    const int height, const esp_lv_adapter_panel_interface_t panel_if,
                                    const SpiTeConfig* spi_te) {
+    // VoCat：先保持关屏，等 BootScreen 画完再开，避免未初始化 framebuffer 闪边角。
+#if !CONFIG_BOARD_TYPE_ESP_VOCAT
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
+#endif
 
     esp_lv_adapter_config_t adapter_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG();
+#if CONFIG_BOARD_TYPE_ESP_VOCAT || (defined(DISPLAY_WIDTH) && defined(DISPLAY_HEIGHT) && \
+                                      DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+    // LVGL 任务栈若在 PSRAM，任务内读 NVS/Flash 会触发
+    // esp_task_stack_is_sane_cache_disabled assert（主屏状态栏/主题都会读 NVS）。
+    // 360 小屏 LVGL 栈不大，改用内部 RAM。
+    adapter_cfg.stack_in_psram = false;
+#else
     adapter_cfg.stack_in_psram = true;
+#endif
     adapter_cfg.task_priority = 1;
     adapter_cfg.task_core_id = 1;
 
@@ -200,24 +211,19 @@ LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
 void LVAdapterDisplay::SetupUI() {
     lv_obj_t* boot_scr = BootScreen::Create();
     lv_screen_load(boot_scr);
+}
 
-    lv_timer_t* timer = lv_timer_create(
-        [](lv_timer_t* t) {
-            lv_obj_t* old_scr = lv_screen_active();
-
-            if (esp_lv_adapter_lock(-1) == ESP_OK) {
-                lv_obj_t* home_scr = HomeScreen::Create();
-                lv_screen_load(home_scr);
-                if (old_scr != NULL && old_scr != home_scr) {
-                    lv_obj_delete(old_scr);
-                }
-                esp_lv_adapter_unlock();
-            }
-
-            lv_timer_delete(t);
-        },
-        2000, nullptr);
-    lv_timer_set_repeat_count(timer, 1);
+void LVAdapterDisplay::ShowHomeScreen() {
+    if (esp_lv_adapter_lock(-1) != ESP_OK) {
+        return;
+    }
+    lv_obj_t* old_scr = lv_screen_active();
+    lv_obj_t* home_scr = HomeScreen::Create();
+    lv_screen_load(home_scr);
+    if (old_scr != nullptr && old_scr != home_scr) {
+        lv_obj_delete(old_scr);
+    }
+    esp_lv_adapter_unlock();
 }
 
 LVAdapterDisplay::~LVAdapterDisplay() = default;

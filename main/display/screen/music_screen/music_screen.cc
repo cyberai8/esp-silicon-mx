@@ -15,6 +15,9 @@
 #include "application.h"
 #include "board.h"
 #include "config.h"
+#if defined(BOARD_ESP_VOCAT)
+#include "music_screen_sd.h"
+#endif
 #if BOARD_HAS_EXTERNAL_BT
 #include "SimpleUart.hpp"
 #endif
@@ -52,9 +55,51 @@ constexpr const char* TAG = "MusicScreen";
 //   y=720  └────────────────────────────────┘
 // ---------------------------------------------------------------------------
 #if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+constexpr bool kRoundLayout = true;
 constexpr auto kPanelSize = DISPLAY_WIDTH;
+constexpr int32_t kTitleY = 36;
+constexpr int32_t kAlbumSize = 140;
+constexpr int32_t kHintBottomMargin = 28;
+constexpr int32_t kAlbumMaskShrink = 3;
+constexpr int32_t kAlbumY = 78;
+// 专辑图下沿 = kAlbumY + kAlbumMaskShrink + (kAlbumSize - 2*kAlbumMaskShrink)
+//           = 78 + 3 + 134 = 215，下面留给歌词三行 + 控制行 + 底部提示的
+// 空间只有 360-215-底部安全边距(28+~24) ≈ 93px，必须重新按这个预算收紧
+// 行距/按钮尺寸，否则第三行歌词会被控制行盖住（原数值下确实会撞在一起）。
+constexpr int32_t kLyricY = 221;
+constexpr int32_t kLyricLineGap = 14;
+constexpr int32_t kCtrlRowY = 274;
+constexpr int32_t kCtrlRowWidth = 280;
+constexpr int32_t kCtrlRowHeight = 32;
+constexpr int32_t kArtistY = 52;
+constexpr int32_t kAlbumInfoY = 66;
+// 按钮视觉尺寸缩小，但 CreateRoundButton 内部 ext_click_area=12，
+// 实际可点热区仍有 ~50-56px，圆屏单指点按不会觉得难点。
+constexpr int32_t kCtrlSideBtnSize = 26;
+constexpr int32_t kCtrlPlayBtnSize = 32;
+constexpr int32_t kBackBtnSize = 36;
+constexpr int32_t kBackBtnX = 28;
+constexpr int32_t kBackBtnY = 28;
 #else
+constexpr bool kRoundLayout = false;
 constexpr int32_t kPanelSize = 720;
+constexpr int32_t kTitleY = 48;
+constexpr int32_t kAlbumSize = 240;
+constexpr int32_t kHintBottomMargin = 16;
+constexpr int32_t kAlbumMaskShrink = 4;
+constexpr int32_t kAlbumY = 140;
+constexpr int32_t kCtrlRowY = 560;
+constexpr int32_t kCtrlRowWidth = 700;
+constexpr int32_t kCtrlRowHeight = 120;
+constexpr int32_t kArtistY = 88;
+constexpr int32_t kAlbumInfoY = 116;
+constexpr int32_t kCtrlSideBtnSize = 80;
+constexpr int32_t kCtrlPlayBtnSize = 112;
+constexpr int32_t kLyricY = 410;
+constexpr int32_t kLyricLineGap = 34;
+constexpr int32_t kBackBtnSize = 72;
+constexpr int32_t kBackBtnX = 32;
+constexpr int32_t kBackBtnY = 36;
 #endif
 
 constexpr uint32_t kColorBg = 0x0E1116;
@@ -66,35 +111,16 @@ constexpr uint32_t kColorCtrlBtnBgPressed = 0x303644;
 constexpr uint32_t kColorPlayBtnBg = 0x3A4150;
 constexpr uint32_t kColorPlayBtnBgPressed = 0x4A5260;
 
-constexpr int32_t kTitleY = 48;
-constexpr int32_t kAlbumSize = 240;
-// 屏幕最底部的常驻使用说明，距底边的内边距。
-constexpr int32_t kHintBottomMargin = 16;
-// GIF 圆形主体在 240x240 内是带抗锯齿白边的，如果遮罩刚好等于 240，
-// 那一圈半透明的白色像素就会漏出来形成"毛刺"。把遮罩往里缩几个像素
-// （每边各 4px），让 clip_corner 多裁一圈把白边一起切掉。
-constexpr int32_t kAlbumMaskShrink = 4;  // 每边裁掉的像素，加大可去更多毛刺
 constexpr int32_t kAlbumMaskSize = kAlbumSize - kAlbumMaskShrink * 2;
 constexpr uint32_t kAlbumFrameDelayMs = 180;
-constexpr int32_t kAlbumY = 140;
-constexpr int32_t kCtrlRowY = 560;
-constexpr int32_t kCtrlRowWidth = 700;
-constexpr int32_t kCtrlRowHeight = 120;
-constexpr int32_t kArtistY = 88;
-constexpr int32_t kAlbumInfoY = 116;
 #if !BOARD_HAS_EXTERNAL_BT
 constexpr size_t kNativeBtMinInternalFree = 50000;
 constexpr size_t kNativeBtMinLargestBlock = 20000;
 #endif
 
-constexpr int32_t kCtrlSideBtnSize = 80;
-constexpr int32_t kCtrlPlayBtnSize = 112;
-
 // 歌词三行布局：最上面是最新一句，越往下越旧、越透明。
 constexpr int32_t kLyricLineCount = 3;
-constexpr int32_t kLyricY = 410;
-constexpr int32_t kLyricLineGap = 34;
-constexpr int32_t kLyricLineWidth = kPanelSize - 80;
+constexpr int32_t kLyricLineWidth = kPanelSize - (kRoundLayout ? 64 : 80);
 // 每行的目标 opacity（顶 -> 底）。255 / 153 / 76 大约对应 100% / 60% / 30%。
 constexpr lv_opa_t kLyricTargetOpa[kLyricLineCount] = {255, 153, 76};
 constexpr uint32_t kLyricFadeDurationMs = 380;
@@ -686,7 +712,7 @@ void BuildBackButton(lv_obj_t* scr) {
     // 与 sd_card / network / vibrate / level 等页面保持同一视觉规范。
     lv_obj_t* back_btn = lv_button_create(scr);
     lv_obj_remove_style_all(back_btn);
-    lv_obj_set_size(back_btn, 72, 72);
+    lv_obj_set_size(back_btn, kBackBtnSize, kBackBtnSize);
     lv_obj_set_style_bg_opa(back_btn, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_bg_color(back_btn, lv_color_hex(0xFFFFFF),
                               Sel(LV_PART_MAIN, LV_STATE_PRESSED));
@@ -694,7 +720,7 @@ void BuildBackButton(lv_obj_t* scr) {
                             Sel(LV_PART_MAIN, LV_STATE_PRESSED));
     lv_obj_set_style_radius(back_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(back_btn, 0, LV_PART_MAIN);
-    lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, 32, 36);
+    lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, kBackBtnX, kBackBtnY);
     // 返回按钮自身的点击不应被全屏右滑手势拦截。
     screen_swipe_back_ignore(back_btn, true);
 
@@ -731,12 +757,14 @@ void BuildSongTitle(lv_obj_t* scr) {
     s_ui.lbl_song = lv_label_create(scr);
     // 默认占位文本，等手机回传 song 字段时被覆盖。
     lv_label_set_text(s_ui.lbl_song, I18n::T("蓝牙音乐"));
-    lv_obj_set_style_text_font(s_ui.lbl_song, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_ui.lbl_song,
+                               kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
     lv_obj_set_style_text_color(s_ui.lbl_song, lv_color_hex(kColorTextPrimary),
                                 LV_PART_MAIN);
     lv_obj_set_style_text_align(s_ui.lbl_song, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_label_set_long_mode(s_ui.lbl_song, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_ui.lbl_song, kPanelSize - 80);
+    lv_obj_set_width(s_ui.lbl_song, kPanelSize - (kRoundLayout ? 64 : 80));
     lv_obj_align(s_ui.lbl_song, LV_ALIGN_TOP_MID, 0, kTitleY);
     screen_make_input_passive(s_ui.lbl_song);
 
@@ -852,6 +880,9 @@ void BuildControls(lv_obj_t* scr) {
 }  // namespace
 
 lv_obj_t* MusicScreen::Create() {
+#if defined(BOARD_ESP_VOCAT)
+    return MusicScreenSd::Create();
+#else
     s_ui = MusicUi{};
     // 进入界面默认按钮是"▶ 播放"，等用户点一次才进入播放状态。
     s_ui.playing = false;
@@ -870,7 +901,7 @@ lv_obj_t* MusicScreen::Create() {
     BuildAlbum(scr);
     BuildLyric(scr);
     BuildControls(scr);
-#if !BOARD_HAS_EXTERNAL_BT
+#if BOARD_HAS_NATIVE_BT
     {
         std::lock_guard<std::mutex> lock(s_native_bt_ui_mutex);
         s_native_bt_ui_cache = NativeBtUiCache{};
@@ -885,9 +916,13 @@ lv_obj_t* MusicScreen::Create() {
 
     s_screen_active = true;
     return scr;
+#endif
 }
 
 void MusicScreen::LifecycleCallback(screen_lifecycle_event_t event) {
+#if defined(BOARD_ESP_VOCAT)
+    MusicScreenSd::LifecycleCallback(event);
+#else
     if (event == SCREEN_LIFECYCLE_LOAD) {
 #if BOARD_HAS_EXTERNAL_BT
         ESP_LOGI(TAG, "load: music_screen -> switching BT to mode 3");
@@ -896,7 +931,7 @@ void MusicScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         // 注册 UART RX 回调，开始监听手机回传的 JSON。
         s_rx_buffer.clear();
         SimpleUart::getInstance().registerCallback(on_uart_data);
-#else
+#elif BOARD_HAS_NATIVE_BT
         ESP_LOGI(TAG, "load: music_screen -> native BT speaker mode");
         s_rx_buffer.clear();
         auto& audio_service = Application::GetInstance().GetAudioService();
@@ -915,6 +950,12 @@ void MusicScreen::LifecycleCallback(screen_lifecycle_event_t event) {
                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
         auto& bt = NativeBluetoothAudio::GetInstance();
+        if (!bt.IsSupported()) {
+            ESP_LOGW(TAG, "native BT not enabled in sdkconfig");
+            post_lyric(I18n::T("内置蓝牙未启用，请检查固件配置"));
+            restore_audio_service_after_native_bt();
+            return;
+        }
         if (!bt.IsInitialized() && !native_bt_heap_ready()) {
             ESP_LOGE(TAG, "not enough internal heap for native BT");
             post_lyric(I18n::T("内存不足，蓝牙音乐暂不可用"));
@@ -932,6 +973,13 @@ void MusicScreen::LifecycleCallback(screen_lifecycle_event_t event) {
             post_lyric(I18n::T("内置蓝牙未启用，请检查固件配置"));
             restore_audio_service_after_native_bt();
         }
+#else
+        // VoCat 等无蓝牙板：禁止走 native BT 初始化（会在 UI 线程
+        // ReleaseWakeWord/StopAndWait，容易整屏卡死）。
+        ESP_LOGI(TAG, "load: music_screen -> BT music unsupported on this board");
+        s_rx_buffer.clear();
+        post_track_info(I18n::T("音乐"), "", "");
+        post_lyric(I18n::T("本机不支持蓝牙音乐"));
 #endif
     } else {
 #if BOARD_HAS_EXTERNAL_BT
@@ -943,7 +991,7 @@ void MusicScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         s_rx_buffer.clear();
         // 切回模式 1 同样需要 700ms 间隔，放后台 task 异步执行。
         xTaskCreate(switch_to_mode1_task, "mus_mode1", 4096, nullptr, 5, nullptr);
-#else
+#elif BOARD_HAS_NATIVE_BT
         ESP_LOGI(TAG, "unload: music_screen -> native BT suspend");
         auto& bt = NativeBluetoothAudio::GetInstance();
         bt.SetStateCallback(nullptr);
@@ -952,6 +1000,11 @@ void MusicScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         restore_audio_service_after_native_bt();
         s_screen_active = false;
         s_rx_buffer.clear();
+#else
+        ESP_LOGI(TAG, "unload: music_screen");
+        s_screen_active = false;
+        s_rx_buffer.clear();
 #endif
     }
+#endif
 }

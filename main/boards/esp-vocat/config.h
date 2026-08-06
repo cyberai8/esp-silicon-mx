@@ -72,6 +72,8 @@
 #define SDMMC_D2_PIN    GPIO_NUM_NC
 #define SDMMC_D3_PIN    GPIO_NUM_NC
 #define SDMMC_BUS_WIDTH 1
+// ESP32-S3 1-bit SDMMC：勿用 SDR50（UHS-I），否则直接 ESP_ERR_NOT_SUPPORTED。
+#define SDMMC_MAX_FREQ_KHZ SDMMC_FREQ_DEFAULT
 #define MOUNT_POINT "/sdcard"
 
 #define ML307_RX_PIN   GPIO_NUM_5
@@ -94,6 +96,8 @@
 
 #define BOARD_HAS_EXTERNAL_BT 0
 #define BOARD_HAS_NATIVE_BT   0
+// ML307 单卡：网络设置里不展示内外置 SIM 切换，改显示蜂窝信息。
+#define BOARD_HAS_DUAL_SIM    0
 #define BT_AUDIO_TX_PIN       GPIO_NUM_NC
 #define BT_AUDIO_RX_PIN       GPIO_NUM_NC
 

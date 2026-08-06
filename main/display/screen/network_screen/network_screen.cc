@@ -31,6 +31,12 @@
 #include "home_screen/home_screen.h"
 #include "screen_util.h"
 
+#include <cJSON.h>
+
+#ifndef BOARD_HAS_DUAL_SIM
+#define BOARD_HAS_DUAL_SIM 0
+#endif
+
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_puhui_30_4);
 
@@ -42,13 +48,67 @@ constexpr const char* TAG = "NetworkScreen";
 // 视觉常量
 // ---------------------------------------------------------------------------
 #if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
-constexpr int kPanelW = DISPLAY_WIDTH;
-constexpr int kPanelH = DISPLAY_HEIGHT;
+// 360 圆屏：头部收窄 + 小号返回键，所有弹窗收到 <=280x260 安全区内。
+// 返回键必须离开左上圆弧（侧边/顶部 inset 参考 settings/chat）。
+constexpr bool kRoundLayout      = true;
+constexpr int  kPanelW           = DISPLAY_WIDTH;
+constexpr int  kPanelH           = DISPLAY_HEIGHT;
+constexpr int  kHeaderTopInset   = 28;
+constexpr int  kHeaderContentH   = 36;
+constexpr int  kHeaderH          = kHeaderTopInset + kHeaderContentH;  // 64
+constexpr int  kHeaderSideInset  = 36;
+// 圆屏无返回箭头，仅右滑退出。
+constexpr int  kBackBtnSize      = 0;
+// 通用弹窗卡片（连接中 / 失败 / 重启倒计时 / 切网 / SIM 切换提示）
+constexpr int  kDialogW          = 280;
+constexpr int  kDialogH          = 240;   // 原 520x360 一类
+constexpr int  kDialogHSmall     = 220;   // 原 520x320 一类
+constexpr int  kDialogPad        = 16;
+constexpr int  kDialogSpinBig    = 90;
+constexpr int  kDialogSpinSmall  = 70;
+// 密码输入卡片：不再用 pos(30,30)，改用更大的顶部安全边距 + 收紧的内容
+constexpr int  kPwdCardTopInset  = 34;
+constexpr int  kPwdCardW         = 280;
+constexpr int  kPwdCardH         = 152;
+constexpr int  kPwdCardPad       = 14;
+constexpr int  kPwdCloseBtnSize  = 28;
+constexpr int  kPwdKeyboardGap   = 6;
+// 列表行右侧按钮（附近 WiFi 项没有按钮，仅「已保存」行需要收紧）
+constexpr int  kSavedDefBtnW     = 84;
+constexpr int  kSavedDefBtnH     = 40;
+constexpr int  kSavedDelBtnW     = 68;
+constexpr int  kSavedBtnGap      = 6;
+// 上网方式 / SIM 卡切换两按钮：圆屏并排放不下 280 宽的大按钮，收紧到能并排放下
+constexpr int  kNetBtnW          = 150;
+constexpr int  kNetBtnH          = 64;
 #else
-constexpr int kPanelW = 720;
-constexpr int kPanelH = 720;
+constexpr bool kRoundLayout      = false;
+constexpr int  kPanelW           = 720;
+constexpr int  kPanelH           = 720;
+constexpr int  kHeaderH          = 90;
+constexpr int  kHeaderTopInset   = 0;
+constexpr int  kHeaderSideInset  = 16;
+constexpr int  kBackBtnSize      = 72;
+constexpr int  kDialogW          = 520;
+constexpr int  kDialogH          = 360;
+constexpr int  kDialogHSmall     = 320;
+constexpr int  kDialogPad        = 24;
+constexpr int  kDialogSpinBig    = 140;
+constexpr int  kDialogSpinSmall  = 120;
+constexpr int  kPwdCardTopInset  = 30;
+constexpr int  kPwdCardW         = kPanelW - 60;
+constexpr int  kPwdCardH         = 260;
+constexpr int  kPwdCardPad       = 20;
+constexpr int  kPwdCloseBtnSize  = 0;   // 未使用（大屏走取消/连接按钮）
+constexpr int  kPwdKeyboardGap   = 0;
+constexpr int  kSavedDefBtnW     = 110;
+constexpr int  kSavedDefBtnH     = 44;
+constexpr int  kSavedDelBtnW     = 100;
+constexpr int  kSavedBtnGap      = 10;
+constexpr int  kNetBtnW          = 280;
+constexpr int  kNetBtnH          = 80;
 #endif
-constexpr int kHeaderH = 90;
+constexpr int  kDialogLabelW     = kDialogW - kDialogPad * 2;
 
 constexpr uint32_t kColorBg         = 0x0E1116;
 constexpr uint32_t kColorCard       = 0x1B2030;
@@ -253,7 +313,12 @@ const char* rssi_quality_text(int8_t rssi) {
 bool screen_alive() { return s_screen_active && s_ui.screen != nullptr; }
 
 int GetSavedNetworkType() {
-    // 与 DualNetworkBoard 启动时读 NVS 的逻辑一致（默认 4G=1，与 metalio-claw-4 板级一致）
+    // 与开机实际模式一致：用 DualNetworkBoard 内存值，勿在 UI 里用不同 default 再读 NVS。
+    if (auto* dual =
+            dynamic_cast<DualNetworkBoard*>(&Board::GetInstance())) {
+        return dual->GetNetworkType() == NetworkType::ML307 ? kNetTypeCellular
+                                                              : kNetTypeWifi;
+    }
     const NetworkType type =
         DualNetworkBoard::LoadNetworkTypeFromSettings(kNetTypeCellular);
     return type == NetworkType::ML307 ? kNetTypeCellular : kNetTypeWifi;
@@ -868,7 +933,7 @@ void rebuild_nearby_list_now() {
                  ap.ssid.c_str());
         lv_label_set_text(left, ltext);
         lv_label_set_long_mode(left, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(left, kPanelW - 40 - 200);
+        lv_obj_set_width(left, kPanelW - 40 - (kRoundLayout ? 120 : 200));
         lv_obj_set_style_text_color(left, lv_color_hex(kColorText), LV_PART_MAIN);
         lv_obj_set_style_text_font(left, &font_puhui_20_4, LV_PART_MAIN);
         lv_obj_align(left, LV_ALIGN_LEFT_MID, 0, 0);
@@ -1014,15 +1079,16 @@ void rebuild_saved_list_now() {
         }
         lv_label_set_text(lbl, ttext);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(lbl, kPanelW - 40 - 260);
+        lv_obj_set_width(lbl, kPanelW - 40 -
+                             (kSavedDefBtnW + kSavedBtnGap + kSavedDelBtnW + 20));
         lv_obj_set_style_text_color(lbl, lv_color_hex(kColorText), LV_PART_MAIN);
         lv_obj_set_style_text_font(lbl, &font_puhui_20_4, LV_PART_MAIN);
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
 
         // 「置顶」按钮（i == 0 时禁用）
         lv_obj_t* def_btn = lv_button_create(row);
-        lv_obj_set_size(def_btn, 110, 44);
-        lv_obj_align(def_btn, LV_ALIGN_RIGHT_MID, -120, 0);
+        lv_obj_set_size(def_btn, kSavedDefBtnW, kSavedDefBtnH);
+        lv_obj_align(def_btn, LV_ALIGN_RIGHT_MID, -(kSavedDelBtnW + kSavedBtnGap), 0);
         lv_obj_set_style_radius(def_btn, 12, LV_PART_MAIN);
         lv_obj_set_style_bg_color(def_btn, lv_color_hex(kColorBtnAccent), LV_PART_MAIN);
         lv_obj_set_style_shadow_width(def_btn, 0, LV_PART_MAIN);
@@ -1031,14 +1097,14 @@ void rebuild_saved_list_now() {
         lv_obj_add_event_cb(def_btn, on_saved_btn_delete, LV_EVENT_DELETE, def_ctx);
         if (i == 0) lv_obj_add_state(def_btn, LV_STATE_DISABLED);
         lv_obj_t* def_lbl = lv_label_create(def_btn);
-        lv_label_set_text(def_lbl, I18n::T("设为默认"));
+        lv_label_set_text(def_lbl, kRoundLayout ? I18n::T("默认") : I18n::T("设为默认"));
         lv_obj_set_style_text_color(def_lbl, lv_color_hex(kColorText), LV_PART_MAIN);
         lv_obj_set_style_text_font(def_lbl, &font_puhui_20_4, LV_PART_MAIN);
         lv_obj_center(def_lbl);
 
         // 「删除」按钮
         lv_obj_t* del_btn = lv_button_create(row);
-        lv_obj_set_size(del_btn, 100, 44);
+        lv_obj_set_size(del_btn, kSavedDelBtnW, kSavedDefBtnH);
         lv_obj_align(del_btn, LV_ALIGN_RIGHT_MID, 0, 0);
         lv_obj_set_style_radius(del_btn, 12, LV_PART_MAIN);
         lv_obj_set_style_bg_color(del_btn, lv_color_hex(kColorBtnDanger), LV_PART_MAIN);
@@ -1110,16 +1176,25 @@ void open_password_popup(const std::string& ssid, wifi_auth_mode_t authmode) {
     screen_swipe_back_ignore(mask, true);
     s_ui.pwd_overlay = mask;
 
-    // 顶部信息卡
+    // 顶部信息卡：圆屏用更大的顶部安全边距（不再是 pos(30,30)）+ 收紧
+    // 的卡片尺寸，下面把取消/连接按钮换成一个右上角小「×」，把空间
+    // 让给键盘，因为圆屏总高只有 360，卡片 + 键盘必须同时放下。
     lv_obj_t* card = lv_obj_create(mask);
     screen_strip_obj_chrome(card);
-    lv_obj_set_size(card, kPanelW - 60, 260);
-    lv_obj_set_pos(card, 30, 30);
+    lv_obj_set_size(card, kPwdCardW, kPwdCardH);
+    if constexpr (kRoundLayout) {
+        lv_obj_align(card, LV_ALIGN_TOP_MID, 0, kPwdCardTopInset);
+    } else {
+        lv_obj_set_pos(card, 30, kPwdCardTopInset);
+    }
     lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 18, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 20, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, kPwdCardPad, LV_PART_MAIN);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    const lv_font_t* title_font = kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4;
+    const int content_w = kPwdCardW - kPwdCardPad * 2;
 
     lv_obj_t* title = lv_label_create(card);
     s_ui.pwd_title = title;
@@ -1127,10 +1202,27 @@ void open_password_popup(const std::string& ssid, wifi_auth_mode_t authmode) {
     snprintf(ttext, sizeof(ttext), I18n::T("连接到: %s"), ssid.c_str());
     lv_label_set_text(title, ttext);
     lv_obj_set_style_text_color(title, lv_color_hex(kColorText), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(title, title_font, LV_PART_MAIN);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(title, kPanelW - 60 - 40);
+    lv_obj_set_width(title, content_w - (kRoundLayout ? kPwdCloseBtnSize + 8 : 0));
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    if constexpr (kRoundLayout) {
+        // 右上角小「×」代替大屏的「取消」按钮，省出空间给键盘。
+        lv_obj_t* close_btn = lv_button_create(card);
+        lv_obj_set_size(close_btn, kPwdCloseBtnSize, kPwdCloseBtnSize);
+        lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, 0, 0);
+        lv_obj_set_style_radius(close_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(close_btn, lv_color_hex(kColorBtn), LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(close_btn, 0, LV_PART_MAIN);
+        lv_obj_add_event_cb(close_btn, on_pwd_cancel_btn, LV_EVENT_CLICKED, nullptr);
+        screen_swipe_back_ignore(close_btn, true);
+        lv_obj_t* close_lbl = lv_label_create(close_btn);
+        lv_label_set_text(close_lbl, "x");
+        lv_obj_set_style_text_color(close_lbl, lv_color_hex(kColorText), LV_PART_MAIN);
+        lv_obj_set_style_text_font(close_lbl, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_center(close_lbl);
+    }
 
     lv_obj_t* hint = lv_label_create(card);
     lv_label_set_text(hint,
@@ -1139,13 +1231,15 @@ void open_password_popup(const std::string& ssid, wifi_auth_mode_t authmode) {
                           : I18n::T("请输入 WiFi 密码（8~63 字符）"));
     lv_obj_set_style_text_color(hint, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align_to(hint, title, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 12);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(hint, content_w);
+    lv_obj_align_to(hint, title, LV_ALIGN_OUT_BOTTOM_LEFT, 0, kRoundLayout ? 6 : 12);
 
     // 密码输入框
     lv_obj_t* ta = lv_textarea_create(card);
     s_ui.pwd_textarea = ta;
-    lv_obj_set_size(ta, kPanelW - 60 - 40, 60);
-    lv_obj_align(ta, LV_ALIGN_TOP_LEFT, 0, 92);
+    lv_obj_set_size(ta, content_w, kRoundLayout ? 42 : 60);
+    lv_obj_align_to(ta, hint, LV_ALIGN_OUT_BOTTOM_LEFT, 0, kRoundLayout ? 6 : 12);
     lv_textarea_set_one_line(ta, true);
     lv_textarea_set_password_mode(ta, true);
     lv_textarea_set_max_length(ta, kMaxPasswordLen);
@@ -1161,45 +1255,53 @@ void open_password_popup(const std::string& ssid, wifi_auth_mode_t authmode) {
     lv_obj_t* chk = lv_checkbox_create(card);
     s_ui.pwd_show_chk = chk;
     lv_checkbox_set_text(chk, I18n::T("显示密码"));
-    lv_obj_align(chk, LV_ALIGN_TOP_LEFT, 0, 168);
+    lv_obj_align_to(chk, ta, LV_ALIGN_OUT_BOTTOM_LEFT, 0, kRoundLayout ? 4 : 12);
     lv_obj_set_style_text_color(chk, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(chk, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_add_event_cb(chk, on_show_pwd_changed, LV_EVENT_VALUE_CHANGED, nullptr);
     screen_swipe_back_ignore(chk, true);
 
-    // 取消 / 连接按钮
-    lv_obj_t* cancel = lv_button_create(card);
-    lv_obj_set_size(cancel, 160, 56);
-    lv_obj_align(cancel, LV_ALIGN_TOP_RIGHT, -180, 160);
-    lv_obj_set_style_radius(cancel, 16, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(cancel, lv_color_hex(kColorBtn), LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(cancel, 0, LV_PART_MAIN);
-    lv_obj_add_event_cb(cancel, on_pwd_cancel_btn, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t* cancel_lbl = lv_label_create(cancel);
-    lv_label_set_text(cancel_lbl, I18n::T("取消"));
-    lv_obj_set_style_text_color(cancel_lbl, lv_color_hex(kColorText), LV_PART_MAIN);
-    lv_obj_set_style_text_font(cancel_lbl, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_center(cancel_lbl);
-    screen_swipe_back_ignore(cancel, true);
+    if constexpr (!kRoundLayout) {
+        // 取消 / 连接按钮（圆屏用右上角「×」+ 键盘 Enter 代替，节省纵向空间）
+        lv_obj_t* cancel = lv_button_create(card);
+        lv_obj_set_size(cancel, 160, 56);
+        lv_obj_align(cancel, LV_ALIGN_TOP_RIGHT, -180, 160);
+        lv_obj_set_style_radius(cancel, 16, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(cancel, lv_color_hex(kColorBtn), LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(cancel, 0, LV_PART_MAIN);
+        lv_obj_add_event_cb(cancel, on_pwd_cancel_btn, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t* cancel_lbl = lv_label_create(cancel);
+        lv_label_set_text(cancel_lbl, I18n::T("取消"));
+        lv_obj_set_style_text_color(cancel_lbl, lv_color_hex(kColorText), LV_PART_MAIN);
+        lv_obj_set_style_text_font(cancel_lbl, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_center(cancel_lbl);
+        screen_swipe_back_ignore(cancel, true);
 
-    lv_obj_t* connect = lv_button_create(card);
-    lv_obj_set_size(connect, 160, 56);
-    lv_obj_align(connect, LV_ALIGN_TOP_RIGHT, 0, 160);
-    lv_obj_set_style_radius(connect, 16, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(connect, lv_color_hex(kColorBtnActive), LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(connect, 0, LV_PART_MAIN);
-    lv_obj_add_event_cb(connect, on_pwd_connect_btn, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t* connect_lbl = lv_label_create(connect);
-    lv_label_set_text(connect_lbl, I18n::T("连接"));
-    lv_obj_set_style_text_color(connect_lbl, lv_color_hex(kColorText), LV_PART_MAIN);
-    lv_obj_set_style_text_font(connect_lbl, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_center(connect_lbl);
-    screen_swipe_back_ignore(connect, true);
+        lv_obj_t* connect = lv_button_create(card);
+        lv_obj_set_size(connect, 160, 56);
+        lv_obj_align(connect, LV_ALIGN_TOP_RIGHT, 0, 160);
+        lv_obj_set_style_radius(connect, 16, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(connect, lv_color_hex(kColorBtnActive), LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(connect, 0, LV_PART_MAIN);
+        lv_obj_add_event_cb(connect, on_pwd_connect_btn, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t* connect_lbl = lv_label_create(connect);
+        lv_label_set_text(connect_lbl, I18n::T("连接"));
+        lv_obj_set_style_text_color(connect_lbl, lv_color_hex(kColorText), LV_PART_MAIN);
+        lv_obj_set_style_text_font(connect_lbl, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_center(connect_lbl);
+        screen_swipe_back_ignore(connect, true);
+    }
 
-    // 屏幕底部键盘（吃满底部 ~390px）
+    // 屏幕底部键盘：大屏吃满底部 ~390px；圆屏按卡片实际高度反算剩余空间，
+    // 确保卡片 + 键盘不超出 360 高的面板。
     lv_obj_t* kb = lv_keyboard_create(mask);
     s_ui.pwd_keyboard = kb;
-    lv_obj_set_size(kb, kPanelW, 390);
+    if constexpr (kRoundLayout) {
+        const int kb_h = kPanelH - (kPwdCardTopInset + kPwdCardH + kPwdKeyboardGap);
+        lv_obj_set_size(kb, kPanelW, kb_h);
+    } else {
+        lv_obj_set_size(kb, kPanelW, 390);
+    }
     lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_TEXT_LOWER);
     lv_keyboard_set_textarea(kb, ta);
@@ -1261,18 +1363,18 @@ void open_connecting_popup(const std::string& ssid) {
 
     lv_obj_t* card = lv_obj_create(mask);
     screen_strip_obj_chrome(card);
-    lv_obj_set_size(card, 520, 360);
+    lv_obj_set_size(card, kDialogW, kDialogH);
     lv_obj_center(card);
     lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 20, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 24, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, kDialogPad, LV_PART_MAIN);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     screen_swipe_back_ignore(card, true);
 
     lv_obj_t* spin = lv_spinner_create(card);
-    lv_obj_set_size(spin, 140, 140);
-    lv_obj_align(spin, LV_ALIGN_TOP_MID, 0, 20);
+    lv_obj_set_size(spin, kDialogSpinBig, kDialogSpinBig);
+    lv_obj_align(spin, LV_ALIGN_TOP_MID, 0, kRoundLayout ? 12 : 20);
     lv_spinner_set_anim_params(spin, 1000, 200);
     lv_obj_set_style_arc_color(spin, lv_color_hex(0x2A2F3A), LV_PART_MAIN);
     lv_obj_set_style_arc_color(spin, lv_color_hex(kColorBtnActive), LV_PART_INDICATOR);
@@ -1284,12 +1386,12 @@ void open_connecting_popup(const std::string& ssid) {
     char buf[160];
     snprintf(buf, sizeof(buf), I18n::T("正在连接\n%s …"), ssid.c_str());
     lv_label_set_text(lbl, buf);
-    lv_obj_set_width(lbl, 520 - 48);
+    lv_obj_set_width(lbl, kDialogLabelW);
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(lbl, lv_color_hex(kColorText), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -16);
+    lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, kRoundLayout ? -10 : -16);
 }
 
 void reboot_task(void* /*arg*/) {
@@ -1358,30 +1460,31 @@ void show_failure_in_status_popup(const std::string& title,
 
     lv_obj_t* card = lv_obj_create(s_ui.status_overlay);
     screen_strip_obj_chrome(card);
-    lv_obj_set_size(card, 520, 320);
+    lv_obj_set_size(card, kDialogW, kDialogHSmall);
     lv_obj_center(card);
     lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 20, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 24, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, kDialogPad, LV_PART_MAIN);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     screen_swipe_back_ignore(card, true);
 
     lv_obj_t* head = lv_label_create(card);
     lv_label_set_text(head, title.c_str());
     lv_obj_set_style_text_color(head, lv_color_hex(kColorBtnDanger), LV_PART_MAIN);
-    lv_obj_set_style_text_font(head, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(head, LV_ALIGN_TOP_MID, 0, 20);
+    lv_obj_set_style_text_font(head, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
+    lv_obj_align(head, LV_ALIGN_TOP_MID, 0, kRoundLayout ? 12 : 20);
 
     lv_obj_t* body = lv_label_create(card);
     s_ui.status_message_lbl = body;
     lv_label_set_text(body, detail.c_str());
-    lv_obj_set_width(body, 520 - 48);
+    lv_obj_set_width(body, kDialogLabelW);
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(body, lv_color_hex(kColorText), LV_PART_MAIN);
     lv_obj_set_style_text_font(body, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_align(body, LV_ALIGN_CENTER, 0, 20);
+    lv_obj_align(body, LV_ALIGN_CENTER, 0, kRoundLayout ? 10 : 20);
 
     if (s_restart_timer != nullptr) {
         lv_timer_delete(s_restart_timer);
@@ -1408,20 +1511,21 @@ void open_restart_countdown_popup(const std::string& headline) {
 
     lv_obj_t* card = lv_obj_create(mask);
     screen_strip_obj_chrome(card);
-    lv_obj_set_size(card, 520, 320);
+    lv_obj_set_size(card, kDialogW, kDialogHSmall);
     lv_obj_center(card);
     lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 20, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 24, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, kDialogPad, LV_PART_MAIN);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     screen_swipe_back_ignore(card, true);
 
     lv_obj_t* check = lv_label_create(card);
     lv_label_set_text(check, I18n::T("成功"));
     lv_obj_set_style_text_color(check, lv_color_hex(kColorBtnAccent), LV_PART_MAIN);
-    lv_obj_set_style_text_font(check, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(check, LV_ALIGN_TOP_MID, 0, 20);
+    lv_obj_set_style_text_font(check, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
+    lv_obj_align(check, LV_ALIGN_TOP_MID, 0, kRoundLayout ? 12 : 20);
 
     s_restart_headline = headline;
     s_restart_remaining = kRestartCountdownSec;
@@ -1432,12 +1536,12 @@ void open_restart_countdown_popup(const std::string& headline) {
     snprintf(buf, sizeof(buf), I18n::T("%s\n设备将在 %d 秒后自动重启…"),
              s_restart_headline.c_str(), s_restart_remaining);
     lv_label_set_text(lbl, buf);
-    lv_obj_set_width(lbl, 520 - 48);
+    lv_obj_set_width(lbl, kDialogLabelW);
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(lbl, lv_color_hex(kColorText), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -16);
+    lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, kRoundLayout ? -10 : -16);
 
     if (s_restart_timer != nullptr) {
         lv_timer_delete(s_restart_timer);
@@ -1455,8 +1559,6 @@ void open_success_popup(const std::string& ssid) {
 // 头部按钮 / 屏幕生命周期
 // ---------------------------------------------------------------------------
 void on_scan_clicked(lv_event_t* /*e*/) { schedule_scan(); }
-
-void on_back_clicked(lv_event_t* /*e*/);
 
 void on_swipe_back() {
     // 弹窗存在时优先关闭弹窗，不触发返回。
@@ -1477,9 +1579,6 @@ void on_swipe_back() {
         lv_obj_delete_async(old_scr);
     }
 }
-
-// 返回按钮：复用右滑返回的退出路径（包含弹窗保护）。
-void on_back_clicked(lv_event_t* /*e*/) { on_swipe_back(); }
 
 void on_screen_unloaded(lv_event_t* /*e*/) {
     s_screen_active = false;
@@ -1562,32 +1661,33 @@ void open_switch_reboot_popup(const char* target_name) {
 
     lv_obj_t* card = lv_obj_create(mask);
     screen_strip_obj_chrome(card);
-    lv_obj_set_size(card, 520, 320);
+    lv_obj_set_size(card, kDialogW, kDialogHSmall);
     lv_obj_center(card);
     lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 20, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 24, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, kDialogPad, LV_PART_MAIN);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     screen_swipe_back_ignore(card, true);
 
     lv_obj_t* head = lv_label_create(card);
     lv_label_set_text(head, I18n::T("切换网络"));
     lv_obj_set_style_text_color(head, lv_color_hex(kColorBtnActive), LV_PART_MAIN);
-    lv_obj_set_style_text_font(head, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(head, LV_ALIGN_TOP_MID, 0, 20);
+    lv_obj_set_style_text_font(head, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
+    lv_obj_align(head, LV_ALIGN_TOP_MID, 0, kRoundLayout ? 12 : 20);
 
     lv_obj_t* body = lv_label_create(card);
     s_ui.status_message_lbl = body;
     char buf[160];
     snprintf(buf, sizeof(buf), I18n::T("正在切换到 %s\n设备即将重启…"), target_name);
     lv_label_set_text(body, buf);
-    lv_obj_set_width(body, 520 - 48);
+    lv_obj_set_width(body, kDialogLabelW);
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(body, lv_color_hex(kColorText), LV_PART_MAIN);
     lv_obj_set_style_text_font(body, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_align(body, LV_ALIGN_CENTER, 0, 20);
+    lv_obj_align(body, LV_ALIGN_CENTER, 0, kRoundLayout ? 10 : 20);
 
     if (xTaskCreate(switch_network_task, "net_switch", 4096, nullptr, 5,
                     nullptr) != pdPASS) {
@@ -1918,18 +2018,18 @@ void open_sim_switching_popup(int target_slot) {
 
     lv_obj_t* card = lv_obj_create(mask);
     screen_strip_obj_chrome(card);
-    lv_obj_set_size(card, 520, 360);
+    lv_obj_set_size(card, kDialogW, kDialogH);
     lv_obj_center(card);
     lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 20, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 24, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, kDialogPad, LV_PART_MAIN);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     screen_swipe_back_ignore(card, true);
 
     lv_obj_t* spin = lv_spinner_create(card);
-    lv_obj_set_size(spin, 120, 120);
-    lv_obj_align(spin, LV_ALIGN_TOP_MID, 0, 16);
+    lv_obj_set_size(spin, kDialogSpinSmall, kDialogSpinSmall);
+    lv_obj_align(spin, LV_ALIGN_TOP_MID, 0, kRoundLayout ? 10 : 16);
     lv_spinner_set_anim_params(spin, 1000, 200);
     lv_obj_set_style_arc_color(spin, lv_color_hex(0x2A2F3A), LV_PART_MAIN);
     lv_obj_set_style_arc_color(spin, lv_color_hex(kColorBtnActive),
@@ -1943,12 +2043,12 @@ void open_sim_switching_popup(int target_slot) {
     snprintf(buf, sizeof(buf), I18n::T("正在切换到%s…\nAT+CFUN=0"),
              SimSlotName(target_slot));
     lv_label_set_text(lbl, buf);
-    lv_obj_set_width(lbl, 520 - 48);
+    lv_obj_set_width(lbl, kDialogLabelW);
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(lbl, lv_color_hex(kColorText), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -16);
+    lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, kRoundLayout ? -10 : -16);
 }
 
 void schedule_sim_switch(int target_slot) {
@@ -1998,39 +2098,25 @@ void build_header(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
 
-    // 最左侧返回按钮：透明按钮 + ic_app_back 图标。按下时复用右滑返回逻辑，
-    // 弹窗存在时会先关闭弹窗而不是直接退屏。
-    constexpr int kBackBtnSize = 72;
-    lv_obj_t* back = lv_button_create(header);
-    s_ui.back_btn = back;
-    lv_obj_remove_style_all(back);
-    lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
-    lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
-    lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(back, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
-    lv_obj_add_event_cb(back, on_back_clicked, LV_EVENT_CLICKED, nullptr);
-    screen_swipe_back_ignore(back, true);
-
-    lv_obj_t* back_icon = lv_image_create(back);
-    lv_image_set_src(back_icon, "A:ic_app_back.spng");
-    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(back_icon);
-
+    // 不放返回箭头：统一右滑退出（screen_attach_swipe_back）。
     lv_obj_t* title = lv_label_create(header);
     lv_label_set_text(title, I18n::T("网络配置"));
     lv_obj_set_style_text_color(title, lv_color_hex(kColorText), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
-    // 标题让到返回按钮右侧
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 16 + kBackBtnSize + 16, 0);
+    lv_obj_set_style_text_font(title, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
+    if constexpr (kRoundLayout) {
+        const int title_y =
+            kHeaderTopInset + (kHeaderContentH - 20) / 2;
+        lv_obj_align(title, LV_ALIGN_TOP_MID, 0, title_y);
+    } else {
+        lv_obj_align(title, LV_ALIGN_LEFT_MID, kHeaderSideInset, 0);
+    }
 }
 
 void build_tabview(lv_obj_t* parent) {
-    constexpr int y = kHeaderH;                     // 90
-    constexpr int h = kPanelH - y;                  // 630
-    constexpr int kTabBarH = 56;
+    constexpr int y = kHeaderH;
+    constexpr int h = kPanelH - y;
+    constexpr int kTabBarH = kRoundLayout ? 44 : 56;
 
     lv_obj_t* tv = lv_tabview_create(parent);
     s_ui.tabview = tv;
@@ -2055,11 +2141,12 @@ void build_tabview(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(bar, LV_OPA_COVER,
                             LV_PART_ITEMS | LV_STATE_CHECKED);
 
-    // 内容容器是 tabview 内部的横向滚动 snap 区。本屏靠右滑返回主页，
-    // 所以把内容区从屏幕级 swipe-back 候选里摘出来（否则横滑切 tab 会
-    // 被同时识别成返回）。仍然保留 tab 之间的横向 snap。
+    // 内容区：方屏仍忽略右滑返回，避免横滑切 Tab 误触发退出。
+    // 圆屏无返回箭头，允许在内容区右滑直接回桌面；切 Tab 改点顶部标签。
     lv_obj_t* content = lv_tabview_get_content(tv);
-    screen_swipe_back_ignore(content, true);
+    if constexpr (!kRoundLayout) {
+        screen_swipe_back_ignore(content, true);
+    }
 
     // 4G 模式下没有 WiFi 列表 / 扫描概念，直接跳过这两个 Tab，只保留「网络
     // 切换」入口。WiFi 模式或未配置时正常展示三个 Tab。
@@ -2250,7 +2337,7 @@ void build_tabview(lv_obj_t* parent) {
         // 视觉上完全对仗，用户只要会用 SIM 卡切换就会用这里。
         lv_obj_t* net_row = lv_obj_create(card);
         screen_strip_obj_chrome(net_row);
-        lv_obj_set_size(net_row, LV_PCT(100), 96);
+        lv_obj_set_size(net_row, LV_PCT(100), kNetBtnH + 16);
         lv_obj_set_style_bg_opa(net_row, LV_OPA_TRANSP, LV_PART_MAIN);
         lv_obj_remove_flag(net_row, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_flex_flow(net_row, LV_FLEX_FLOW_ROW);
@@ -2260,7 +2347,7 @@ void build_tabview(lv_obj_t* parent) {
         auto make_net_btn = [&](const char* text, lv_event_cb_t cb,
                                 lv_obj_t** out_btn, lv_obj_t** out_lbl) {
             lv_obj_t* btn = lv_button_create(net_row);
-            lv_obj_set_size(btn, 280, 80);
+            lv_obj_set_size(btn, kNetBtnW, kNetBtnH);
             lv_obj_set_style_radius(btn, 16, LV_PART_MAIN);
             lv_obj_set_style_bg_color(btn, lv_color_hex(kColorBtn),
                                       LV_PART_MAIN);
@@ -2271,7 +2358,9 @@ void build_tabview(lv_obj_t* parent) {
             lv_label_set_text(lbl, text);
             lv_obj_set_style_text_color(lbl, lv_color_hex(kColorText),
                                         LV_PART_MAIN);
-            lv_obj_set_style_text_font(lbl, &font_puhui_30_4, LV_PART_MAIN);
+            lv_obj_set_style_text_font(lbl, kRoundLayout ? &font_puhui_20_4
+                                                          : &font_puhui_30_4,
+                                       LV_PART_MAIN);
             lv_obj_center(lbl);
             *out_btn = btn;
             *out_lbl = lbl;
@@ -2294,7 +2383,7 @@ void build_tabview(lv_obj_t* parent) {
         refresh_network_switch_ui();
     };  // build_network_switch_tab
 
-    // SIM 卡切换页（仅 4G 模式构造，WiFi 模式下不挂这个 Tab）
+    // SIM 卡切换页（仅双卡 4G 板）。单卡板走下方「蜂窝信息」占位页。
     auto build_sim_switch_tab = [&]() {
         lv_obj_t* tab4 = lv_tabview_add_tab(tv, I18n::T("SIM 卡切换"));
         s_ui.sim_tab = tab4;
@@ -2333,7 +2422,7 @@ void build_tabview(lv_obj_t* parent) {
         // 两个并排按钮：外置卡 / 内置卡
         lv_obj_t* sim_row = lv_obj_create(sim_card);
         screen_strip_obj_chrome(sim_row);
-        lv_obj_set_size(sim_row, LV_PCT(100), 96);
+        lv_obj_set_size(sim_row, LV_PCT(100), kNetBtnH + 16);
         lv_obj_set_style_bg_opa(sim_row, LV_OPA_TRANSP, LV_PART_MAIN);
         lv_obj_remove_flag(sim_row, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_flex_flow(sim_row, LV_FLEX_FLOW_ROW);
@@ -2343,7 +2432,7 @@ void build_tabview(lv_obj_t* parent) {
         auto make_sim_btn = [&](const char* text, lv_event_cb_t cb,
                                 lv_obj_t** out_btn, lv_obj_t** out_lbl) {
             lv_obj_t* btn = lv_button_create(sim_row);
-            lv_obj_set_size(btn, 280, 80);
+            lv_obj_set_size(btn, kNetBtnW, kNetBtnH);
             lv_obj_set_style_radius(btn, 16, LV_PART_MAIN);
             lv_obj_set_style_bg_color(btn, lv_color_hex(kColorBtn),
                                       LV_PART_MAIN);
@@ -2354,7 +2443,9 @@ void build_tabview(lv_obj_t* parent) {
             lv_label_set_text(lbl, text);
             lv_obj_set_style_text_color(lbl, lv_color_hex(kColorText),
                                         LV_PART_MAIN);
-            lv_obj_set_style_text_font(lbl, &font_puhui_30_4, LV_PART_MAIN);
+            lv_obj_set_style_text_font(lbl, kRoundLayout ? &font_puhui_20_4
+                                                          : &font_puhui_30_4,
+                                       LV_PART_MAIN);
             lv_obj_center(lbl);
             *out_btn = btn;
             *out_lbl = lbl;
@@ -2387,13 +2478,95 @@ void build_tabview(lv_obj_t* parent) {
         refresh_sim_slot_ui();
     };  // build_sim_switch_tab
 
+    // 单卡 4G 占位页：说明不支持切卡，并展示当前蜂窝只读信息。
+    auto build_cellular_info_tab = [&]() {
+        lv_obj_t* tab = lv_tabview_add_tab(tv, I18n::T("蜂窝信息"));
+        s_ui.sim_tab = tab;
+        lv_obj_set_style_pad_all(tab, kRoundLayout ? 14 : 24, LV_PART_MAIN);
+        lv_obj_remove_flag(tab, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t* card = lv_obj_create(tab);
+        screen_strip_obj_chrome(card);
+        lv_obj_set_size(card, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_radius(card, 18, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(card, kRoundLayout ? 16 : 24, LV_PART_MAIN);
+        lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_START);
+        lv_obj_set_style_pad_row(card, kRoundLayout ? 10 : 16, LV_PART_MAIN);
+
+        lv_obj_t* title = lv_label_create(card);
+        lv_label_set_text(title, I18n::T("SIM 信息"));
+        lv_obj_set_style_text_color(title, lv_color_hex(kColorText),
+                                    LV_PART_MAIN);
+        lv_obj_set_style_text_font(
+            title, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+            LV_PART_MAIN);
+
+        lv_obj_t* hint = lv_label_create(card);
+        lv_label_set_text(
+            hint, I18n::T("本机为单卡设计，不支持内外置 SIM 切换。"));
+        lv_obj_set_width(hint, LV_PCT(100));
+        lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_color(hint, lv_color_hex(kColorSubtle),
+                                    LV_PART_MAIN);
+        lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
+
+        std::string carrier = "--";
+        std::string csq = "--";
+        std::string iccid = "--";
+        std::string imei = "--";
+        {
+            std::string json = Board::GetInstance().GetBoardJson();
+            cJSON* root = cJSON_Parse(json.c_str());
+            if (root != nullptr) {
+                auto take = [&](const char* key, std::string& out) {
+                    const cJSON* item = cJSON_GetObjectItem(root, key);
+                    if (cJSON_IsString(item) && item->valuestring != nullptr &&
+                        item->valuestring[0] != '\0') {
+                        out = item->valuestring;
+                    }
+                };
+                take("carrier", carrier);
+                take("csq", csq);
+                take("iccid", iccid);
+                take("imei", imei);
+                cJSON_Delete(root);
+            }
+        }
+
+        auto add_kv = [&](const char* label, const std::string& value) {
+            char line[160];
+            snprintf(line, sizeof(line), "%s：%s", label,
+                     value.empty() ? "--" : value.c_str());
+            lv_obj_t* lbl = lv_label_create(card);
+            lv_label_set_text(lbl, line);
+            lv_obj_set_width(lbl, LV_PCT(100));
+            lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+            lv_obj_set_style_text_color(lbl, lv_color_hex(kColorText),
+                                        LV_PART_MAIN);
+            lv_obj_set_style_text_font(lbl, &font_puhui_20_4, LV_PART_MAIN);
+        };
+
+        add_kv(I18n::T("运营商"), carrier);
+        add_kv(I18n::T("信号"), csq);
+        add_kv(I18n::T("ICCID"), iccid);
+        add_kv(I18n::T("IMEI"), imei);
+    };  // build_cellular_info_tab
+
     // 真正决定 Tab 顺序的地方：
-    //   - 4G 模式：「SIM 卡切换」放在「网络切换」前面，因为更换 SIM 卡是
-    //     4G 用户进入这页最常做的事，放第一个最顺手；「网络切换」是兜底
-    //     入口（切回 WiFi）。
-    //   - WiFi 模式：只挂「网络切换」，没有 SIM 卡概念。
+    //   - 双卡 4G：「SIM 卡切换」+「网络切换」
+    //   - 单卡 4G：「蜂窝信息」占位 +「网络切换」
+    //   - WiFi 模式：只挂「网络切换」
     if (IsCellularMode()) {
-        build_sim_switch_tab();
+        if (BOARD_HAS_DUAL_SIM) {
+            build_sim_switch_tab();
+        } else {
+            build_cellular_info_tab();
+        }
         build_network_switch_tab();
     } else {
         build_network_switch_tab();
@@ -2449,12 +2622,14 @@ void NetworkScreen::LifecycleCallback(screen_lifecycle_event_t event) {
             refresh_saved_list();
         }
         refresh_network_switch_ui();
+#if BOARD_HAS_DUAL_SIM
         refresh_sim_slot_ui();
         // 4G 模式下向模组发 AT+ECSIMCFG? 同步真实当前槽位，避免本地 NVS
         // 与模组里实际生效的卡不一致（例如设备外部曾经手动切过卡）。
         if (IsCellularMode()) {
             schedule_sim_slot_query();
         }
+#endif
     } else {
         ESP_LOGI(TAG, "unload: network_screen");
         s_screen_active = false;

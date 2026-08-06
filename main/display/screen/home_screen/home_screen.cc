@@ -23,6 +23,10 @@
 #include "IOExpander.hpp"
 #include "bq27220_gauge.h"
 
+#ifndef BOARD_HAS_DUAL_SIM
+#define BOARD_HAS_DUAL_SIM 0
+#endif
+
 #if defined(BOARD_ESP_VOCAT)
 extern "C" void board_release_power_hold_if_supported();
 #endif
@@ -1214,29 +1218,43 @@ if (state->indicator != nullptr) {
 void UpdateHomeStatusBar(HomeStatusState* st);
 
 int GetSavedNetworkType() {
-    // DualNetworkBoard / network_screen 共用 NVS。
-    // S31 Korvo-1 无 4G，默认 WiFi；P4 Claw4 默认 4G。
+    // 禁止在 LVGL 线程里再开 NVS：栈可能在 PSRAM，且会与 ML307 HTTP 抢 Flash。
+    // DualNetworkBoard 构造时已从 NVS 载入 network_type_。
+    auto* dual = dynamic_cast<DualNetworkBoard*>(&Board::GetInstance());
+    if (dual != nullptr) {
+        return dual->GetNetworkType() == NetworkType::ML307 ? 1 : 0;
+    }
 #if defined(CONFIG_IDF_TARGET_ESP32S31)
-    constexpr int kDefaultNetType = 0;  // WiFi
+    return 0;  // WiFi
 #else
-    constexpr int kDefaultNetType = 1;  // 4G
+    return 1;  // 非 Dual 板默认按 4G 显示
 #endif
-    const NetworkType type =
-        DualNetworkBoard::LoadNetworkTypeFromSettings(kDefaultNetType);
-    return type == NetworkType::ML307 ? 1 : 0;
 }
 
-// ??network_screen ?? "network/sim_slot" ??
-// NVS key??// ?? 0 = ???????? 1 = ?????
+// network_screen 与 boot SIM 查询共用；只在内存缓存，避免 LVGL 路径反复读 NVS。
+int s_cached_sim_slot = -1;
+
 int GetSavedSimSlot() {
-    Settings settings("network", true);
+    if (s_cached_sim_slot == 0 || s_cached_sim_slot == 1) {
+        return s_cached_sim_slot;
+    }
+    // 禁止在 LVGL 路径懒加载 NVS；WarmStatusCaches() 应在 main_task 预载。
+    return 0;
+}
+
+void WarmStatusCachesImpl() {
+    Settings settings("network", false);
     int v = settings.GetInt("sim_slot", 0);
-    return (v == 1) ? 1 : 0;
+    s_cached_sim_slot = (v == 1) ? 1 : 0;
+    ThemeManager::GetCurrentThemeId();
+    IdlePower_WarmSettingsCache();
 }
 
 void SaveSimSlot(int slot) {
+    const int v = (slot == 1) ? 1 : 0;
+    s_cached_sim_slot = v;
     Settings settings("network", true);
-    settings.SetInt("sim_slot", slot);
+    settings.SetInt("sim_slot", v);
 }
 
 Nt26Board* GetNt26Board() {
@@ -1348,8 +1366,9 @@ void UpdateHomeStatusBar(HomeStatusState* st) {
         lv_obj_remove_flag(st->network_type_lbl, LV_OBJ_FLAG_HIDDEN);
     }
 
-    // SIM：4G 时显示在左侧 WiFi/4G 旁；圆屏用短文案
+    // SIM：仅双卡板在 4G 时显示内外置短标签；单卡板隐藏。
     if (st->sim_slot_lbl != nullptr) {
+#if BOARD_HAS_DUAL_SIM
         if (net_type == 1) {
             const int slot = GetSavedSimSlot();
             if (st->last_net_type != net_type || st->last_sim_slot != slot) {
@@ -1367,6 +1386,10 @@ void UpdateHomeStatusBar(HomeStatusState* st) {
                 lv_obj_add_flag(st->sim_slot_lbl, LV_OBJ_FLAG_HIDDEN);
             }
         }
+#else
+        lv_obj_add_flag(st->sim_slot_lbl, LV_OBJ_FLAG_HIDDEN);
+        (void)net_type;
+#endif
     }
     st->last_net_type = net_type;
 
@@ -1536,6 +1559,7 @@ lv_obj_t* CreateStatusBar(lv_obj_t* screen, HomeStatusState* st) {
     constexpr int kStatusRightWidth = kLayoutRoundSmall ? 56 : 400;
     constexpr int kStatusPadHor     = kLayoutRoundSmall ? 28 : 10;
     constexpr int kStatusPadVer     = kLayoutRoundSmall ? 4 : 8;
+    constexpr int kStatusNetworkShiftX = kLayoutRoundSmall ? 8 : 0;
 
     lv_obj_t* bar = lv_obj_create(screen);
     st->bar = bar;
@@ -1560,6 +1584,9 @@ lv_obj_t* CreateStatusBar(lv_obj_t* screen, HomeStatusState* st) {
     lv_obj_set_flex_align(left, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(left, kLayoutRoundSmall ? 4 : 10, LV_PART_MAIN);
+    if (kStatusNetworkShiftX != 0) {
+        lv_obj_set_style_margin_left(left, kStatusNetworkShiftX, LV_PART_MAIN);
+    }
 
     st->network_icon_lbl = lv_label_create(left);
     lv_label_set_text(st->network_icon_lbl, FONT_AWESOME_WIFI);
@@ -2270,8 +2297,8 @@ lv_obj_t* CreatePowerActionBtn(lv_obj_t* parent,
                                const char* icon_src,
                                const char* text,
                                lv_event_cb_t on_click) {
-    constexpr int kBtnSize     = 180;
-    constexpr int kBtnIconSize = 96;
+    const int kBtnSize = kLayoutRoundSmall ? 100 : 180;
+    const int kBtnIconSize = kLayoutRoundSmall ? 48 : 96;
 
     lv_obj_t* btn = lv_obj_create(parent);
     lv_obj_remove_style_all(btn);
@@ -2281,7 +2308,7 @@ lv_obj_t* CreatePowerActionBtn(lv_obj_t* parent,
 
     lv_obj_set_style_bg_color(btn, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(btn, LV_OPA_10, LV_PART_MAIN);
-    lv_obj_set_style_radius(btn, 24, LV_PART_MAIN);
+    lv_obj_set_style_radius(btn, kLayoutRoundSmall ? 16 : 24, LV_PART_MAIN);
     lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
     lv_obj_set_style_border_color(btn, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_set_style_border_opa(btn, LV_OPA_30, LV_PART_MAIN);
@@ -2299,8 +2326,10 @@ lv_obj_t* CreatePowerActionBtn(lv_obj_t* parent,
     lv_obj_t* lbl = lv_label_create(btn);
     lv_label_set_text(lbl, text);
     lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(lbl, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_set_style_pad_top(lbl, 12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(
+        lbl, kLayoutRoundSmall ? &font_puhui_20_4 : &font_puhui_30_4,
+        LV_PART_MAIN);
+    lv_obj_set_style_pad_top(lbl, kLayoutRoundSmall ? 6 : 12, LV_PART_MAIN);
     lv_obj_remove_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
@@ -2334,9 +2363,10 @@ lv_obj_t* mask = lv_obj_create(parent);
     lv_obj_add_event_cb(mask, OnPwrMaskClicked, LV_EVENT_CLICKED, nullptr);
     s_pwr_dlg.mask = mask;
 
-    // ---- ???? ----
-    constexpr int kCardW = 480;
-    constexpr int kCardH = 360;
+    // ---- card ----
+    const int kCardW = kLayoutRoundSmall ? 280 : 480;
+    const int kCardH = kLayoutRoundSmall ? 240 : 360;
+    const int kCardPad = kLayoutRoundSmall ? 16 : 24;
     lv_obj_t* card = lv_obj_create(mask);
     lv_obj_remove_style_all(card);
     lv_obj_set_size(card, kCardW, kCardH);
@@ -2344,21 +2374,22 @@ lv_obj_t* mask = lv_obj_create(parent);
     lv_obj_set_style_bg_color(card, lv_color_hex(0x1B2030), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 24, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 24, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, kCardPad, LV_PART_MAIN);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-    // card ?? clickable ???????
-// card ????????card ??????    // ???? mask ????????
-lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+    // card is clickable so clicks don't bubble to mask
+    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
     s_pwr_dlg.card = card;
 
     lv_obj_t* title = lv_label_create(card);
     lv_label_set_text(title, I18n::T("电源"));
     lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(
+        title, kLayoutRoundSmall ? &font_puhui_20_4 : &font_puhui_30_4,
+        LV_PART_MAIN);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_remove_flag(title, LV_OBJ_FLAG_CLICKABLE);
 
-    // ---- ????----
+    // ---- actions ----
     lv_obj_t* row = lv_obj_create(card);
     lv_obj_remove_style_all(row);
     lv_obj_set_size(row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -2366,13 +2397,13 @@ lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(row, 32, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(row, kLayoutRoundSmall ? 20 : 32, LV_PART_MAIN);
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
     CreatePowerActionBtn(row, "A:ic_s_home_reboot.spng", I18n::T("重启"), OnPwrRebootClicked);
     CreatePowerActionBtn(row, "A:ic_s_home_power.spng", I18n::T("关机"), OnPwrShutdownClicked);
 
-    // ---- ??????????????----
+    // ---- hint ----
     lv_obj_t* hint = lv_label_create(card);
     lv_label_set_text(hint, I18n::T("选择电源操作"));
     lv_obj_set_style_text_color(hint, lv_color_hex(0x9CA3AF), LV_PART_MAIN);
@@ -2452,6 +2483,8 @@ void CreateIndicator(lv_obj_t* screen, PagerState* state) {
 }
 
 }  // namespace
+
+void HomeScreen::WarmStatusCaches() { WarmStatusCachesImpl(); }
 
 void HomeScreen::ShowPowerOptionsDialog() { ShowPowerDialog(); }
 

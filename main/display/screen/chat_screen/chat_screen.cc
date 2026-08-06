@@ -59,12 +59,14 @@ constexpr int32_t kModeBtnH        = 44;
 constexpr int32_t kHeaderRightPad  = 16;
 constexpr int32_t kHeaderCtrlGap   = 8;
 #elif defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
-// 360 圆屏：顶栏双行 + 四周安全边距，避免圆弧裁切。
+// 360 圆屏：顶栏双行 + 四周安全边距（内容约 280 宽），避免圆弧裁切。
 constexpr bool    kRoundLayout     = true;
 constexpr int32_t kPanelW          = DISPLAY_WIDTH;
 constexpr int32_t kPanelH          = DISPLAY_HEIGHT;
 constexpr int32_t kHeaderTopInset  = 30;   // 避开顶部圆弧
-constexpr int32_t kHeaderSideInset = 36;   // 左右圆弧安全区
+constexpr int32_t kHeaderSideInset = 40;   // 左右圆弧安全区
+constexpr int32_t kHeaderRow1ShiftX = 18;  // 返回+标题+状态整体右移
+constexpr int32_t kHeaderRow2ShiftX = -31; // 表情/聊天/清空整体左移（再左移 15）
 constexpr int32_t kHeaderRow1H     = 36;
 constexpr int32_t kHeaderRow2H     = 34;
 constexpr int32_t kHeaderGap       = 4;
@@ -72,7 +74,7 @@ constexpr int32_t kHeaderBottomPad = 6;
 constexpr int32_t kHeaderH =
     kHeaderTopInset + kHeaderRow1H + kHeaderGap + kHeaderRow2H + kHeaderBottomPad;
 constexpr int32_t kBackBtnSize     = 34;
-constexpr int32_t kListPadH        = 28;
+constexpr int32_t kListPadH        = 40;
 constexpr int32_t kListPadTop      = 8;
 constexpr int32_t kListPadBottom   = 56;  // 给右下角切换钮留空
 constexpr int32_t kRowGap          = 6;
@@ -83,7 +85,7 @@ constexpr int32_t kSideMargin      = 4;
 constexpr int32_t kMaxMessages     = 8;
 constexpr int32_t kToggleBtnSize   = 44;
 constexpr int32_t kToggleIconSize  = 28;
-constexpr int32_t kToggleBtnMargin = 28;
+constexpr int32_t kToggleBtnMargin = 32;
 constexpr int32_t kClearBtnW       = 52;
 constexpr int32_t kClearBtnH       = 30;
 constexpr int32_t kModeBtnW        = 52;
@@ -267,7 +269,9 @@ void ApplyEmotionSrc(const char* emotion) {
                  kEmotionExt);
         return;
     }
-    lv_eaf_set_src(s_ui.emotion_eaf, BuildEmotionPath(name));
+    const char* lv_path = BuildEmotionPath(name);
+    ESP_LOGI(TAG, "set emotion src: %s", lv_path);
+    lv_eaf_set_src(s_ui.emotion_eaf, lv_path);
     lv_eaf_set_frame_delay(s_ui.emotion_eaf, kEmotionFrameDelayMs);
     std::strncpy(s_applied_emotion, name, sizeof(s_applied_emotion) - 1);
     s_applied_emotion[sizeof(s_applied_emotion) - 1] = '\0';
@@ -852,11 +856,13 @@ void build_header(lv_obj_t* parent) {
     screen_make_input_passive(divider);
 
     if constexpr (kRoundLayout) {
-        // 圆屏双行：上 返回+标题+状态；下 表情/聊天/清空 居中，避开圆弧裁切。
+        // 圆屏双行：上 返回+标题+状态；下 表情/聊天/清空，避开圆弧裁切。
+        // 上行略右移、下行略左移，视觉更平衡。
         lv_obj_t* row1 = lv_obj_create(header);
         screen_strip_obj_chrome(row1);
-        lv_obj_set_size(row1, kPanelW - kHeaderSideInset * 2, kHeaderRow1H);
-        lv_obj_set_pos(row1, kHeaderSideInset, kHeaderTopInset);
+        lv_obj_set_size(row1, kPanelW - kHeaderSideInset * 2 - kHeaderRow1ShiftX,
+                        kHeaderRow1H);
+        lv_obj_set_pos(row1, kHeaderSideInset + kHeaderRow1ShiftX, kHeaderTopInset);
         lv_obj_set_style_bg_opa(row1, LV_OPA_TRANSP, LV_PART_MAIN);
         lv_obj_remove_flag(row1, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_flex_flow(row1, LV_FLEX_FLOW_ROW);
@@ -901,6 +907,7 @@ void build_header(lv_obj_t* parent) {
         lv_obj_set_size(row2, kPanelW - kHeaderSideInset * 2, kHeaderRow2H);
         lv_obj_set_pos(row2, kHeaderSideInset,
                        kHeaderTopInset + kHeaderRow1H + kHeaderGap);
+        lv_obj_set_style_translate_x(row2, kHeaderRow2ShiftX, LV_PART_MAIN);
         lv_obj_set_style_bg_opa(row2, LV_OPA_TRANSP, LV_PART_MAIN);
         lv_obj_remove_flag(row2, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_flex_flow(row2, LV_FLEX_FLOW_ROW);

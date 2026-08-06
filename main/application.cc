@@ -12,6 +12,7 @@
 
 #include <cstring>
 #include <esp_log.h>
+#include <esp_system.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
@@ -19,6 +20,7 @@
 
 #include <ssid_manager.h>
 #include <inttypes.h>
+#include <vector>
 
 #if CONFIG_ESP_HOSTED_ENABLED
 #include "esp_hosted.h"
@@ -28,10 +30,48 @@
 #include "ota_screen.h"
 #include "home_screen.h"
 #include "chat_screen/chat_screen.h"
+#include "standby_screen/standby_screen.h"
+#include "idle_power_policy.h"
+#include "lv_adapter_display.h"
+#include "esp_lv_adapter.h"
 #endif
 
 #define TAG "Application"
 
+namespace {
+
+const char* ResetReasonName(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_POWERON: return "POWERON";
+        case ESP_RST_EXT: return "EXT";
+        case ESP_RST_SW: return "SW";
+        case ESP_RST_PANIC: return "PANIC";
+        case ESP_RST_INT_WDT: return "INT_WDT";
+        case ESP_RST_TASK_WDT: return "TASK_WDT";
+        case ESP_RST_WDT: return "WDT";
+        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT: return "BROWNOUT";
+        case ESP_RST_SDIO: return "SDIO";
+        case ESP_RST_USB: return "USB";
+        case ESP_RST_JTAG: return "JTAG";
+        case ESP_RST_EFUSE: return "EFUSE";
+        case ESP_RST_PWR_GLITCH: return "PWR_GLITCH";
+        case ESP_RST_CPU_LOCKUP: return "CPU_LOCKUP";
+        case ESP_RST_UNKNOWN: return "UNKNOWN";
+        default: return "UNKNOWN";
+    }
+}
+
+#ifdef HAVE_LVGL
+void LeaveStandbyForWakeUi(void* /*arg*/) {
+    if (StandbyScreen::IsActive()) {
+        ESP_LOGI(TAG, "Wake: leave standby UI before listening");
+        StandbyScreen::ReturnHome();
+    }
+}
+#endif
+
+}  // namespace
 
 static const char* const STATE_STRINGS[] = {
     "unknown",
@@ -143,7 +183,9 @@ void Application::CheckNewVersion(Ota& ota) {
     while (true) {
         SetDeviceState(kDeviceStateActivating);
         auto display = board.GetDisplay();
-        display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
+        if (display != nullptr) {
+            display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
+        }
 
         esp_err_t err = ota.CheckVersion();
         if (err != ESP_OK) {
@@ -191,7 +233,9 @@ void Application::CheckNewVersion(Ota& ota) {
             vTaskDelay(pdMS_TO_TICKS(500));
         }
 
-        display->SetStatus(Lang::Strings::ACTIVATION);
+        if (display != nullptr) {
+            display->SetStatus(Lang::Strings::ACTIVATION);
+        }
         // Activation code is shown to the user and waiting for the user to input
         if (ota.HasActivationCode()) {
             ShowActivationCode(ota.GetActivationCode(), ota.GetActivationMessage());
@@ -434,18 +478,21 @@ void Application::StopListening() {
 
 void Application::Start() {
     auto& board = Board::GetInstance();
+    ESP_LOGW(TAG, "Reset reason: %s (%d)", ResetReasonName(esp_reset_reason()),
+             static_cast<int>(esp_reset_reason()));
     SetDeviceState(kDeviceStateStarting);
 
-    /* Setup the display */
-    auto display = board.GetDisplay();
+    Display* display = board.GetDisplay();
 
+#if !CONFIG_BOARD_TYPE_ESP_VOCAT
     // Print board name/version info
     display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
 
     /* Setup the audio service */
     auto codec = board.GetAudioCodec();
     audio_service_.Initialize(codec);
-    audio_service_.Start();
+#endif
+    // VoCat：板级构造时已拉起 BootScreen；音频仍推迟到 MQTT 之后。
 
     AudioServiceCallbacks callbacks;
     callbacks.on_send_queue_available = [this]() {
@@ -475,61 +522,46 @@ void Application::Start() {
         vTaskDelete(NULL);
     }, "main_event_loop", 2048 * 4, this, 3, &main_event_loop_task_handle_);
 
-    /* Start the clock timer to update the status bar */
-    esp_timer_start_periodic(clock_timer_handle_, 1000000);
-
     //直接校验OTA
     Ota ota;
     ota.MarkCurrentVersionValid();
 
-// #if CONFIG_ESP_HOSTED_ENABLED
-//     /* Boot-time probe: C5 ESP-Hosted slave (WiFi coprocessor) present? */
-//     ESP_LOGI(TAG, "C5 hosted check: connecting to slave...");
-//     if (esp_hosted_connect_to_slave() == ESP_OK) {
-//         esp_hosted_coprocessor_fwver_t fwver{};
-//         uint32_t chip_id = 0;
-//         char target_name[32] = {0};
-//         if (esp_hosted_get_coprocessor_fwversion(&fwver) == ESP_OK) {
-//             ESP_LOGI(TAG,
-//                      "C5 hosted check: OK — FW %" PRIu32 ".%" PRIu32 ".%" PRIu32
-//                      " (rev=%" PRId32 ")",
-//                      fwver.major1, fwver.minor1, fwver.patch1, fwver.revision);
-//         } else {
-//             ESP_LOGW(TAG, "C5 hosted check: transport up, but fwversion RPC failed");
-//         }
-//         if (esp_hosted_get_cp_info(&chip_id, target_name, sizeof(target_name)) == ESP_OK) {
-//             ESP_LOGI(TAG, "C5 hosted check: chip_id=0x%" PRIx32 " target=%s",
-//                      chip_id, target_name[0] ? target_name : "(n/a)");
-//         }
-//     } else {
-//         ESP_LOGE(TAG,
-//                  "C5 hosted check: FAIL — slave not reachable "
-//                  "(no hosted FW / SDIO / reset?)");
-//         PlaySound(Lang::Sounds::OGG_ERR_REG);
-//     }
-// #endif
-
     /* Wait for the network to be ready */
-    board.StartNetwork();
-
-    // Update the status bar immediately to show the network state
-    display->UpdateStatusBar(true);
-
-   
-    // Check for new assets version
-    // CheckAssetsVersion();
-
-    // Check for new firmware version or get the MQTT broker address
-    // Ota ota;
-    CheckNewVersion(ota);
-#if CONFIG_USE_AFE_WAKE_WORD || CONFIG_USE_CUSTOM_WAKE_WORD || CONFIG_USE_ESP_WAKE_WORD
-    //加载唤醒词模型
-    GetAudioService().SetModelsList(esp_srmodel_init("model"));
-    GetAudioService().EnableWakeWordDetection(false);
+#ifdef HAVE_LVGL
+#if !CONFIG_BOARD_TYPE_ESP_VOCAT
+    // VoCat：保持开机动画播放，不要 pause LVGL。
+    if (esp_lv_adapter_is_initialized() && esp_lv_adapter_pause(-1) != ESP_OK) {
+        ESP_LOGW(TAG, "LVGL pause before network/OTA failed");
+    }
+#endif
+    HomeScreen::WarmStatusCaches();
+    IdlePower_WarmSettingsCache();
 #endif
 
-    // Initialize the protocol
-    display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
+    board.PrepareForNetworkOta();
+    board.StartNetwork();
+
+#if !CONFIG_BOARD_TYPE_ESP_VOCAT
+    // Update the status bar immediately to show the network state
+    if (display != nullptr) {
+        display->UpdateStatusBar(true);
+    }
+#endif
+
+    CheckNewVersion(ota);
+
+    board.RestoreAfterNetworkOta();
+
+#if CONFIG_BOARD_TYPE_ESP_VOCAT
+    // 开机动画已在板级构造时拉起；这里只取 display，并稍歇再开 MQTT。
+    display = board.GetDisplay();
+    vTaskDelay(pdMS_TO_TICKS(200));
+#endif
+
+    // Initialize the protocol (MQTT/WS)；VoCat 此时继续播开机动画。
+    if (display != nullptr) {
+        display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
+    }
 
     // Add MCP common tools before initializing the protocol
     auto& mcp_server = McpServer::GetInstance();
@@ -544,6 +576,8 @@ void Application::Start() {
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
         protocol_ = std::make_unique<MqttProtocol>();
     }
+
+    auto* codec = board.GetAudioCodec();
 
     protocol_->OnConnected([this]() {
         DismissAlert();
@@ -568,12 +602,14 @@ void Application::Start() {
     protocol_->OnAudioChannelClosed([this, &board]() {
         board.SetPowerSaveMode(true);
         Schedule([this]() {
-            auto display = Board::GetInstance().GetDisplay();
-            display->SetChatMessage("system", "");
+            auto* disp = Board::GetInstance().GetDisplay();
+            if (disp != nullptr) {
+                disp->SetChatMessage("system", "");
+            }
             SetDeviceState(kDeviceStateIdle);
         });
     });
-    protocol_->OnIncomingJson([this, display](const cJSON* root) {
+    protocol_->OnIncomingJson([this](const cJSON* root) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
         if (strcmp(type->valuestring, "tts") == 0) {
@@ -599,8 +635,10 @@ void Application::Start() {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
-                    Schedule([this, display, message = std::string(text->valuestring)]() {
-                        display->SetChatMessage("assistant", message.c_str());
+                    Schedule([this, message = std::string(text->valuestring)]() {
+                        if (auto* disp = Board::GetInstance().GetDisplay()) {
+                            disp->SetChatMessage("assistant", message.c_str());
+                        }
                     });
                 }
             }
@@ -608,15 +646,19 @@ void Application::Start() {
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
-                Schedule([this, display, message = std::string(text->valuestring)]() {
-                    display->SetChatMessage("user", message.c_str());
+                Schedule([this, message = std::string(text->valuestring)]() {
+                    if (auto* disp = Board::GetInstance().GetDisplay()) {
+                        disp->SetChatMessage("user", message.c_str());
+                    }
                 });
             }
         } else if (strcmp(type->valuestring, "llm") == 0) {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
-                Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
-                    display->SetEmotion(emotion_str.c_str());
+                Schedule([this, emotion_str = std::string(emotion->valuestring)]() {
+                    if (auto* disp = Board::GetInstance().GetDisplay()) {
+                        disp->SetEmotion(emotion_str.c_str());
+                    }
                 });
             }
         } else if (strcmp(type->valuestring, "mcp") == 0) {
@@ -651,8 +693,10 @@ void Application::Start() {
             auto payload = cJSON_GetObjectItem(root, "payload");
             ESP_LOGI(TAG, "Received custom message: %s", cJSON_PrintUnformatted(root));
             if (cJSON_IsObject(payload)) {
-                Schedule([this, display, payload_str = std::string(cJSON_PrintUnformatted(payload))]() {
-                    display->SetChatMessage("system", payload_str.c_str());
+                Schedule([this, payload_str = std::string(cJSON_PrintUnformatted(payload))]() {
+                    if (auto* disp = Board::GetInstance().GetDisplay()) {
+                        disp->SetChatMessage("system", payload_str.c_str());
+                    }
                 });
             } else {
                 ESP_LOGW(TAG, "Invalid custom message format: missing payload");
@@ -664,6 +708,34 @@ void Application::Start() {
     });
     bool protocol_started = protocol_->Start();
 
+#if CONFIG_BOARD_TYPE_ESP_VOCAT
+    display = board.GetDisplay();
+    if (display == nullptr) {
+        board.EnsureUiInitialized();
+        display = board.GetDisplay();
+    }
+    audio_service_.Initialize(board.GetAudioCodec());
+#endif
+    audio_service_.Start();
+#if CONFIG_USE_AFE_WAKE_WORD || CONFIG_USE_CUSTOM_WAKE_WORD || CONFIG_USE_ESP_WAKE_WORD
+    GetAudioService().SetModelsList(esp_srmodel_init("model"));
+    GetAudioService().EnableWakeWordDetection(false);
+#endif
+
+#ifdef HAVE_LVGL
+#if !CONFIG_BOARD_TYPE_ESP_VOCAT
+    if (auto* backlight = board.GetBacklight()) {
+        backlight->RestoreBrightness();
+    }
+#endif
+    // VoCat：开机动画从板级构造起已播过网络/OTA/MQTT 全程，就绪后直接进首页。
+    if (auto* lv_display = dynamic_cast<LVAdapterDisplay*>(display)) {
+        lv_display->ShowHomeScreen();
+    }
+#endif
+
+    esp_timer_start_periodic(clock_timer_handle_, 1000000);
+
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
 #if !CONFIG_BOARD_TYPE_ESP_VOCAT
@@ -673,7 +745,7 @@ void Application::Start() {
 #endif
 
     has_server_time_ = ota.HasServerTime();
-    if (protocol_started) {
+    if (protocol_started && display != nullptr) {
         std::string message = std::string(Lang::Strings::VERSION) + ota.GetCurrentVersion();
         display->ShowNotification(message.c_str());
         display->SetChatMessage("system", "");
@@ -759,7 +831,17 @@ void Application::OnWakeWordDetected() {
     if (device_state_ == kDeviceStateIdle) {
         // Detection already Stop()'d fetch; clear FEED before encode/connect.
         audio_service_.EnableWakeWordDetection(false);
+
+#if CONFIG_SEND_WAKE_WORD_DATA
+        // Finish Opus encode BEFORE OpenAudioChannel. Encode task uses a PSRAM
+        // stack; overlapping it with TLS/NVS/flash trips
+        // esp_task_stack_is_sane_cache_disabled and reboots.
         audio_service_.EncodeWakeWord();
+        std::vector<std::unique_ptr<AudioStreamPacket>> wake_packets;
+        while (auto packet = audio_service_.PopWakeWordPacket()) {
+            wake_packets.push_back(std::move(packet));
+        }
+#endif
 
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
@@ -772,16 +854,15 @@ void Application::OnWakeWordDetected() {
         auto wake_word = audio_service_.GetLastWakeWord();
         ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
 #if CONFIG_SEND_WAKE_WORD_DATA
-        // Encode and send the wake word data to the server
-        while (auto packet = audio_service_.PopWakeWordPacket()) {
+        for (auto& packet : wake_packets) {
             protocol_->SendAudio(std::move(packet));
         }
-        // Set the chat state to wake word detected
-        protocol_->SendWakeWordDetected("Hi 钛灵");
+        ESP_LOGI(TAG, "Sent %u wake-word opus packets",
+                 static_cast<unsigned>(wake_packets.size()));
+        protocol_->SendWakeWordDetected(wake_word);
         SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
 #else
         SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
-        // Play the pop up sound to indicate the wake word is detected
         audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
 #endif
     } else if (device_state_ == kDeviceStateSpeaking) {
@@ -835,6 +916,10 @@ void Application::SetDeviceState(DeviceState state) {
             display->SetChatMessage("system", "");
             // Fetch already stopped on detect; stop Feed so AFE ringbuffer does not fill during hello wait.
             audio_service_.EnableWakeWordDetection(false);
+#ifdef HAVE_LVGL
+            // Standby charge particles + Home rebuild race with audio/modem; leave standby first.
+            lv_async_call(LeaveStandbyForWakeUi, nullptr);
+#endif
             break;
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
@@ -956,7 +1041,14 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
 
     if (device_state_ == kDeviceStateIdle) {
         audio_service_.EnableWakeWordDetection(false);
+
+#if CONFIG_SEND_WAKE_WORD_DATA
         audio_service_.EncodeWakeWord();
+        std::vector<std::unique_ptr<AudioStreamPacket>> wake_packets;
+        while (auto packet = audio_service_.PopWakeWordPacket()) {
+            wake_packets.push_back(std::move(packet));
+        }
+#endif
 
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
@@ -967,17 +1059,16 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
         }
 
         ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
-#if CONFIG_USE_AFE_WAKE_WORD || CONFIG_USE_CUSTOM_WAKE_WORD
-        // Encode and send the wake word data to the server
-        while (auto packet = audio_service_.PopWakeWordPacket()) {
+#if CONFIG_SEND_WAKE_WORD_DATA
+        for (auto& packet : wake_packets) {
             protocol_->SendAudio(std::move(packet));
         }
-        // Set the chat state to wake word detected
+        ESP_LOGI(TAG, "Sent %u wake-word opus packets",
+                 static_cast<unsigned>(wake_packets.size()));
         protocol_->SendWakeWordDetected(wake_word);
         SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
 #else
         SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
-        // Play the pop up sound to indicate the wake word is detected
         audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
 #endif
     } else if (device_state_ == kDeviceStateSpeaking) {

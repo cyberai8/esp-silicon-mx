@@ -21,6 +21,9 @@ void IdlePower_Stop();
 // 自动待机切换前调用：保留 last_activity，避免删除首页时清掉累计时间。
 void IdlePower_PrepareAutoStandby();
 
+// main_task 启动阶段调用，避免 LVGL 定时器读 NVS。
+void IdlePower_WarmSettingsCache();
+
 int IdlePower_GetStandbyMinutes();
 void IdlePower_SetStandbyMinutes(int minutes);
 int IdlePower_GetShutdownMinutes();

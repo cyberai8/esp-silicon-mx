@@ -167,8 +167,10 @@ std::string Board::GetSystemInfoJson() {
         json += R"("width":)" + std::to_string(display->width()) + R"(,)";
         json += R"("height":)" + std::to_string(display->height()) + R"(,)";
         json.pop_back(); // Remove the last comma
+        json += R"(},)";
+    } else {
+        AppendDisplayJsonFallback(json);
     }
-    json += R"(},)";
 
     json += R"("board":)" + GetBoardJson();
 

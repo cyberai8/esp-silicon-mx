@@ -1,7 +1,9 @@
 #include "game_2048_screen.h"
+#include "config.h"
 #include "i18n.h"
 
 #include "home_screen/home_screen.h"
+#include "screen_util.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +14,24 @@
 
 LV_FONT_DECLARE(font_puhui_20_4);
 
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+/* 360 圆屏：顶栏约 78px，棋盘 208，底安全 28；无返回钮（右滑退出）。 */
+#define GAME2048_ROUND  1
+#define SCR_W           DISPLAY_WIDTH
+#define SCR_H           DISPLAY_HEIGHT
+#define MARGIN_X        36
+#define HEADER_Y        28
+#define HEADER_H        78
+#define BOARD_GAP_Y     4
+#define BOARD_SIZE      208
+#define BOARD_X         ((SCR_W - BOARD_SIZE) / 2)
+#define BOARD_Y         (HEADER_Y + HEADER_H + BOARD_GAP_Y)
+#define FOOTER_H        14
+#define FOOTER_BOTTOM   28
+#define FOOTER_Y        (SCR_H - FOOTER_H - FOOTER_BOTTOM)
+#else
 /* 720x720 layout (tuned for puhui 20px font) */
+#define GAME2048_ROUND  0
 #define SCR_W           720
 #define SCR_H           720
 #define MARGIN_X        20
@@ -25,6 +44,7 @@ LV_FONT_DECLARE(font_puhui_20_4);
 #define FOOTER_H        25
 #define FOOTER_BOTTOM   14
 #define FOOTER_Y        (SCR_H - FOOTER_H - FOOTER_BOTTOM)
+#endif
 
 #define GRID_N          4
 #define PAD             12
@@ -251,8 +271,13 @@ void check_end_state() {
 }
 
 void update_scores_ui() {
+#if GAME2048_ROUND
+    lv_label_set_text_fmt(s_score_val, "%s%u", I18n::T("分数 "), (unsigned)s_score);
+    lv_label_set_text_fmt(s_best_val, "%s%u", I18n::T("最高 "), (unsigned)s_best);
+#else
     lv_label_set_text_fmt(s_score_val, "%u", (unsigned)s_score);
     lv_label_set_text_fmt(s_best_val, "%u", (unsigned)s_best);
+#endif
 }
 
 void update_tiles_ui() {
@@ -345,6 +370,27 @@ lv_obj_t* make_score_box(lv_obj_t* parent, const char* title, lv_obj_t** value_o
     return box;
 }
 
+#if GAME2048_ROUND
+// 圆屏空间紧张，分数框只放一行 "标签 数值"，不再上下堆叠标题/数值。
+lv_obj_t* make_score_box_compact(lv_obj_t* parent, lv_obj_t** value_out,
+                                  int x, int y, int w, int h) {
+    lv_obj_t* box = lv_obj_create(parent);
+    lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(box, w, h);
+    lv_obj_set_pos(box, x, y);
+    lv_obj_set_style_radius(box, 5, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0xbbada0), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(box, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(box, 2, LV_PART_MAIN);
+
+    *value_out = lv_label_create(box);
+    lv_obj_set_style_text_color(*value_out, lv_color_hex(0xffffff), LV_PART_MAIN);
+    lv_obj_center(*value_out);
+    return box;
+}
+#endif
+
 void board_event_cb(lv_event_t* e) {
     lv_event_code_t code = lv_event_get_code(e);
     lv_indev_t* indev = lv_indev_active();
@@ -409,6 +455,41 @@ void back_btn_cb(lv_event_t* e) {
     }
 }
 
+#if GAME2048_ROUND
+void build_header(lv_obj_t* parent) {
+    // 圆屏：标题居中；分数框 +「新游戏」；无返回钮（右滑退出）。
+    const int row1_y = HEADER_Y;
+    const int row1_h = 24;
+    const int row2_y = HEADER_Y + row1_h + 4;
+
+    lv_obj_t* title = lv_label_create(parent);
+    lv_label_set_text(title, "2048");
+    lv_obj_set_style_text_color(title, lv_color_hex(0x776e65), LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, row1_y + 2);
+
+    const int box_h = 24;
+    const int box_gap = 8;
+    const int box_w = 88;
+    const int boxes_w = box_w * 2 + box_gap;
+    const int boxes_x = (SCR_W - boxes_w) / 2;
+    make_score_box_compact(parent, &s_score_val, boxes_x, row2_y, box_w, box_h);
+    make_score_box_compact(parent, &s_best_val, boxes_x + box_w + box_gap,
+                            row2_y, box_w, box_h);
+
+    // 「新游戏」放在分数行下方居中。
+    lv_obj_t* new_btn = lv_button_create(parent);
+    lv_obj_set_size(new_btn, 100, 22);
+    lv_obj_align(new_btn, LV_ALIGN_TOP_MID, 0, row2_y + box_h + 4);
+    lv_obj_set_style_bg_color(new_btn, lv_color_hex(0x8f7a66), LV_PART_MAIN);
+    lv_obj_set_style_radius(new_btn, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(new_btn, 2, LV_PART_MAIN);
+    lv_obj_add_event_cb(new_btn, new_game_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* nbt = lv_label_create(new_btn);
+    lv_label_set_text(nbt, I18n::T("新游戏"));
+    lv_obj_set_style_text_color(nbt, lv_color_hex(0xf9f6f2), LV_PART_MAIN);
+    lv_obj_center(nbt);
+}
+#else
 void build_header(lv_obj_t* parent) {
     lv_obj_t* title = lv_label_create(parent);
     lv_label_set_text(title, "2048");
@@ -449,6 +530,7 @@ void build_header(lv_obj_t* parent) {
     lv_obj_set_style_text_color(bbt, lv_color_hex(0xf9f6f2), LV_PART_MAIN);
     lv_obj_center(bbt);
 }
+#endif
 
 void build_board(lv_obj_t* parent) {
     s_board = lv_obj_create(parent);
@@ -488,9 +570,16 @@ void build_board(lv_obj_t* parent) {
 
 void build_footer(lv_obj_t* parent) {
     lv_obj_t* hint = lv_label_create(parent);
+#if GAME2048_ROUND
+    lv_label_set_text(hint, I18n::T("滑动棋盘移动方块"));
+#else
     lv_label_set_text(hint, I18n::T("在棋盘上滑动：上下左右移动方块"));
+#endif
     lv_obj_set_style_text_color(hint, lv_color_hex(0x776e65), LV_PART_MAIN);
     lv_obj_set_width(hint, SCR_W - 2 * MARGIN_X);
+#if GAME2048_ROUND
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+#endif
     lv_obj_set_pos(hint, MARGIN_X, FOOTER_Y);
 }
 
@@ -530,6 +619,21 @@ lv_obj_t* Game2048::Create() {
     build_board(scr);
     build_footer(scr);
     build_overlay(scr);
+
+#if GAME2048_ROUND
+    // 圆屏无返回钮：棋盘滑动手势留给游戏，屏幕边缘右滑回桌面。
+    screen_attach_swipe_back(scr, []() {
+        lv_obj_t* old_scr = lv_screen_active();
+        lv_obj_t* home = HomeScreen::Create();
+        lv_screen_load(home);
+        if (old_scr != nullptr && old_scr != home) {
+            lv_obj_delete_async(old_scr);
+        }
+    });
+    if (s_board != nullptr) {
+        screen_swipe_back_ignore(s_board, true);
+    }
+#endif
 
     srand((unsigned)lv_tick_get());
     game_reset();

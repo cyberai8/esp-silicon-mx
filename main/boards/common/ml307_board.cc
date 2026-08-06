@@ -21,7 +21,9 @@ std::string Ml307Board::GetBoardType() {
 void Ml307Board::StartNetwork() {
     auto& application = Application::GetInstance();
     auto display = Board::GetInstance().GetDisplay();
-    display->SetStatus(Lang::Strings::DETECTING_MODULE);
+    if (display != nullptr) {
+        display->SetStatus(Lang::Strings::DETECTING_MODULE);
+    }
 
     while (true) {
         modem_ = AtModem::Detect(tx_pin_, rx_pin_, dtr_pin_, 921600);
@@ -46,7 +48,9 @@ void Ml307Board::StartNetwork() {
     });
 
     // Wait for network ready
-    display->SetStatus(Lang::Strings::REGISTERING_NETWORK);
+    if (display != nullptr) {
+        display->SetStatus(Lang::Strings::REGISTERING_NETWORK);
+    }
     while (true) {
         auto result = modem_->WaitForNetworkReady();
         if (result == NetworkStatus::ErrorInsertPin) {

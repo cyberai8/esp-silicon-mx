@@ -34,7 +34,7 @@ AudioService::~AudioService() {
 
 void AudioService::Initialize(AudioCodec* codec) {
     codec_ = codec;
-    codec_->Start();
+    // codec_->Start() 推迟到 Start()：OTA/HTTPS 期间避免 I2S 与 modem 并发拉高功耗。
 
     /* Setup the audio codec */
     opus_decoder_ = std::make_unique<OpusDecoderWrapper>(codec->output_sample_rate(), 1, OPUS_FRAME_DURATION_MS);
@@ -77,6 +77,10 @@ void AudioService::Initialize(AudioCodec* codec) {
 }
 
 void AudioService::Start() {
+    if (codec_ != nullptr) {
+        codec_->Start();
+    }
+
     service_stopped_ = false;
     xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING | AS_EVENT_WAKE_WORD_RUNNING |
         AS_EVENT_AUDIO_PROCESSOR_RUNNING | AS_EVENT_ALL_TASKS_RUNNING);
@@ -257,7 +261,10 @@ void AudioService::AudioInputTask() {
             int samples = wake_word_->GetFeedSize();
             if (samples > 0) {
                 if (ReadAudioData(data, 16000, samples)) {
-                    wake_word_->Feed(data);
+                    // Read 期间可能已被 DisableWakeWord，禁止再 Feed。
+                    if (IsWakeWordRunning()) {
+                        wake_word_->Feed(data);
+                    }
                     continue;
                 }
             }

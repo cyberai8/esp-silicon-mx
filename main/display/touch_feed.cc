@@ -22,6 +22,8 @@ struct TouchSnapshot {
 };
 
 TouchSnapshot s_snap;
+
+#if TOUCH_FEED_DEBUG
 bool s_log_was_pressed = false;
 int s_log_last_x = -1;
 int s_log_last_y = -1;
@@ -37,25 +39,20 @@ void LogSnapshotIfChanged(const TouchSnapshot& next) {
         return;
     }
 
-#if TOUCH_FEED_DEBUG
     const int dx = (s_log_last_x >= 0) ? (next.x - s_log_last_x) : 0;
     const int dy = (s_log_last_y >= 0) ? (next.y - s_log_last_y) : 0;
     const bool moved = !s_log_was_pressed || dx != 0 || dy != 0;
-#endif
     if (!s_log_was_pressed) {
         ESP_LOGI(kTag, "down: (%d,%d)", next.x, next.y);
+    } else if (moved) {
+        ESP_LOGW(kTag, "chip: p0=(%d,%d) d=(%+d,%+d)", next.x, next.y, dx, dy);
     }
-#if TOUCH_FEED_DEBUG
-    else if (moved) {
-        ESP_LOGW(kTag, "chip: p0=(%d,%d) d=(%+d,%+d)%s", next.x, next.y, dx,
-                 dy, s_log_was_pressed ? "" : " [down]");
-    }
-#endif
 
     s_log_was_pressed = true;
     s_log_last_x = next.x;
     s_log_last_y = next.y;
 }
+#endif
 
 void UpdateSnapshotFromChip() {
     TouchSnapshot next = s_snap;
@@ -88,7 +85,9 @@ void UpdateSnapshotFromChip() {
         xSemaphoreGive(s_mutex);
     }
 
+#if TOUCH_FEED_DEBUG
     LogSnapshotIfChanged(next);
+#endif
 }
 
 void ReaderTask(void* /*arg*/) {
@@ -148,9 +147,11 @@ void touch_feed_init(esp_lcd_touch_handle_t handle, uint32_t period_ms) {
             xSemaphoreGive(s_mutex);
         }
     }
+#if TOUCH_FEED_DEBUG
     s_log_was_pressed = false;
     s_log_last_x = -1;
     s_log_last_y = -1;
+#endif
 
     s_run = true;
     if (xTaskCreate(ReaderTask, "touch_feed", 4096, nullptr, 5, &s_task) !=

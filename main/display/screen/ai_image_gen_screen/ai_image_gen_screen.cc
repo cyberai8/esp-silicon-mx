@@ -1,4 +1,5 @@
 #include "ai_image_gen_screen.h"
+#include "config.h"
 #include "i18n.h"
 
 #include <atomic>
@@ -45,16 +46,42 @@ constexpr size_t kMaxRecordBytes =
     static_cast<size_t>(kSampleRate) * kBytesPerSample * kMaxRecordSeconds;
 constexpr int  kMinRecordMs      = 300;
 
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+// 360 圆屏：顶栏改双行（返回+标题 / 数量选择器），内容约 280 宽。
+constexpr bool    kRoundLayout       = true;
+constexpr int32_t kPanelW            = DISPLAY_WIDTH;
+constexpr int32_t kPanelH            = DISPLAY_HEIGHT;
+constexpr int32_t kHeaderTopInset    = 28;  // 避开顶部圆弧
+constexpr int32_t kHeaderRowH        = 28;
+constexpr int32_t kHeaderRowGap      = 4;
+constexpr int32_t kHeaderH     = kHeaderTopInset + kHeaderRowH * 2 + kHeaderRowGap;
+constexpr int32_t kBackBtnSize = 30;
+constexpr int32_t kFooterH     = 56;
+constexpr int32_t kFooterBottomInset = 28;  // 避开底部圆弧
+constexpr int32_t kBodyH       = kPanelH - kHeaderH - kFooterH - kFooterBottomInset;
+constexpr int32_t kHeaderSidePad = 36;
+constexpr int32_t kBodySidePad = 40;
+constexpr int32_t kPromptAreaH = 34;
+constexpr int32_t kTabBarH     = 34;
+constexpr int32_t kGalleryH    = kBodyH - kPromptAreaH - 12;
+#else
+constexpr bool    kRoundLayout       = false;
 constexpr int32_t kPanelW      = 720;
 constexpr int32_t kPanelH      = 720;
+constexpr int32_t kHeaderTopInset    = 0;
+constexpr int32_t kHeaderRowH        = 0;
+constexpr int32_t kHeaderRowGap      = 0;
 constexpr int32_t kHeaderH     = 88;
 constexpr int32_t kBackBtnSize = 72;
 constexpr int32_t kFooterH     = 108;
-constexpr int32_t kBodyH       = kPanelH - kHeaderH - kFooterH;
+constexpr int32_t kFooterBottomInset = 0;
+constexpr int32_t kBodyH       = kPanelH - kHeaderH - kFooterH - kFooterBottomInset;
 constexpr int32_t kHeaderSidePad = 8;
+constexpr int32_t kBodySidePad = 20;
 constexpr int32_t kPromptAreaH = 56;
 constexpr int32_t kTabBarH     = 52;
 constexpr int32_t kGalleryH    = kBodyH - kPromptAreaH - 20;
+#endif
 
 constexpr int   kPollIntervalMs      = 3000;
 constexpr int   kPollFirstDelayMs    = 1500;
@@ -1149,42 +1176,72 @@ void build_header(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, LV_PART_MAIN);
     screen_make_input_passive(divider);
 
-    lv_obj_t* back = lv_button_create(top);
-    lv_obj_remove_style_all(back);
-    lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
-    lv_obj_align(back, LV_ALIGN_LEFT_MID, kHeaderSidePad, 0);
-    lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
-                              LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(back, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_add_event_cb(back, on_back_clicked, LV_EVENT_CLICKED, nullptr);
-    screen_swipe_back_ignore(back, true);
+    // 圆屏顶栏改双行：第一行返回+标题，第二行数量选择器；避免单行挤爆。
+    lv_obj_t* row1 = top;
+    lv_obj_t* row2 = top;
+    if (kRoundLayout) {
+        row1 = lv_obj_create(top);
+        screen_strip_obj_chrome(row1);
+        lv_obj_set_size(row1, kPanelW, kHeaderRowH);
+        lv_obj_set_pos(row1, 0, kHeaderTopInset);
+        lv_obj_set_style_bg_opa(row1, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_remove_flag(row1, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t* back_icon = lv_image_create(back);
-    lv_image_set_src(back_icon, "A:ic_app_back.spng");
-    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(back_icon);
+        row2 = lv_obj_create(top);
+        screen_strip_obj_chrome(row2);
+        lv_obj_set_size(row2, kPanelW, kHeaderRowH);
+        lv_obj_set_pos(row2, 0, kHeaderTopInset + kHeaderRowH + kHeaderRowGap);
+        lv_obj_set_style_bg_opa(row2, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_remove_flag(row2, LV_OBJ_FLAG_SCROLLABLE);
+    }
 
-    lv_obj_t* title = lv_label_create(top);
-    lv_label_set_text(title, I18n::T("AI生图"));
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_set_style_text_color(title, lv_color_hex(kColorText), LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, kHeaderSidePad + kBackBtnSize + 8,
-                 0);
-    screen_make_input_passive(title);
+    if (kRoundLayout) {
+        // 圆屏：标题居中无返回箭头；第二行数量选择。
+        lv_obj_t* title = lv_label_create(row1);
+        lv_label_set_text(title, I18n::T("AI生图"));
+        lv_obj_set_style_text_font(title, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_set_style_text_color(title, lv_color_hex(kColorText), LV_PART_MAIN);
+        lv_obj_align(title, LV_ALIGN_CENTER, 0, 0);
+        screen_make_input_passive(title);
+    } else {
+        lv_obj_t* back = lv_button_create(row1);
+        lv_obj_remove_style_all(back);
+        lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
+        lv_obj_align(back, LV_ALIGN_LEFT_MID, kHeaderSidePad, 0);
+        lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
+                                  LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(back, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_add_event_cb(back, on_back_clicked, LV_EVENT_CLICKED, nullptr);
+        screen_swipe_back_ignore(back, true);
 
-    lv_obj_t* n_lbl = lv_label_create(top);
-    lv_label_set_text(n_lbl, I18n::T("生成图片数量"));
+        lv_obj_t* back_icon = lv_image_create(back);
+        lv_image_set_src(back_icon, "A:ic_app_back.spng");
+        lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(back_icon);
+
+        lv_obj_t* title = lv_label_create(row1);
+        lv_label_set_text(title, I18n::T("AI生图"));
+        lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
+        lv_obj_set_style_text_color(title, lv_color_hex(kColorText), LV_PART_MAIN);
+        lv_obj_align(title, LV_ALIGN_LEFT_MID, kHeaderSidePad + kBackBtnSize + 8, 0);
+        screen_make_input_passive(title);
+    }
+
+    lv_obj_t* n_lbl = lv_label_create(row2);
+    lv_label_set_text(n_lbl, kRoundLayout ? I18n::T("数量") : I18n::T("生成图片数量"));
     lv_obj_set_style_text_font(n_lbl, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_color(n_lbl, lv_color_hex(kColorHintText),
                                 LV_PART_MAIN);
-    lv_obj_align(n_lbl, LV_ALIGN_RIGHT_MID, -140, 0);
+    lv_obj_align(n_lbl, LV_ALIGN_LEFT_MID, kHeaderSidePad, 0);
     screen_make_input_passive(n_lbl);
 
-    s_n_dd = lv_dropdown_create(top);
-    lv_obj_set_size(s_n_dd, 100, 48);
-    lv_obj_align(s_n_dd, LV_ALIGN_RIGHT_MID, -16, 0);
+    s_n_dd = lv_dropdown_create(row2);
+    const int32_t dd_w = kRoundLayout ? 76 : 100;
+    const int32_t dd_h = kRoundLayout ? kHeaderRowH : 48;
+    lv_obj_set_size(s_n_dd, dd_w, dd_h);
+    lv_obj_align(s_n_dd, LV_ALIGN_RIGHT_MID, -kHeaderSidePad, 0);
     lv_obj_set_style_radius(s_n_dd, 10, LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_n_dd, lv_color_hex(kColorCard), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_n_dd, LV_OPA_COVER, LV_PART_MAIN);
@@ -1208,12 +1265,12 @@ void build_body(lv_obj_t* parent) {
     lv_obj_set_pos(body, 0, kHeaderH);
     lv_obj_set_style_bg_color(body, lv_color_hex(kColorBg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(body, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_pad_left(body, 20, LV_PART_MAIN);
-    lv_obj_set_style_pad_right(body, 20, LV_PART_MAIN);
-    lv_obj_set_style_pad_top(body, 10, LV_PART_MAIN);
-    lv_obj_set_style_pad_bottom(body, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_left(body, kBodySidePad, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(body, kBodySidePad, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(body, kRoundLayout ? 6 : 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(body, kRoundLayout ? 4 : 8, LV_PART_MAIN);
     lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(body, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(body, kRoundLayout ? 4 : 8, LV_PART_MAIN);
     lv_obj_remove_flag(body, LV_OBJ_FLAG_SCROLLABLE);
 
     s_prompt_lbl = lv_label_create(body);
@@ -1239,13 +1296,13 @@ void build_footer(lv_obj_t* parent) {
     lv_obj_t* footer = lv_obj_create(parent);
     screen_strip_obj_chrome(footer);
     lv_obj_set_size(footer, kPanelW, kFooterH);
-    lv_obj_set_pos(footer, 0, kPanelH - kFooterH);
+    lv_obj_set_pos(footer, 0, kPanelH - kFooterH - kFooterBottomInset);
     lv_obj_set_style_bg_color(footer, lv_color_hex(kColorBg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(footer, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(footer, LV_OBJ_FLAG_SCROLLABLE);
 
-    constexpr int32_t kBtnW = 400;
-    constexpr int32_t kBtnH = 72;
+    const int32_t kBtnW = kRoundLayout ? 200 : 400;
+    const int32_t kBtnH = kRoundLayout ? 44 : 72;
     s_record_btn = lv_button_create(footer);
     lv_obj_set_size(s_record_btn, kBtnW, kBtnH);
     lv_obj_align(s_record_btn, LV_ALIGN_CENTER, 0, 0);

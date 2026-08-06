@@ -46,14 +46,50 @@ namespace {
 constexpr const char* TAG = "RecordingScreen";
 
 #if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+// 360 圆屏：顶/侧安全边距，录音卡片 ≈280 宽，详情页按钮改竖排。
+constexpr bool  kRoundLayout   = true;
 constexpr auto kPanelSize = DISPLAY_WIDTH;
+constexpr int32_t kHeaderTopInset  = 28;
+constexpr int32_t kHeaderContentH  = 36;
+constexpr int32_t kHeaderH = kHeaderTopInset + kHeaderContentH;   // 64
+constexpr int32_t kBackBtnSize = 36;
+constexpr int32_t kHeaderSideInset = 36;
+constexpr int32_t kTabBarH = 40;
 #else
+constexpr bool  kRoundLayout   = false;
 constexpr int32_t kPanelSize = 720;
-#endif
+constexpr int32_t kHeaderTopInset  = 0;   // 未使用
+constexpr int32_t kHeaderContentH  = 0;   // 未使用
 constexpr int32_t kHeaderH = 90;
 constexpr int32_t kBackBtnSize = 72;
+constexpr int32_t kHeaderSideInset = 16;
 constexpr int32_t kTabBarH = 64;
+#endif
 constexpr int32_t kBodyH = kPanelSize - kHeaderH;
+
+// 「录音」Tab 上的计时卡片 / 按钮尺寸：圆屏收紧到跟随 kPanelSize，避免
+// 640px 宽的卡片在 360 面板上直接溢出边界。
+constexpr int32_t kRecCardW    = kRoundLayout ? kPanelSize - 80 : 640;
+constexpr int32_t kRecCardH    = kRoundLayout ? 104 : 220;
+constexpr int32_t kRecCardY    = kRoundLayout ? 10 : 40;
+constexpr int32_t kRecBtnW     = kRoundLayout ? kPanelSize - 120 : 360;
+constexpr int32_t kRecBtnH     = kRoundLayout ? 52 : 88;
+constexpr int32_t kRecBtnY     = kRoundLayout ? (kRecCardY + kRecCardH + 14) : 320;
+constexpr int32_t kRecTipY     = kRoundLayout ? (kRecBtnY + kRecBtnH + 10) : 440;
+constexpr int32_t kRecStatusW  = kRoundLayout ? kPanelSize - 80 : 560;
+
+// 详情覆盖层：圆屏把「播放」「录音转写」两个按钮从并排改成竖排。
+constexpr int32_t kDetailBtnW  = kRoundLayout ? kPanelSize - 80 : 300;
+constexpr int32_t kDetailBtnH  = kRoundLayout ? 44 : 72;
+constexpr int32_t kDetailBtnGap    = 8;    // 竖排时两按钮间距（圆屏专用）
+constexpr int32_t kDetailSideInset = 40;
+
+// 录音列表行：圆屏收窄到跟随 kPanelSize，避免 420px 宽的文件名/删除按钮
+// 布局在 360 面板上溢出裁切。
+constexpr int32_t kListRowH        = kRoundLayout ? 76 : 88;
+constexpr int32_t kListDelBtnW     = kRoundLayout ? 64 : 96;
+constexpr int32_t kListDelBtnH     = kRoundLayout ? 40 : 56;
+constexpr int32_t kListBottomReserve = kRoundLayout ? 40 : 56;
 
 constexpr uint32_t kColorBg = 0x0E1116;
 constexpr uint32_t kColorTabBar = 0x12151C;
@@ -328,7 +364,8 @@ void DisableWakeWordIfNeeded() {
     }
     as.EnableWakeWordDetection(false);
     s_wake_disabled_by_us = true;
-    vTaskDelay(pdMS_TO_TICKS(100));
+    // 等 AudioInputTask 退出当前 Read/Feed，避免与开功放竞态。
+    vTaskDelay(pdMS_TO_TICKS(150));
 }
 
 void RestoreWakeWordIfNeeded() {
@@ -1261,6 +1298,9 @@ void PlayTask(void* arg) {
         return;
     }
 
+    // 播放开功放时若仍在 AFE feed，会把 FreeRTOS 队列打坏（LoadProhibited）。
+    DisableWakeWordIfNeeded();
+
     auto& as = Application::GetInstance().GetAudioService();
     AudioCodec* codec = Board::GetInstance().GetAudioCodec();
     bool played_ok = false;
@@ -1272,6 +1312,9 @@ void PlayTask(void* arg) {
     }
     fclose(file);
 
+    as.ResetDecoder();
+    RestoreWakeWordIfNeeded();
+
     s_playing_path[0] = '\0';
     s_state.store(RecState::Idle);
     if (played_ok && !s_stop_play.load()) {
@@ -1282,6 +1325,7 @@ void PlayTask(void* arg) {
     if (esp_lv_adapter_lock(-1) == ESP_OK) {
         if (s_screen_alive) {
             UpdateRecordButtonUi();
+            UpdateDetailPlayButton();
         }
         esp_lv_adapter_unlock();
     }
@@ -1304,6 +1348,8 @@ void StopPlayback() {
         s_state.store(RecState::Idle);
     }
     Application::GetInstance().GetAudioService().ResetDecoder();
+    // PlayTask 若已被打断退出，这里兜底恢复唤醒词。
+    RestoreWakeWordIfNeeded();
     UpdateDetailPlayButton();
 }
 
@@ -1862,25 +1908,29 @@ void RebuildFileList(bool schedule_fill) {
 
         lv_obj_t* row = lv_obj_create(s_ui.list_scroll);
         screen_strip_obj_chrome(row);
-        lv_obj_set_size(row, lv_pct(100), 88);
+        lv_obj_set_size(row, lv_pct(100), kListRowH);
         lv_obj_set_style_bg_color(row, lv_color_hex(kColorCard), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_radius(row, 16, LV_PART_MAIN);
-        lv_obj_set_style_pad_hor(row, 16, LV_PART_MAIN);
+        lv_obj_set_style_radius(row, kRoundLayout ? 14 : 16, LV_PART_MAIN);
+        lv_obj_set_style_pad_hor(row, kRoundLayout ? 12 : 16, LV_PART_MAIN);
         lv_obj_set_style_pad_ver(row, 8, LV_PART_MAIN);
-        lv_obj_set_style_margin_bottom(row, 12, LV_PART_MAIN);
+        lv_obj_set_style_margin_bottom(row, kRoundLayout ? 8 : 12, LV_PART_MAIN);
         lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(row, OnRowClicked, LV_EVENT_CLICKED, idx_ud);
         screen_swipe_back_ignore(row, true);
 
+        // 名字/提示行宽：圆屏跟随实际列表宽度收紧，否则 420 定宽在 360 面板
+        // 上会让长文件名的省略号落在删除按钮下面而不是可见边界处。
+        constexpr int32_t kNameW =
+            kRoundLayout ? (kPanelSize - 80 - 24 - kListDelBtnW - 8) : 420;
         lv_obj_t* name = lv_label_create(row);
         lv_label_set_text(name, s_files[i].name);
         lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(name, 420);
+        lv_obj_set_width(name, kNameW);
         lv_obj_set_style_text_color(name, lv_color_hex(kColorText), LV_PART_MAIN);
         lv_obj_set_style_text_font(name, &font_puhui_20_4, LV_PART_MAIN);
-        lv_obj_align(name, LV_ALIGN_LEFT_MID, 0, -12);
+        lv_obj_align(name, LV_ALIGN_LEFT_MID, 0, kRoundLayout ? -10 : -12);
 
         lv_obj_t* hint = lv_label_create(row);
         char dur[16];
@@ -1896,16 +1946,16 @@ void RebuildFileList(bool schedule_fill) {
                       dur, size_buf);
         lv_label_set_text(hint, hint_buf);
         lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(hint, 420);
+        lv_obj_set_width(hint, kNameW);
         lv_obj_set_style_text_color(hint, lv_color_hex(kColorSubtle), LV_PART_MAIN);
         lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
-        lv_obj_align(hint, LV_ALIGN_LEFT_MID, 0, 16);
+        lv_obj_align(hint, LV_ALIGN_LEFT_MID, 0, kRoundLayout ? 13 : 16);
 
         lv_obj_t* del = lv_button_create(row);
         lv_obj_remove_style_all(del);
-        lv_obj_set_size(del, 96, 56);
+        lv_obj_set_size(del, kListDelBtnW, kListDelBtnH);
         lv_obj_align(del, LV_ALIGN_RIGHT_MID, 0, 0);
-        lv_obj_set_style_radius(del, 14, LV_PART_MAIN);
+        lv_obj_set_style_radius(del, kRoundLayout ? 10 : 14, LV_PART_MAIN);
         lv_obj_set_style_bg_color(del, lv_color_hex(kColorDanger), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(del, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_bg_color(del, lv_color_hex(0xB91C1C),
@@ -1986,7 +2036,12 @@ void BuildDetailPanel(lv_obj_t* parent) {
     lv_obj_t* back = lv_button_create(header);
     lv_obj_remove_style_all(back);
     lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
-    lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
+    if constexpr (kRoundLayout) {
+        lv_obj_set_pos(back, kHeaderSideInset,
+                       kHeaderTopInset + (kHeaderContentH - kBackBtnSize) / 2);
+    } else {
+        lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
+    }
     lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
                               Sel(LV_PART_MAIN, LV_STATE_PRESSED));
@@ -2003,24 +2058,37 @@ void BuildDetailPanel(lv_obj_t* parent) {
     s_ui.detail_title = lv_label_create(header);
     lv_label_set_text(s_ui.detail_title, "");
     lv_label_set_long_mode(s_ui.detail_title, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_ui.detail_title, kPanelSize - 16 - kBackBtnSize - 40);
     lv_obj_set_style_text_color(s_ui.detail_title, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_ui.detail_title, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(s_ui.detail_title, LV_ALIGN_LEFT_MID, 16 + kBackBtnSize + 8, 0);
+    lv_obj_set_style_text_font(s_ui.detail_title, kRoundLayout ? &font_puhui_20_4
+                                                                : &font_puhui_30_4,
+                               LV_PART_MAIN);
+    if constexpr (kRoundLayout) {
+        lv_obj_set_width(s_ui.detail_title, kPanelSize - kHeaderSideInset * 2);
+        const int title_y = kHeaderTopInset + (kHeaderContentH - 20) / 2;
+        lv_obj_align(s_ui.detail_title, LV_ALIGN_TOP_MID, 0, title_y);
+    } else {
+        lv_obj_set_width(s_ui.detail_title, kPanelSize - 16 - kBackBtnSize - 40);
+        lv_obj_align(s_ui.detail_title, LV_ALIGN_LEFT_MID, 16 + kBackBtnSize + 8, 0);
+    }
 
     s_ui.detail_meta = lv_label_create(panel);
     lv_label_set_text(s_ui.detail_meta, "");
     lv_obj_set_style_text_color(s_ui.detail_meta, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_ui.detail_meta, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(s_ui.detail_meta, LV_ALIGN_TOP_MID, 0, kHeaderH + 8);
+    lv_obj_align(s_ui.detail_meta, LV_ALIGN_TOP_MID, 0, kHeaderH + (kRoundLayout ? 4 : 8));
 
-    // 操作按钮行
+    // 操作按钮：大屏并排放（play 左 / asr 右）；圆屏改成竖排堆叠，300px
+    // 的按钮宽度在 360 面板上根本放不下两个并排。
     lv_obj_t* play = lv_button_create(panel);
     s_ui.detail_play_btn = play;
     lv_obj_remove_style_all(play);
-    lv_obj_set_size(play, 300, 72);
-    lv_obj_align(play, LV_ALIGN_TOP_LEFT, 40, kHeaderH + 48);
-    lv_obj_set_style_radius(play, 20, LV_PART_MAIN);
+    lv_obj_set_size(play, kDetailBtnW, kDetailBtnH);
+    if constexpr (kRoundLayout) {
+        lv_obj_align(play, LV_ALIGN_TOP_MID, 0, kHeaderH + 30);
+    } else {
+        lv_obj_align(play, LV_ALIGN_TOP_LEFT, 40, kHeaderH + 48);
+    }
+    lv_obj_set_style_radius(play, kRoundLayout ? 14 : 20, LV_PART_MAIN);
     lv_obj_set_style_bg_color(play, lv_color_hex(kColorAccent), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(play, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_bg_color(play, lv_color_hex(0x2563EB),
@@ -2031,15 +2099,21 @@ void BuildDetailPanel(lv_obj_t* parent) {
     s_ui.detail_play_lbl = lv_label_create(play);
     lv_label_set_text(s_ui.detail_play_lbl, I18n::T("播放"));
     lv_obj_set_style_text_color(s_ui.detail_play_lbl, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_ui.detail_play_lbl, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_ui.detail_play_lbl, kRoundLayout ? &font_puhui_20_4
+                                                                  : &font_puhui_30_4,
+                               LV_PART_MAIN);
     lv_obj_center(s_ui.detail_play_lbl);
 
     lv_obj_t* asr = lv_button_create(panel);
     s_ui.detail_asr_btn = asr;
     lv_obj_remove_style_all(asr);
-    lv_obj_set_size(asr, 300, 72);
-    lv_obj_align(asr, LV_ALIGN_TOP_RIGHT, -40, kHeaderH + 48);
-    lv_obj_set_style_radius(asr, 20, LV_PART_MAIN);
+    lv_obj_set_size(asr, kDetailBtnW, kDetailBtnH);
+    if constexpr (kRoundLayout) {
+        lv_obj_align(asr, LV_ALIGN_TOP_MID, 0, kHeaderH + 30 + kDetailBtnH + 8);
+    } else {
+        lv_obj_align(asr, LV_ALIGN_TOP_RIGHT, -40, kHeaderH + 48);
+    }
+    lv_obj_set_style_radius(asr, kRoundLayout ? 14 : 20, LV_PART_MAIN);
     lv_obj_set_style_bg_color(asr, lv_color_hex(0x059669), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(asr, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_bg_color(asr, lv_color_hex(0x047857),
@@ -2050,33 +2124,50 @@ void BuildDetailPanel(lv_obj_t* parent) {
     s_ui.detail_asr_lbl = lv_label_create(asr);
     lv_label_set_text(s_ui.detail_asr_lbl, I18n::T("录音转写"));
     lv_obj_set_style_text_color(s_ui.detail_asr_lbl, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_ui.detail_asr_lbl, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_ui.detail_asr_lbl, kRoundLayout ? &font_puhui_20_4
+                                                                  : &font_puhui_30_4,
+                               LV_PART_MAIN);
     lv_obj_center(s_ui.detail_asr_lbl);
+
+    // 竖排按钮占用的总高度：圆屏两个按钮 + 间隙，大屏保持原来单行 72px。
+    constexpr int32_t kDetailBtnsBlockH =
+        kRoundLayout ? (30 + kDetailBtnH * 2 + 8) : (48 + 72);
 
     s_ui.detail_status = lv_label_create(panel);
     lv_label_set_text(s_ui.detail_status, "");
-    lv_obj_set_width(s_ui.detail_status, kPanelSize - 80);
-    lv_label_set_long_mode(s_ui.detail_status, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(s_ui.detail_status, kRoundLayout ? kPanelSize - 80 : kPanelSize - 80);
+    lv_label_set_long_mode(s_ui.detail_status, kRoundLayout ? LV_LABEL_LONG_WRAP
+                                                             : LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_color(s_ui.detail_status, lv_color_hex(kColorSubtle),
                                 LV_PART_MAIN);
     lv_obj_set_style_text_font(s_ui.detail_status, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(s_ui.detail_status, LV_ALIGN_TOP_MID, 0, kHeaderH + 136);
+    if constexpr (kRoundLayout) {
+        lv_obj_set_style_text_align(s_ui.detail_status, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    }
+    lv_obj_align(s_ui.detail_status, LV_ALIGN_TOP_MID, 0,
+                kHeaderH + kDetailBtnsBlockH + (kRoundLayout ? 8 : 16));
     screen_make_input_passive(s_ui.detail_status);
 
+    // 圆屏给 status 文字预留出约两行的高度（提示语常有较长的中文句子），
+    // 再往下才是结果框，避免长状态文案和结果框标题重叠。
+    const int32_t result_box_y =
+        kHeaderH + kDetailBtnsBlockH + (kRoundLayout ? (8 + 48) : 48);
     lv_obj_t* result_box = lv_obj_create(panel);
     screen_strip_obj_chrome(result_box);
-    lv_obj_set_size(result_box, kPanelSize - 48, kPanelSize - (kHeaderH + 180));
-    lv_obj_align(result_box, LV_ALIGN_TOP_MID, 0, kHeaderH + 168);
+    lv_obj_set_size(result_box, kPanelSize - (kRoundLayout ? 80 : 48),
+                    kPanelSize - result_box_y - (kRoundLayout ? 28 : 0));
+    lv_obj_align(result_box, LV_ALIGN_TOP_MID, 0, result_box_y);
     lv_obj_set_style_bg_color(result_box, lv_color_hex(kColorCard), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(result_box, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(result_box, 20, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(result_box, 20, LV_PART_MAIN);
+    lv_obj_set_style_radius(result_box, kRoundLayout ? 14 : 20, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(result_box, kRoundLayout ? 12 : 20, LV_PART_MAIN);
     lv_obj_set_scrollbar_mode(result_box, LV_SCROLLBAR_MODE_AUTO);
     screen_swipe_back_ignore(result_box, true);
 
     s_ui.detail_result = lv_label_create(result_box);
     lv_label_set_text(s_ui.detail_result, "");
-    lv_obj_set_width(s_ui.detail_result, kPanelSize - 48 - 40);
+    lv_obj_set_width(s_ui.detail_result,
+                     kPanelSize - (kRoundLayout ? 80 + 24 : 48 + 40));
     lv_label_set_long_mode(s_ui.detail_result, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(s_ui.detail_result, lv_color_hex(kColorText),
                                 LV_PART_MAIN);
@@ -2091,28 +2182,36 @@ void BuildHeader(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t* back = lv_button_create(header);
-    lv_obj_remove_style_all(back);
-    lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
-    lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
-    lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
-                              Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-    lv_obj_set_style_bg_opa(back, LV_OPA_20, Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-    lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_add_event_cb(back, OnBackClicked, LV_EVENT_CLICKED, nullptr);
-    screen_swipe_back_ignore(back, true);
+    if constexpr (!kRoundLayout) {
+        lv_obj_t* back = lv_button_create(header);
+        lv_obj_remove_style_all(back);
+        lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
+        lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
+        lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
+                                  Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+        lv_obj_set_style_bg_opa(back, LV_OPA_20, Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+        lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_add_event_cb(back, OnBackClicked, LV_EVENT_CLICKED, nullptr);
+        screen_swipe_back_ignore(back, true);
 
-    lv_obj_t* back_icon = lv_image_create(back);
-    lv_image_set_src(back_icon, "A:ic_app_back.spng");
-    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(back_icon);
+        lv_obj_t* back_icon = lv_image_create(back);
+        lv_image_set_src(back_icon, "A:ic_app_back.spng");
+        lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(back_icon);
+    }
 
     lv_obj_t* title = lv_label_create(header);
     lv_label_set_text(title, I18n::T("录音"));
     lv_obj_set_style_text_color(title, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 16 + kBackBtnSize + 16, 0);
+    lv_obj_set_style_text_font(title, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
+    if constexpr (kRoundLayout) {
+        const int title_y = kHeaderTopInset + (kHeaderContentH - 20) / 2;
+        lv_obj_align(title, LV_ALIGN_TOP_MID, 0, title_y);
+    } else {
+        lv_obj_align(title, LV_ALIGN_LEFT_MID, 16 + kBackBtnSize + 16, 0);
+    }
 }
 
 void BuildNoSdHint(lv_obj_t* parent) {
@@ -2134,8 +2233,8 @@ void BuildRecordTab(lv_obj_t* tab) {
 
     lv_obj_t* card = lv_obj_create(tab);
     screen_strip_obj_chrome(card);
-    lv_obj_set_size(card, 640, 220);
-    lv_obj_align(card, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_set_size(card, kRecCardW, kRecCardH);
+    lv_obj_align(card, LV_ALIGN_TOP_MID, 0, kRecCardY);
     lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 28, LV_PART_MAIN);
@@ -2147,22 +2246,22 @@ void BuildRecordTab(lv_obj_t* tab) {
     lv_obj_set_style_text_color(s_ui.timer_lbl, lv_color_hex(0xF87171), LV_PART_MAIN);
     // 用含冒号字形的字体；纯数字字库会把 "00:07" 渲成 "0007"
     lv_obj_set_style_text_font(s_ui.timer_lbl, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(s_ui.timer_lbl, LV_ALIGN_CENTER, 0, -16);
+    lv_obj_align(s_ui.timer_lbl, LV_ALIGN_CENTER, 0, kRoundLayout ? -12 : -16);
 
     s_ui.status_lbl = lv_label_create(card);
     SetIdleRecordHint();
     lv_obj_set_style_text_color(s_ui.status_lbl, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_ui.status_lbl, &font_puhui_20_4, LV_PART_MAIN);
     lv_label_set_long_mode(s_ui.status_lbl, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(s_ui.status_lbl, 560);
+    lv_obj_set_width(s_ui.status_lbl, kRecStatusW);
     lv_obj_set_style_text_align(s_ui.status_lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_align(s_ui.status_lbl, LV_ALIGN_BOTTOM_MID, 0, -24);
+    lv_obj_align(s_ui.status_lbl, LV_ALIGN_BOTTOM_MID, 0, kRoundLayout ? -8 : -24);
 
     s_ui.record_btn = lv_button_create(tab);
     lv_obj_remove_style_all(s_ui.record_btn);
-    lv_obj_set_size(s_ui.record_btn, 360, 88);
-    lv_obj_align(s_ui.record_btn, LV_ALIGN_TOP_MID, 0, 320);
-    lv_obj_set_style_radius(s_ui.record_btn, 44, LV_PART_MAIN);
+    lv_obj_set_size(s_ui.record_btn, kRecBtnW, kRecBtnH);
+    lv_obj_align(s_ui.record_btn, LV_ALIGN_TOP_MID, 0, kRecBtnY);
+    lv_obj_set_style_radius(s_ui.record_btn, kRecBtnH / 2, LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_ui.record_btn, lv_color_hex(kColorRecord), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_ui.record_btn, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_ui.record_btn, lv_color_hex(0xB91C1C),
@@ -2173,7 +2272,9 @@ void BuildRecordTab(lv_obj_t* tab) {
     s_ui.record_btn_lbl = lv_label_create(s_ui.record_btn);
     lv_label_set_text(s_ui.record_btn_lbl, I18n::T("开始录音"));
     lv_obj_set_style_text_color(s_ui.record_btn_lbl, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_ui.record_btn_lbl, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_ui.record_btn_lbl, kRoundLayout ? &font_puhui_20_4
+                                                                 : &font_puhui_30_4,
+                               LV_PART_MAIN);
     lv_obj_center(s_ui.record_btn_lbl);
 
     lv_obj_t* tip = lv_label_create(tab);
@@ -2186,7 +2287,12 @@ void BuildRecordTab(lv_obj_t* tab) {
     }
     lv_obj_set_style_text_color(tip, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(tip, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(tip, LV_ALIGN_TOP_MID, 0, 440);
+    if constexpr (kRoundLayout) {
+        lv_label_set_long_mode(tip, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(tip, kPanelSize - 80);
+        lv_obj_set_style_text_align(tip, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    }
+    lv_obj_align(tip, LV_ALIGN_TOP_MID, 0, kRecTipY);
     screen_make_input_passive(tip);
 }
 
@@ -2202,7 +2308,8 @@ void BuildListTab(lv_obj_t* tab) {
     lv_obj_set_style_text_align(s_ui.list_status, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_ui.list_status, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_ui.list_status, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(s_ui.list_status, LV_ALIGN_BOTTOM_MID, 0, -12);
+    lv_obj_align(s_ui.list_status, LV_ALIGN_BOTTOM_MID, 0,
+                 kRoundLayout ? -28 : -12);
     screen_make_input_passive(s_ui.list_status);
 
     s_ui.list_empty = lv_label_create(tab);
@@ -2214,7 +2321,8 @@ void BuildListTab(lv_obj_t* tab) {
 
     s_ui.list_scroll = lv_obj_create(tab);
     screen_strip_obj_chrome(s_ui.list_scroll);
-    lv_obj_set_size(s_ui.list_scroll, kPanelSize - 40, kBodyH - kTabBarH - 56);
+    lv_obj_set_size(s_ui.list_scroll, kPanelSize - (kRoundLayout ? 80 : 40),
+                    kBodyH - kTabBarH - kListBottomReserve);
     lv_obj_align(s_ui.list_scroll, LV_ALIGN_TOP_MID, 0, 12);
     lv_obj_set_style_bg_opa(s_ui.list_scroll, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_flex_flow(s_ui.list_scroll, LV_FLEX_FLOW_COLUMN);

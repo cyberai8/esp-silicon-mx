@@ -1,6 +1,8 @@
 #include "wifi_required_dialog.h"
 
+#include "config.h"
 #include "i18n.h"
+#include "board.h"
 #include "dual_network_board.h"
 #include "screen_util.h"
 
@@ -11,7 +13,25 @@ LV_FONT_DECLARE(font_puhui_30_4);
 
 namespace {
 
-constexpr int kPanelSize = 720;
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+constexpr bool kRoundLayout = true;
+constexpr int kPanelW = DISPLAY_WIDTH;
+constexpr int kPanelH = DISPLAY_HEIGHT;
+constexpr int kCardW = 280;
+constexpr int kCardH = 220;
+constexpr int kBtnW = 120;
+constexpr int kBtnH = 44;
+constexpr int kCardPad = 16;
+#else
+constexpr bool kRoundLayout = false;
+constexpr int kPanelW = 720;
+constexpr int kPanelH = 720;
+constexpr int kCardW = 520;
+constexpr int kCardH = 300;
+constexpr int kBtnW = 200;
+constexpr int kBtnH = 72;
+constexpr int kCardPad = 28;
+#endif
 
 lv_obj_t* s_overlay = nullptr;
 
@@ -29,14 +49,14 @@ void OnOkClicked(lv_event_t* /*e*/) {
 }  // namespace
 
 bool WifiRequired_ShouldBlock() {
-    // 0 = WiFi，1 = 4G。S31 无 4G，默认按 WiFi 检查连通性。
-#if defined(CONFIG_IDF_TARGET_ESP32S31)
-    constexpr int32_t kDefaultNetType = 0;
-#else
-    constexpr int32_t kDefaultNetType = 1;
-#endif
-    const NetworkType type =
-        DualNetworkBoard::LoadNetworkTypeFromSettings(kDefaultNetType);
+    // 必须用内存中的网络类型，禁止在 LVGL 任务里读 NVS/Flash。
+    // 否则另一核若跑在 PSRAM 栈上，会触发
+    // esp_task_stack_is_sane_cache_disabled assert 重启。
+    NetworkType type = NetworkType::WIFI;
+    if (auto* dual =
+            dynamic_cast<DualNetworkBoard*>(&Board::GetInstance())) {
+        type = dual->GetNetworkType();
+    }
     if (type != NetworkType::WIFI) {
         return false;
     }
@@ -50,15 +70,10 @@ void WifiRequired_ShowDialog(const char* hint_msgid) {
     }
     CloseDialog();
 
-    constexpr int kCardW = 520;
-    constexpr int kCardH = 300;
-    constexpr int kBtnW = 200;
-    constexpr int kBtnH = 72;
-
     lv_obj_t* mask = lv_obj_create(scr);
     lv_obj_remove_style_all(mask);
     lv_obj_add_flag(mask, LV_OBJ_FLAG_FLOATING);
-    lv_obj_set_size(mask, kPanelSize, kPanelSize);
+    lv_obj_set_size(mask, kPanelW, kPanelH);
     lv_obj_set_pos(mask, 0, 0);
     lv_obj_set_style_bg_color(mask, lv_color_hex(0x000000), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(mask, LV_OPA_70, LV_PART_MAIN);
@@ -74,7 +89,7 @@ void WifiRequired_ShowDialog(const char* hint_msgid) {
     lv_obj_set_style_bg_color(card, lv_color_hex(0x1B2030), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 20, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 28, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, kCardPad, LV_PART_MAIN);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
     screen_swipe_back_ignore(card, true);
@@ -82,8 +97,10 @@ void WifiRequired_ShowDialog(const char* hint_msgid) {
     lv_obj_t* title = lv_label_create(card);
     lv_label_set_text(title, I18n::T("未连接 WiFi"));
     lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 8);
+    lv_obj_set_style_text_font(title,
+                               kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, kRoundLayout ? 4 : 8);
     lv_obj_remove_flag(title, LV_OBJ_FLAG_CLICKABLE);
 
     const char* hint =
@@ -92,7 +109,7 @@ void WifiRequired_ShowDialog(const char* hint_msgid) {
             : "请先连接 WiFi 后再使用该应用";
     lv_obj_t* body = lv_label_create(card);
     lv_label_set_text(body, I18n::T(hint));
-    lv_obj_set_width(body, kCardW - 56);
+    lv_obj_set_width(body, kCardW - kCardPad * 2);
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(body, lv_color_hex(0x9AA3B2), LV_PART_MAIN);
     lv_obj_set_style_text_font(body, &font_puhui_20_4, LV_PART_MAIN);
@@ -113,7 +130,9 @@ void WifiRequired_ShowDialog(const char* hint_msgid) {
     lv_obj_t* ok_lbl = lv_label_create(ok);
     lv_label_set_text(ok_lbl, I18n::T("确定"));
     lv_obj_set_style_text_color(ok_lbl, lv_color_hex(0xE5E7EB), LV_PART_MAIN);
-    lv_obj_set_style_text_font(ok_lbl, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(ok_lbl,
+                               kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
     lv_obj_center(ok_lbl);
     lv_obj_remove_flag(ok_lbl, LV_OBJ_FLAG_CLICKABLE);
 }

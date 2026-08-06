@@ -27,14 +27,43 @@ namespace {
 
 constexpr const char* TAG_SD = "SdCardScreen";
 #if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+// 360 圆屏：顶栏居中无箭头；水平 ≈280；纵向压缩给文件列表留空间。
+constexpr bool kRoundLayout = true;
 constexpr auto kPanelSize = DISPLAY_WIDTH;
+constexpr int kHeaderTopInset = 28;
+constexpr int kHeaderContentH = 28;
+constexpr int kHeaderH = kHeaderTopInset + kHeaderContentH;  // 56
+constexpr int kBackBtnSize = 34;
+constexpr int kHeaderSidePad = 36;
+constexpr int kPad = 36;
+constexpr int kStatusY = kHeaderH + 4;
+constexpr int kCapacityY = kStatusY + 22;
+constexpr int kUsbBtnY = kCapacityY + 16;
+constexpr int kUsbBtnH = 36;
+constexpr int kUsbHintY = kUsbBtnY + kUsbBtnH + 2;
+constexpr int kDividerY = kUsbHintY + 18;
+constexpr int kPathY = kDividerY + 4;
+constexpr int kListY = kPathY + 18;
+constexpr int kListBottom = 28;
 #else
+constexpr bool kRoundLayout = false;
 constexpr int kPanelSize = 720;
-#endif
+constexpr int kHeaderTopInset = 0;
+constexpr int kHeaderContentH = 80;
 constexpr int kHeaderH = 80;
 constexpr int kBackBtnSize = 72;
-constexpr int kHeaderSidePad = 16;  // 与其它页面 header 返回钮左边距一致
+constexpr int kHeaderSidePad = 16;
 constexpr int kPad = 16;
+constexpr int kStatusY = kHeaderH + kPad;
+constexpr int kCapacityY = kStatusY + 32;
+constexpr int kUsbBtnY = kHeaderH + kPad + 64;
+constexpr int kUsbBtnH = 48;
+constexpr int kUsbHintY = kUsbBtnY + 56;
+constexpr int kDividerY = kUsbHintY + 36;
+constexpr int kPathY = kDividerY + 8;
+constexpr int kListY = kPathY + 28;
+constexpr int kListBottom = kPad;
+#endif
 constexpr size_t kMaxNameLen = 256;  // POSIX NAME_MAX = 255
 constexpr size_t kMaxPathLen = 512;
 constexpr size_t kMaxTextPreviewBytes = 48 * 1024;
@@ -72,12 +101,6 @@ char s_preview_lv_path[kMaxPathLen + 4] = {};  // "S:" + posix path
 
 // 当前浏览目录（绝对路径，含挂载点前缀，如 /sdcard 或 /sdcard/photos）
 char s_cwd[kMaxPathLen] = {};
-
-constexpr int kUsbBtnY = kHeaderH + kPad + 64;
-constexpr int kUsbHintY = kUsbBtnY + 56;
-constexpr int kDividerY = kUsbHintY + 36;
-constexpr int kPathY = kDividerY + 8;
-constexpr int kListY = kPathY + 28;
 
 // ----- helper: human-readable size (integer-only, safe with newlib-nano) -----
 void FormatSize(uint64_t bytes, char* buf, size_t buf_size) {
@@ -529,11 +552,14 @@ void BuildFileRow(const char* name, const char* path) {
     lv_obj_set_flex_grow(info_col, 1);
     lv_obj_remove_flag(info_col, LV_OBJ_FLAG_CLICKABLE);
 
-    // File/dir name
+    // File/dir name。圆屏 450 定宽会比行内实际可用宽度（kPanelSize - 2*kPad
+    // - 左右 pad_hor - 删除按钮 - 间隙）还宽，导致省略号落在删除按钮下面
+    // 而不是可见边界处；按实际可用宽度收紧。
+    constexpr int kNameLblW = kRoundLayout ? (kPanelSize - 2 * kPad - 16 - 64 - 8) : 450;
     lv_obj_t* name_lbl = lv_label_create(info_col);
     lv_label_set_text(name_lbl, name);
     lv_label_set_long_mode(name_lbl, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(name_lbl, 450);
+    lv_obj_set_width(name_lbl, kNameLblW);
     lv_obj_set_style_text_color(name_lbl, lv_color_hex(kColorTextPrimary), LV_PART_MAIN);
     lv_obj_set_style_text_font(name_lbl, &font_puhui_20_4, LV_PART_MAIN);
 
@@ -727,7 +753,6 @@ void RebuildFileList(lv_obj_t* parent) {
 
 // ----- header builder -----
 void BuildHeader(lv_obj_t* parent) {
-    // 与 network / settings 等页面统一：80px header + 返回钮 LEFT_MID 左边距 16
     lv_obj_t* header = lv_obj_create(parent);
     screen_strip_obj_chrome(header);
     lv_obj_set_size(header, kPanelSize, kHeaderH);
@@ -735,32 +760,41 @@ void BuildHeader(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t* back_btn = lv_button_create(header);
-    lv_obj_remove_style_all(back_btn);
-    lv_obj_set_size(back_btn, kBackBtnSize, kBackBtnSize);
-    lv_obj_align(back_btn, LV_ALIGN_LEFT_MID, kHeaderSidePad, 0);
-    lv_obj_set_style_bg_opa(back_btn, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(back_btn, lv_color_hex(0xFFFFFF),
-                              Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-    lv_obj_set_style_bg_opa(back_btn, LV_OPA_20,
-                            Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-    lv_obj_set_style_radius(back_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(back_btn, 0, LV_PART_MAIN);
-    screen_swipe_back_ignore(back_btn, true);
+    if constexpr (!kRoundLayout) {
+        lv_obj_t* back_btn = lv_button_create(header);
+        lv_obj_remove_style_all(back_btn);
+        lv_obj_set_size(back_btn, kBackBtnSize, kBackBtnSize);
+        lv_obj_align(back_btn, LV_ALIGN_LEFT_MID, kHeaderSidePad, 0);
+        lv_obj_set_style_bg_opa(back_btn, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(back_btn, lv_color_hex(0xFFFFFF),
+                                  Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+        lv_obj_set_style_bg_opa(back_btn, LV_OPA_20,
+                                Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+        lv_obj_set_style_radius(back_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(back_btn, 0, LV_PART_MAIN);
+        screen_swipe_back_ignore(back_btn, true);
 
-    lv_obj_t* back_icon = lv_image_create(back_btn);
-    lv_image_set_src(back_icon, "A:ic_app_back.spng");
-    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(back_icon);
+        lv_obj_t* back_icon = lv_image_create(back_btn);
+        lv_image_set_src(back_icon, "A:ic_app_back.spng");
+        lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(back_icon);
 
-    auto back_fn = [](lv_event_t* /*e*/) { OnNavigateBack(); };
-    lv_obj_add_event_cb(back_btn, back_fn, LV_EVENT_CLICKED, nullptr);
+        auto back_fn = [](lv_event_t* /*e*/) { OnNavigateBack(); };
+        lv_obj_add_event_cb(back_btn, back_fn, LV_EVENT_CLICKED, nullptr);
+    }
 
     lv_obj_t* title = lv_label_create(header);
     lv_label_set_text(title, I18n::T("SD 卡"));
     lv_obj_set_style_text_color(title, lv_color_hex(kColorTextPrimary), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, kHeaderSidePad + kBackBtnSize + kHeaderSidePad, 0);
+    lv_obj_set_style_text_font(title, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
+    if constexpr (kRoundLayout) {
+        const int title_y = kHeaderTopInset + (kHeaderContentH - 20) / 2;
+        lv_obj_align(title, LV_ALIGN_TOP_MID, 0, title_y);
+    } else {
+        lv_obj_align(title, LV_ALIGN_LEFT_MID,
+                     kHeaderSidePad + kBackBtnSize + kHeaderSidePad, 0);
+    }
     lv_obj_remove_flag(title, LV_OBJ_FLAG_CLICKABLE);
 }
 
@@ -775,7 +809,7 @@ void BuildStatusSection(lv_obj_t* parent) {
     lv_obj_set_flex_align(status_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(status_row, 12, LV_PART_MAIN);
-    lv_obj_set_pos(status_row, kPad, kHeaderH + kPad);
+    lv_obj_set_pos(status_row, kPad, kStatusY);
 
     // Status dot (colored circle)
     s_status_dot = lv_obj_create(status_row);
@@ -796,11 +830,11 @@ void BuildStatusSection(lv_obj_t* parent) {
     lv_label_set_text(s_capacity_lbl, "");
     lv_obj_set_style_text_color(s_capacity_lbl, lv_color_hex(kColorTextSecondary), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_capacity_lbl, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_set_pos(s_capacity_lbl, kPad, kHeaderH + kPad + 32);
+    lv_obj_set_pos(s_capacity_lbl, kPad, kCapacityY);
 
     // Virtual USB drive toggle
     s_usb_btn = lv_button_create(parent);
-    lv_obj_set_size(s_usb_btn, LV_SIZE_CONTENT, 48);
+    lv_obj_set_size(s_usb_btn, LV_SIZE_CONTENT, kUsbBtnH);
     lv_obj_set_style_pad_hor(s_usb_btn, 20, LV_PART_MAIN);
     lv_obj_set_style_radius(s_usb_btn, 16, LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_usb_btn, lv_color_hex(0x2F6FED), LV_PART_MAIN);
@@ -851,7 +885,7 @@ void BuildFileListSection(lv_obj_t* parent) {
     lv_obj_align(s_no_files_lbl, LV_ALIGN_CENTER, 0, 40);
 
     // Scrollable file list
-    constexpr int kListH = kPanelSize - kListY - kPad;
+    constexpr int kListH = kPanelSize - kListY - kListBottom;
     s_file_list = lv_obj_create(parent);
     lv_obj_remove_style_all(s_file_list);
     lv_obj_set_size(s_file_list, kPanelSize - 2 * kPad, kListH);
@@ -886,7 +920,12 @@ void BuildPreviewOverlay(lv_obj_t* parent) {
     lv_obj_t* back_btn = lv_button_create(header);
     lv_obj_remove_style_all(back_btn);
     lv_obj_set_size(back_btn, kBackBtnSize, kBackBtnSize);
-    lv_obj_align(back_btn, LV_ALIGN_LEFT_MID, kHeaderSidePad, 0);
+    if constexpr (kRoundLayout) {
+        lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, kHeaderSidePad,
+                     kHeaderTopInset + (kHeaderContentH - kBackBtnSize) / 2);
+    } else {
+        lv_obj_align(back_btn, LV_ALIGN_LEFT_MID, kHeaderSidePad, 0);
+    }
     lv_obj_set_style_bg_opa(back_btn, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_bg_color(back_btn, lv_color_hex(0xFFFFFF),
                               Sel(LV_PART_MAIN, LV_STATE_PRESSED));
@@ -905,15 +944,23 @@ void BuildPreviewOverlay(lv_obj_t* parent) {
     s_preview_title = lv_label_create(header);
     lv_label_set_text(s_preview_title, "");
     lv_label_set_long_mode(s_preview_title, LV_LABEL_LONG_DOT);
-    // 返回钮右侧到右边缘留 16 边距
+    // 返回钮右侧到右边缘留安全边距
     lv_obj_set_width(s_preview_title,
                      kPanelSize - (kHeaderSidePad + kBackBtnSize + kHeaderSidePad) -
                          kHeaderSidePad);
     lv_obj_set_style_text_color(s_preview_title, lv_color_hex(kColorTextPrimary),
                                 LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_preview_title, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(s_preview_title, LV_ALIGN_LEFT_MID,
-                 kHeaderSidePad + kBackBtnSize + kHeaderSidePad, 0);
+    lv_obj_set_style_text_font(s_preview_title, kRoundLayout ? &font_puhui_20_4
+                                                              : &font_puhui_30_4,
+                               LV_PART_MAIN);
+    if constexpr (kRoundLayout) {
+        lv_obj_align(s_preview_title, LV_ALIGN_TOP_LEFT,
+                     kHeaderSidePad + kBackBtnSize + 8,
+                     kHeaderTopInset + (kHeaderContentH - 20) / 2);
+    } else {
+        lv_obj_align(s_preview_title, LV_ALIGN_LEFT_MID,
+                     kHeaderSidePad + kBackBtnSize + kHeaderSidePad, 0);
+    }
     lv_obj_remove_flag(s_preview_title, LV_OBJ_FLAG_CLICKABLE);
 
     // 图片预览（全屏居中）

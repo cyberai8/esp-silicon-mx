@@ -48,9 +48,60 @@ constexpr const char* TAG = "RadioScreen";
 constexpr int kRadioSampleRate = 16000;
 
 #if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+// 360 圆屏：下面这套数值是按 0..360 从上到下顺序算出来的，每一段都紧跟
+// 上一段的下边界 + 一个小 gap，避免旧版本「音量条被控制行盖住」的重叠。
+//   list 按钮行        y 28-60
+//   title              y 56-80（居中，无返回箭头）
+//   status             y 84-106
+//   visualizer         y 112-200 (88 高)
+//   volume label       y 206-228
+//   control row        y 234-286 (52 高)
+//   hint (底部)         距底 32px 安全边距
+constexpr bool kRoundLayout = true;
 constexpr auto kPanelSize = DISPLAY_WIDTH;
+constexpr int32_t kTitleY = 56;
+constexpr int32_t kStatusY = 84;
+constexpr int32_t kVizY = 112;
+constexpr int32_t kVizW = 280;
+constexpr int32_t kVizH = 88;
+constexpr int32_t kCtrlRowY = 234;
+constexpr int32_t kCtrlRowWidth = 280;
+constexpr int32_t kCtrlRowHeight = 52;
+constexpr int32_t kCtrlSideBtnSize = 34;
+constexpr int32_t kCtrlPlayBtnSize = 44;
+constexpr int32_t kHintBottomMargin = 32;
+constexpr int32_t kBackBtnSize = 32;
+constexpr int32_t kBackBtnX = 36;
+constexpr int32_t kBackBtnY = 28;
+constexpr int32_t kListBtnW = 64;
+constexpr int32_t kListBtnH = 32;
+constexpr int32_t kListHeaderH = 56;
+constexpr int32_t kListRowH = 48;
+constexpr int kBarGap = 8;
+constexpr int kBarMinH = 8;
 #else
+constexpr bool kRoundLayout = false;
 constexpr int32_t kPanelSize = 720;
+constexpr int32_t kTitleY = 48;
+constexpr int32_t kStatusY = 100;
+constexpr int32_t kVizY = 150;
+constexpr int32_t kVizW = 520;
+constexpr int32_t kVizH = 280;
+constexpr int32_t kCtrlRowY = 530;
+constexpr int32_t kCtrlRowWidth = 520;
+constexpr int32_t kCtrlRowHeight = 120;
+constexpr int32_t kCtrlSideBtnSize = 80;
+constexpr int32_t kCtrlPlayBtnSize = 112;
+constexpr int32_t kHintBottomMargin = 16;
+constexpr int32_t kBackBtnSize = 72;
+constexpr int32_t kBackBtnX = 32;
+constexpr int32_t kBackBtnY = 36;
+constexpr int32_t kListBtnW = 96;
+constexpr int32_t kListBtnH = 72;
+constexpr int32_t kListHeaderH = 88;
+constexpr int32_t kListRowH = 64;
+constexpr int kBarGap = 18;
+constexpr int kBarMinH = 12;
 #endif
 constexpr uint32_t kColorBg = 0x0E1116;
 constexpr uint32_t kColorBgGrad = 0x161A22;
@@ -67,23 +118,9 @@ constexpr uint32_t kColorListItemBgPressed = 0x2A3140;
 constexpr uint32_t kColorListItemActive = 0x2A3320;
 constexpr uint32_t kColorListBorder = 0x2E3542;
 
-constexpr int32_t kTitleY = 48;
-constexpr int32_t kStatusY = 100;
-constexpr int32_t kVizY = 150;
-constexpr int32_t kVizW = 520;
-constexpr int32_t kVizH = 280;
-constexpr int32_t kCtrlRowY = 530;
-constexpr int32_t kCtrlRowWidth = 520;
-constexpr int32_t kCtrlRowHeight = 120;
-constexpr int32_t kCtrlSideBtnSize = 80;
-constexpr int32_t kCtrlPlayBtnSize = 112;
-constexpr int32_t kHintBottomMargin = 16;
 constexpr int kVolStep = 5;
-
 constexpr int kFftN = 256;
 constexpr int kBarCount = 12;
-constexpr int kBarGap = 18;
-constexpr int kBarMinH = 12;
 constexpr int kBarMaxH = kVizH - 28;
 constexpr size_t kPcmRingSize = 2048;  // 2^n
 constexpr float kAttack = 0.55f;
@@ -1440,39 +1477,42 @@ lv_obj_t* CreateRoundButton(lv_obj_t* parent, int32_t size, uint32_t bg_color,
 }
 
 void BuildBackButton(lv_obj_t* scr) {
-    lv_obj_t* back_btn = lv_button_create(scr);
-    lv_obj_remove_style_all(back_btn);
-    lv_obj_set_size(back_btn, 72, 72);
-    lv_obj_set_style_bg_opa(back_btn, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(back_btn, lv_color_hex(0xFFFFFF),
-                              Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-    lv_obj_set_style_bg_opa(back_btn, LV_OPA_20,
-                            Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-    lv_obj_set_style_radius(back_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(back_btn, 0, LV_PART_MAIN);
-    lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, 32, 36);
-    screen_swipe_back_ignore(back_btn, true);
+    if constexpr (!kRoundLayout) {
+        lv_obj_t* back_btn = lv_button_create(scr);
+        lv_obj_remove_style_all(back_btn);
+        lv_obj_set_size(back_btn, kBackBtnSize, kBackBtnSize);
+        lv_obj_set_style_bg_opa(back_btn, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(back_btn, lv_color_hex(0xFFFFFF),
+                                  Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+        lv_obj_set_style_bg_opa(back_btn, LV_OPA_20,
+                                Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+        lv_obj_set_style_radius(back_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(back_btn, 0, LV_PART_MAIN);
+        lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, kBackBtnX, kBackBtnY);
+        screen_swipe_back_ignore(back_btn, true);
 
-    lv_obj_t* back_icon = lv_image_create(back_btn);
-    lv_image_set_src(back_icon, "A:ic_app_back.spng");
-    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(back_icon);
-    lv_obj_add_event_cb(
-        back_btn, [](lv_event_t* /*e*/) { OnSwipeBack(); }, LV_EVENT_CLICKED,
-        nullptr);
+        lv_obj_t* back_icon = lv_image_create(back_btn);
+        lv_image_set_src(back_icon, "A:ic_app_back.spng");
+        lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(back_icon);
+        lv_obj_add_event_cb(
+            back_btn, [](lv_event_t* /*e*/) { OnSwipeBack(); }, LV_EVENT_CLICKED,
+            nullptr);
+    }
 
     // 右上角「列表」入口
     lv_obj_t* list_btn = lv_button_create(scr);
     lv_obj_remove_style_all(list_btn);
-    lv_obj_set_size(list_btn, 96, 72);
+    lv_obj_set_size(list_btn, kListBtnW, kListBtnH);
     lv_obj_set_style_bg_opa(list_btn, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_bg_color(list_btn, lv_color_hex(0xFFFFFF),
                               Sel(LV_PART_MAIN, LV_STATE_PRESSED));
     lv_obj_set_style_bg_opa(list_btn, LV_OPA_20,
                             Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-    lv_obj_set_style_radius(list_btn, 20, LV_PART_MAIN);
+    lv_obj_set_style_radius(list_btn, kRoundLayout ? 12 : 20, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(list_btn, 0, LV_PART_MAIN);
-    lv_obj_align(list_btn, LV_ALIGN_TOP_RIGHT, -24, 36);
+    lv_obj_align(list_btn, LV_ALIGN_TOP_RIGHT, kRoundLayout ? -kBackBtnX : -24,
+                kBackBtnY);
     screen_swipe_back_ignore(list_btn, true);
 
     lv_obj_t* list_lbl = lv_label_create(list_btn);
@@ -1489,13 +1529,15 @@ void BuildBackButton(lv_obj_t* scr) {
 void BuildTitle(lv_obj_t* scr) {
     s_ui.lbl_title = lv_label_create(scr);
     lv_label_set_text(s_ui.lbl_title, CurrentStation().name);
-    lv_obj_set_style_text_font(s_ui.lbl_title, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_ui.lbl_title,
+                               kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
     lv_obj_set_style_text_color(s_ui.lbl_title, lv_color_hex(kColorTextPrimary),
                                 LV_PART_MAIN);
     lv_obj_set_style_text_align(s_ui.lbl_title, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
     lv_label_set_long_mode(s_ui.lbl_title, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_ui.lbl_title, kPanelSize - 220);
+    lv_obj_set_width(s_ui.lbl_title, kPanelSize - (kRoundLayout ? 140 : 220));
     lv_obj_align(s_ui.lbl_title, LV_ALIGN_TOP_MID, 0, kTitleY);
     // 点标题也可打开台表
     lv_obj_add_flag(s_ui.lbl_title, LV_OBJ_FLAG_CLICKABLE);
@@ -1533,7 +1575,7 @@ void BuildStationListOverlay(lv_obj_t* scr) {
     screen_swipe_back_ignore(s_ui.list_overlay, true);
 
     lv_obj_t* header = lv_obj_create(s_ui.list_overlay);
-    lv_obj_set_size(header, kPanelSize, 88);
+    lv_obj_set_size(header, kPanelSize, kListHeaderH);
     lv_obj_align(header, LV_ALIGN_TOP_LEFT, 0, 0);
     screen_strip_obj_chrome(header);
     lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
@@ -1542,14 +1584,14 @@ void BuildStationListOverlay(lv_obj_t* scr) {
 
     lv_obj_t* close_btn = lv_button_create(header);
     lv_obj_remove_style_all(close_btn);
-    lv_obj_set_size(close_btn, 72, 72);
+    lv_obj_set_size(close_btn, kBackBtnSize, kBackBtnSize);
     lv_obj_set_style_bg_opa(close_btn, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_bg_color(close_btn, lv_color_hex(0xFFFFFF),
                               Sel(LV_PART_MAIN, LV_STATE_PRESSED));
     lv_obj_set_style_bg_opa(close_btn, LV_OPA_20,
                             Sel(LV_PART_MAIN, LV_STATE_PRESSED));
     lv_obj_set_style_radius(close_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_align(close_btn, LV_ALIGN_LEFT_MID, 24, 0);
+    lv_obj_align(close_btn, LV_ALIGN_LEFT_MID, kRoundLayout ? kBackBtnX : 24, 0);
     screen_swipe_back_ignore(close_btn, true);
 
     lv_obj_t* close_icon = lv_image_create(close_btn);
@@ -1562,15 +1604,17 @@ void BuildStationListOverlay(lv_obj_t* scr) {
 
     lv_obj_t* title = lv_label_create(header);
     lv_label_set_text(title, I18n::T("选择电台"));
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(title, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
     lv_obj_set_style_text_color(title, lv_color_hex(kColorTextPrimary),
                                 LV_PART_MAIN);
     lv_obj_align(title, LV_ALIGN_CENTER, 0, 0);
     screen_make_input_passive(title);
 
     s_ui.list_scroll = lv_obj_create(s_ui.list_overlay);
-    lv_obj_set_size(s_ui.list_scroll, kPanelSize - 48, kPanelSize - 108);
-    lv_obj_align(s_ui.list_scroll, LV_ALIGN_TOP_MID, 0, 96);
+    lv_obj_set_size(s_ui.list_scroll, kPanelSize - (kRoundLayout ? 80 : 48),
+                    kPanelSize - kListHeaderH - (kRoundLayout ? 32 : 20));
+    lv_obj_align(s_ui.list_scroll, LV_ALIGN_TOP_MID, 0, kListHeaderH + (kRoundLayout ? 4 : 8));
     screen_strip_obj_chrome(s_ui.list_scroll);
     lv_obj_add_flag(s_ui.list_scroll, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(s_ui.list_scroll, LV_DIR_VER);
@@ -1585,7 +1629,7 @@ void BuildStationListOverlay(lv_obj_t* scr) {
 
     for (size_t i = 0; i < kRadioStationCount; ++i) {
         lv_obj_t* row = lv_obj_create(s_ui.list_scroll);
-        lv_obj_set_size(row, kPanelSize - 64, 64);
+        lv_obj_set_size(row, kPanelSize - (kRoundLayout ? 80 : 64), kListRowH);
         screen_strip_obj_chrome(row);
         lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
@@ -1668,7 +1712,8 @@ void BuildVolumeLabel(lv_obj_t* scr) {
     lv_obj_set_style_text_align(s_ui.lbl_volume, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
     lv_obj_set_width(s_ui.lbl_volume, kPanelSize - 80);
-    lv_obj_align(s_ui.lbl_volume, LV_ALIGN_TOP_MID, 0, kVizY + kVizH + 24);
+    lv_obj_align(s_ui.lbl_volume, LV_ALIGN_TOP_MID, 0,
+                kVizY + kVizH + (kRoundLayout ? 6 : 24));
     screen_make_input_passive(s_ui.lbl_volume);
 }
 

@@ -7,6 +7,7 @@
 #include <esp_timer.h>
 
 #include "assets/lang_config.h"
+#include "config.h"
 #include "esp_lv_adapter.h"
 #include "home_screen/home_screen.h"
 #include "screen_util.h"
@@ -17,9 +18,36 @@ LV_FONT_DECLARE(font_puhui_30_4);
 namespace {
 
 constexpr const char* TAG = "OtaScreen";
-constexpr int kPanelSize = 720;
+
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+constexpr bool kRoundLayout = true;
+constexpr int kPanelW = DISPLAY_WIDTH;
+constexpr int kPanelH = DISPLAY_HEIGHT;
+constexpr int kBarWidth = DISPLAY_WIDTH - 80;
+constexpr int kBarHeight = 12;
+constexpr int kTitleY = 48;
+constexpr int kVersionY = 78;
+constexpr int kStatusY = 108;
+constexpr int kPercentOfs = 28;
+constexpr int kBytesOfs = 56;
+constexpr int kSpeedOfs = 82;
+constexpr int kTimeOfs = 108;
+constexpr int kHintBottom = 36;
+#else
+constexpr bool kRoundLayout = false;
+constexpr int kPanelW = 720;
+constexpr int kPanelH = 720;
 constexpr int kBarWidth = 560;
 constexpr int kBarHeight = 16;
+constexpr int kTitleY = 120;
+constexpr int kVersionY = 170;
+constexpr int kStatusY = 220;
+constexpr int kPercentOfs = 40;
+constexpr int kBytesOfs = 90;
+constexpr int kSpeedOfs = 130;
+constexpr int kTimeOfs = 170;
+constexpr int kHintBottom = 80;
+#endif
 
 struct OtaUi {
     lv_obj_t* screen = nullptr;
@@ -83,7 +111,7 @@ void OnScreenDeleted(lv_event_t* e) {
 lv_obj_t* CreateTouchBlocker(lv_obj_t* parent) {
     lv_obj_t* blocker = lv_obj_create(parent);
     screen_strip_obj_chrome(blocker);
-    lv_obj_set_size(blocker, kPanelSize, kPanelSize);
+    lv_obj_set_size(blocker, kPanelW, kPanelH);
     lv_obj_align(blocker, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_bg_opa(blocker, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_add_flag(blocker, LV_OBJ_FLAG_CLICKABLE);
@@ -94,7 +122,7 @@ lv_obj_t* CreateTouchBlocker(lv_obj_t* parent) {
 lv_obj_t* BuildScreen(const char* version_text) {
     lv_obj_t* screen = lv_obj_create(nullptr);
     screen_strip_obj_chrome(screen);
-    lv_obj_set_size(screen, kPanelSize, kPanelSize);
+    lv_obj_set_size(screen, kPanelW, kPanelH);
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x0A0D12), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
@@ -102,8 +130,9 @@ lv_obj_t* BuildScreen(const char* version_text) {
     lv_obj_t* title = lv_label_create(screen);
     lv_label_set_text(title, Lang::Strings::OTA_UPGRADE);
     lv_obj_set_style_text_color(title, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 120);
+    lv_obj_set_style_text_font(
+        title, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, kTitleY);
 
     lv_obj_t* version_lbl = lv_label_create(screen);
     s_ui.version_lbl = version_lbl;
@@ -114,19 +143,19 @@ lv_obj_t* BuildScreen(const char* version_text) {
     }
     lv_obj_set_style_text_color(version_lbl, lv_color_hex(0x9AA3B2), LV_PART_MAIN);
     lv_obj_set_style_text_font(version_lbl, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(version_lbl, LV_ALIGN_TOP_MID, 0, 170);
+    lv_obj_align(version_lbl, LV_ALIGN_TOP_MID, 0, kVersionY);
 
     lv_obj_t* status_lbl = lv_label_create(screen);
     s_ui.status_lbl = status_lbl;
     lv_label_set_text(status_lbl, Lang::Strings::UPGRADING);
     lv_obj_set_style_text_color(status_lbl, lv_color_hex(0xC7CDD9), LV_PART_MAIN);
     lv_obj_set_style_text_font(status_lbl, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(status_lbl, LV_ALIGN_TOP_MID, 0, 220);
+    lv_obj_align(status_lbl, LV_ALIGN_TOP_MID, 0, kStatusY);
 
     lv_obj_t* bar = lv_bar_create(screen);
     s_ui.bar = bar;
     lv_obj_set_size(bar, kBarWidth, kBarHeight);
-    lv_obj_align(bar, LV_ALIGN_CENTER, 0, -10);
+    lv_obj_align(bar, LV_ALIGN_CENTER, 0, kRoundLayout ? -20 : -10);
     lv_bar_set_range(bar, 0, 100);
     lv_bar_set_value(bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(bar, lv_color_hex(0x1B2230), LV_PART_MAIN);
@@ -141,35 +170,37 @@ lv_obj_t* BuildScreen(const char* version_text) {
     s_ui.percent_lbl = percent_lbl;
     lv_label_set_text(percent_lbl, "0%");
     lv_obj_set_style_text_color(percent_lbl, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(percent_lbl, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(percent_lbl, LV_ALIGN_CENTER, 0, 40);
+    lv_obj_set_style_text_font(
+        percent_lbl, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+        LV_PART_MAIN);
+    lv_obj_align(percent_lbl, LV_ALIGN_CENTER, 0, kPercentOfs);
 
     lv_obj_t* bytes_lbl = lv_label_create(screen);
     s_ui.bytes_lbl = bytes_lbl;
     lv_label_set_text(bytes_lbl, "0 B / 0 B");
     lv_obj_set_style_text_color(bytes_lbl, lv_color_hex(0xC7CDD9), LV_PART_MAIN);
     lv_obj_set_style_text_font(bytes_lbl, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(bytes_lbl, LV_ALIGN_CENTER, 0, 90);
+    lv_obj_align(bytes_lbl, LV_ALIGN_CENTER, 0, kBytesOfs);
 
     lv_obj_t* speed_lbl = lv_label_create(screen);
     s_ui.speed_lbl = speed_lbl;
     lv_label_set_text(speed_lbl, "0 B/s");
     lv_obj_set_style_text_color(speed_lbl, lv_color_hex(0x9AA3B2), LV_PART_MAIN);
     lv_obj_set_style_text_font(speed_lbl, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(speed_lbl, LV_ALIGN_CENTER, 0, 130);
+    lv_obj_align(speed_lbl, LV_ALIGN_CENTER, 0, kSpeedOfs);
 
     lv_obj_t* time_lbl = lv_label_create(screen);
     s_ui.time_lbl = time_lbl;
     lv_label_set_text(time_lbl, I18n::T("用时 00:00"));
     lv_obj_set_style_text_color(time_lbl, lv_color_hex(0x9AA3B2), LV_PART_MAIN);
     lv_obj_set_style_text_font(time_lbl, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(time_lbl, LV_ALIGN_CENTER, 0, 170);
+    lv_obj_align(time_lbl, LV_ALIGN_CENTER, 0, kTimeOfs);
 
     lv_obj_t* hint = lv_label_create(screen);
     lv_label_set_text(hint, Lang::Strings::PLEASE_WAIT);
     lv_obj_set_style_text_color(hint, lv_color_hex(0x6B7280), LV_PART_MAIN);
     lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -80);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -kHintBottom);
 
     CreateTouchBlocker(screen);
     lv_obj_add_event_cb(screen, OnScreenDeleted, LV_EVENT_DELETE, nullptr);

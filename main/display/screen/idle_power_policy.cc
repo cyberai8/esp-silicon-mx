@@ -24,6 +24,7 @@ struct State {
     uint32_t last_status_log_tick = 0;
     bool preserve_activity_on_detach = false;
     bool standby_triggered = false;
+    int cached_standby_min = -1;
 };
 
 State s;
@@ -166,7 +167,16 @@ void IdlePower_Stop() {
     StopTimer();
 }
 
+void IdlePower_WarmSettingsCache() {
+    Settings settings("display", false);
+    s.cached_standby_min =
+        ClampMinutes(settings.GetInt(kStandbyNvsKey, kDefaultStandbyMin));
+}
+
 int IdlePower_GetStandbyMinutes() {
+    if (s.cached_standby_min >= 0) {
+        return s.cached_standby_min;
+    }
     Settings settings("display", false);
     return ClampMinutes(
         settings.GetInt(kStandbyNvsKey, kDefaultStandbyMin));
@@ -174,6 +184,7 @@ int IdlePower_GetStandbyMinutes() {
 
 void IdlePower_SetStandbyMinutes(int minutes) {
     minutes = ClampMinutes(minutes);
+    s.cached_standby_min = minutes;
     Settings settings("display", true);
     settings.SetInt(kStandbyNvsKey, minutes);
     ESP_LOGI(TAG, "standby timeout updated to %d min", minutes);

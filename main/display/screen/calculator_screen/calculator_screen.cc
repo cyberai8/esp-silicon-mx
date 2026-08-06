@@ -1,4 +1,5 @@
 #include "calculator_screen.h"
+#include "config.h"
 #include "i18n.h"
 
 #include "home_screen/home_screen.h"
@@ -35,6 +36,21 @@ LV_FONT_DECLARE(font_puhui_20_4);
 namespace {
 
 // ----- screen layout constants ---------------------------------------------
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+// 360 圆屏：整体压缩显示区/键盘，四周加大安全边距避免圆弧裁切。
+constexpr bool kRoundLayout = true;
+constexpr int kPanelSize  = DISPLAY_WIDTH;
+constexpr int kPad        = 32;
+constexpr int kHeaderH    = 44;
+constexpr int kHistoryH   = 16;
+constexpr int kDisplayH   = 40;
+constexpr int kGridY      = kHeaderH + kHistoryH + kDisplayH;     // 100
+constexpr int kGridH      = kPanelSize - kGridY - kPad;           // 228
+constexpr int kGridCols   = 4;
+constexpr int kGridRows   = 5;
+constexpr int kGridGap    = 5;
+#else
+constexpr bool kRoundLayout = false;
 constexpr int kPanelSize  = 720;
 constexpr int kPad        = 16;
 constexpr int kHeaderH    = 80;
@@ -44,6 +60,8 @@ constexpr int kGridY      = kHeaderH + kHistoryH + kDisplayH;     // 240
 constexpr int kGridH      = kPanelSize - kGridY - kPad;           // 464
 constexpr int kGridCols   = 4;
 constexpr int kGridRows   = 5;
+constexpr int kGridGap    = 12;
+#endif
 
 // ----- color palette (iOS-inspired dark) -----------------------------------
 constexpr uint32_t kColorBg          = 0x000000;
@@ -355,27 +373,28 @@ void OnSwipeBack() {
 // ----- builders ------------------------------------------------------------
 
 void BuildHeader(lv_obj_t* parent) {
-    // Title -- left-aligned.
     lv_obj_t* title = lv_label_create(parent);
     lv_label_set_text(title, I18n::T("计算器"));
     lv_obj_set_style_text_color(title, lv_color_hex(kColorTextPrimary),
                                 LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, kPad + 8, kPad + 16);
-    // The label is non-interactive on its own; keep it that way so the
-    // screen-level swipe-back tracker can see PRESS / RELEASE events
-    // anywhere in the header strip.
-    lv_obj_remove_flag(title, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_text_font(
+        title, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+        LV_PART_MAIN);
+    if (kRoundLayout) {
+        // 圆屏：标题居中，不放两侧贴边 hint（右滑退出仍可用）。
+        lv_obj_align(title, LV_ALIGN_TOP_MID, 0, kPad + 4);
+    } else {
+        lv_obj_align(title, LV_ALIGN_TOP_LEFT, kPad + 8, kPad + 16);
 
-    // Right-aligned hint -- replaces the old "返回" pill button now that
-    // navigation is gesture-based.
-    lv_obj_t* hint = lv_label_create(parent);
-    lv_label_set_text(hint, I18n::T("右滑返回"));
-    lv_obj_set_style_text_color(hint, lv_color_hex(kColorHintText),
-                                LV_PART_MAIN);
-    lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(hint, LV_ALIGN_TOP_RIGHT, -kPad - 4, kPad + 20);
-    lv_obj_remove_flag(hint, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t* hint = lv_label_create(parent);
+        lv_label_set_text(hint, I18n::T("右滑返回"));
+        lv_obj_set_style_text_color(hint, lv_color_hex(kColorHintText),
+                                    LV_PART_MAIN);
+        lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_align(hint, LV_ALIGN_TOP_RIGHT, -kPad - 4, kPad + 20);
+        lv_obj_remove_flag(hint, LV_OBJ_FLAG_CLICKABLE);
+    }
+    lv_obj_remove_flag(title, LV_OBJ_FLAG_CLICKABLE);
 }
 
 void BuildDisplay(lv_obj_t* parent) {
@@ -395,7 +414,9 @@ void BuildDisplay(lv_obj_t* parent) {
     lv_label_set_text(s_display_lbl, "0");
     lv_obj_set_style_text_color(s_display_lbl,
                                 lv_color_hex(kColorTextPrimary), LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_display_lbl, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(
+        s_display_lbl, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+        LV_PART_MAIN);
     lv_obj_set_style_text_align(s_display_lbl, LV_TEXT_ALIGN_RIGHT,
                                 LV_PART_MAIN);
     lv_label_set_long_mode(s_display_lbl, LV_LABEL_LONG_SCROLL);
@@ -440,8 +461,8 @@ void BuildKeypad(lv_obj_t* parent) {
     lv_obj_set_size(grid, kPanelSize - 2 * kPad, kGridH);
     lv_obj_set_pos(grid, kPad, kGridY);
     lv_obj_set_style_pad_all(grid, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(grid, 12, LV_PART_MAIN);
-    lv_obj_set_style_pad_column(grid, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(grid, kGridGap, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(grid, kGridGap, LV_PART_MAIN);
     lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_grid_dsc_array(grid, s_col_dsc, s_row_dsc);
     lv_obj_set_layout(grid, LV_LAYOUT_GRID);
@@ -466,7 +487,9 @@ void BuildKeypad(lv_obj_t* parent) {
         lv_obj_t* lbl = lv_label_create(btn);
         lv_label_set_text(lbl, def.label);
         lv_obj_set_style_text_color(lbl, lv_color_hex(fg_color), LV_PART_MAIN);
-        lv_obj_set_style_text_font(lbl, &font_puhui_30_4, LV_PART_MAIN);
+        lv_obj_set_style_text_font(
+            lbl, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+            LV_PART_MAIN);
         lv_obj_center(lbl);
     }
 }

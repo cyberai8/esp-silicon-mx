@@ -11,10 +11,19 @@
 #include "i18n.h"
 #include "system_info.h"
 
+#if CONFIG_BOARD_TYPE_ESP_VOCAT
+#include "board_early_init.h"
+#endif
+
 #define TAG "main"
 
 extern "C" void app_main(void)
 {
+#if CONFIG_BOARD_TYPE_ESP_VOCAT
+    // 短按 PG1 硬件上电后尽快锁存 PG2，避免松手掉电；电源键轮询亦提前启动。
+    VocatEarlyPowerInit();
+#endif
+
     // Initialize the default event loop
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 

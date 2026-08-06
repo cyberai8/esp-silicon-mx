@@ -22,6 +22,16 @@
 #define SDMMC_BUS_WIDTH 4
 #endif
 
+// ESP32-S3 等不支持 UHS-I（SDR50/SDR104）；硬编码 SDR50 会直接 ESP_ERR_NOT_SUPPORTED。
+// 板级可在 config.h 覆盖；有片上 LDO 的 P4 等可继续用 SDR50。
+#ifndef SDMMC_MAX_FREQ_KHZ
+#ifdef SDMMC_LDO_CHAN_ID
+#define SDMMC_MAX_FREQ_KHZ SDMMC_FREQ_SDR50
+#else
+#define SDMMC_MAX_FREQ_KHZ SDMMC_FREQ_DEFAULT
+#endif
+#endif
+
 #ifdef SDMMC_LDO_CHAN_ID
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #endif
@@ -60,7 +70,7 @@ public:
 
         sdmmc_host_t host = SDMMC_HOST_DEFAULT();
         host.slot = SDMMC_HOST_SLOT_0;
-        host.max_freq_khz = SDMMC_FREQ_SDR50;
+        host.max_freq_khz = SDMMC_MAX_FREQ_KHZ;
         host.flags &= ~SDMMC_HOST_FLAG_DDR;
 
         if (!EnsurePwrCtrl()) {
@@ -72,7 +82,11 @@ public:
 
         sdmmc_slot_config_t slot_config = MakeSlotConfig();
 
-        ESP_LOGI(kTag, "Mounting SD card filesystem at %s ...", kMountPoint);
+        ESP_LOGI(kTag,
+                 "Mounting SD card at %s (width=%d freq=%dkHz clk=%d cmd=%d d0=%d)",
+                 kMountPoint, SDMMC_BUS_WIDTH, SDMMC_MAX_FREQ_KHZ,
+                 static_cast<int>(SDMMC_CLK_PIN), static_cast<int>(SDMMC_CMD_PIN),
+                 static_cast<int>(SDMMC_D0_PIN));
         esp_err_t ret =
             esp_vfs_fat_sdmmc_mount(kMountPoint, &host, &slot_config, &mount_config, &card_);
         if (ret != ESP_OK) {
@@ -121,7 +135,7 @@ public:
 
         sdmmc_host_t host = SDMMC_HOST_DEFAULT();
         host.slot = SDMMC_HOST_SLOT_0;
-        host.max_freq_khz = SDMMC_FREQ_SDR50;
+        host.max_freq_khz = SDMMC_MAX_FREQ_KHZ;
         host.flags &= ~SDMMC_HOST_FLAG_DDR;
         if (pwr_ctrl_ != nullptr) {
             host.pwr_ctrl_handle = pwr_ctrl_;

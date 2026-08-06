@@ -29,10 +29,17 @@ namespace {
 
 class LvglPauseGuard {
 public:
-    LvglPauseGuard() {
+    // force=true：固件写入等必须停 LVGL 的场景。
+    // VoCat 版本检查默认不 pause，否则开机动画会卡死约 1~2 秒。
+    explicit LvglPauseGuard(bool force = false) {
         if (OtaScreen::IsActive()) {
             return;
         }
+#if CONFIG_BOARD_TYPE_ESP_VOCAT
+        if (!force) {
+            return;
+        }
+#endif
         if (esp_lv_adapter_is_initialized()) {
             if (esp_lv_adapter_pause(-1) == ESP_OK) {
                 paused_ = true;
@@ -103,6 +110,7 @@ std::unique_ptr<Http> Ota::SetupHttp() {
  * Specification: https://ccnphfhqs21z.feishu.cn/wiki/FjW6wZmisimNBBkov6OcmfvknVd
  */
 esp_err_t Ota::CheckVersion() {
+    LvglPauseGuard lvgl_pause;
     auto& board = Board::GetInstance();
     auto app_desc = esp_app_get_description();
 
@@ -122,15 +130,22 @@ esp_err_t Ota::CheckVersion() {
     std::string method = data.length() > 0 ? "POST" : "GET";
     http->SetContent(std::move(data));
 
+    ESP_LOGI(TAG, "OTA HTTP %s %s", method.c_str(), url.c_str());
     if (!http->Open(method, url)) {
         int last_error = http->GetLastError();
         ESP_LOGE(TAG, "Failed to open HTTP connection, code=0x%x", last_error);
         return last_error;
     }
+    ESP_LOGI(TAG, "OTA HTTP open OK, reading response");
 
     auto status_code = http->GetStatusCode();
+    ESP_LOGI(TAG, "OTA HTTP status: %d", status_code);
     if (status_code != 200) {
         ESP_LOGE(TAG, "Failed to check version, status code: %d", status_code);
+        std::string err_body = http->ReadAll();
+        if (!err_body.empty()) {
+            ESP_LOGE(TAG, "OTA HTTP error body: %s", err_body.c_str());
+        }
         return status_code;
     }
 
@@ -293,7 +308,7 @@ void Ota::MarkCurrentVersionValid() {
 }
 
 bool Ota::Upgrade(const std::string& firmware_url) {
-    LvglPauseGuard lvgl_pause;
+    LvglPauseGuard lvgl_pause(/*force=*/true);
     ESP_LOGI(TAG, "Upgrading firmware from %s", firmware_url.c_str());
     esp_ota_handle_t update_handle = 0;
     auto update_partition = esp_ota_get_next_update_partition(NULL);
@@ -497,6 +512,7 @@ esp_err_t Ota::Activate() {
         return ESP_FAIL;
     }
 
+    LvglPauseGuard lvgl_pause;
     std::string url = GetCheckVersionUrl();
     if (url.back() != '/') {
         url += "/activate";

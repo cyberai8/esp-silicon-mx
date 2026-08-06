@@ -1,5 +1,7 @@
 #pragma once
 
+#include <driver/gpio.h>
+
 #include "screen_util.h"
 
 // ---------------------------------------------------------------------------
@@ -15,6 +17,9 @@
 
 // 注册短按 / 长按。IO 扩展器就绪后调用；内部有 once 守卫。
 void PwrKey_Init();
+
+// VoCat 等直连 GPIO 的电源键（PG1）；无 IO 扩展器时使用。
+void PwrKey_InitGpio(gpio_num_t gpio, bool active_high);
 
 // 页面生命周期联动：LOAD 压栈，UNLOAD 移除最靠上的同名页。
 void PwrKey_OnScreenLifecycle(const char* name, screen_lifecycle_event_t event);

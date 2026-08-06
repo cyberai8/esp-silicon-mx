@@ -6,7 +6,6 @@
 #include "bq27220_gauge.h"
 #include "button.h"
 #include "display/lv_adapter_display.h"
-#include "display/screen/home_screen/home_screen.h"
 #include "dual_network_board.h"
 #include "led/gpio_led.h"
 #include "SdCardManager.hpp"
@@ -250,16 +249,14 @@ public:
 
 class EspVocat : public DualNetworkBoard {
 public:
-    // default_net_type=0 → Wi-Fi first; Settings can switch to ML307 4G.
+    // default_net_type=1 → 4G 优先，与 network_screen / metalio-claw-4 一致。
     EspVocat()
-        : DualNetworkBoard(ML307_TX_PIN, ML307_RX_PIN, GPIO_NUM_NC, 0),
+        : DualNetworkBoard(ML307_TX_PIN, ML307_RX_PIN, GPIO_NUM_NC, 1),
           boot_button_(BOOT_BUTTON_GPIO),
           head_touch_button_(HEAD_TOUCH_GPIO, HEAD_TOUCH_ACTIVE_LEVEL != 0) {
         ESP_LOGI(TAG, "Boot ESP-VoCat");
-        InitializePowerLatch();
         InitializeMl307Enable();
         InitializeBacklightOff();
-        InitializePowerKey();
         InitializeButtons();
         InitializeI2c();
         InitializeBatteryGauge();
@@ -267,10 +264,31 @@ public:
         InitializeSpi();
         InitializeSt77916Panel();
         InitializeCst816sTouch();
+        // 上电尽快显示开机动画；4G/OTA/MQTT 在动画播放期间并行。
+        EnsureUiInitialized();
+    }
+
+    void EnsureUiInitialized() override {
+        if (display_ != nullptr) {
+            return;
+        }
         InitializeLvAdapterDisplay();
-        InitializeSdCard();
-        InitializeMotion();
-        ScheduleBacklightRestoreAfterUiSettle();
+        // 等 LVGL 把 BootScreen 刷进 framebuffer，再开 panel/背光，避免闪边角。
+        vTaskDelay(pdMS_TO_TICKS(80));
+        if (panel_handle_ != nullptr) {
+            esp_lcd_panel_disp_on_off(panel_handle_, true);
+            ESP_LOGI(TAG, "LCD panel on after BootScreen");
+        }
+        if (auto* backlight = static_cast<VocatPwmBacklight*>(GetBacklight())) {
+            backlight->RestoreBrightnessImmediately();
+        }
+        ESP_LOGI(TAG, "BootScreen visible");
+    }
+
+    void AppendDisplayJsonFallback(std::string& json) override {
+        json += R"("display":{"monochrome":false,"width":)" +
+                std::to_string(DISPLAY_WIDTH) + R"(,"height":)" +
+                std::to_string(DISPLAY_HEIGHT) + R"(},)";
     }
 
     std::string GetBoardType() override { return "esp-vocat"; }
@@ -317,6 +335,22 @@ public:
         gpio_set_level(PG2_HOLD_GPIO, PG2_HOLD_ACTIVE_LEVEL ? 0 : 1);
     }
 
+    void PrepareForNetworkOta() override {
+        // 保持开机动画继续播放；仅略降背光，减轻与 4G HTTPS 叠载。
+        if (auto* backlight = GetBacklight()) {
+            backlight->SetBrightness(40, false);
+            ESP_LOGI(TAG, "Backlight dimmed for OTA/network (boot anim keeps playing)");
+        }
+    }
+
+    void RestoreAfterNetworkOta() override {
+        FinishDeferredBootInit();
+        if (auto* backlight = static_cast<VocatPwmBacklight*>(GetBacklight())) {
+            backlight->RestoreBrightnessImmediately();
+        }
+        ESP_LOGI(TAG, "Deferred boot init done, backlight restored");
+    }
+
 private:
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     Button boot_button_;
@@ -328,22 +362,20 @@ private:
     esp_timer_handle_t backlight_restore_timer_ = nullptr;
     std::atomic_bool power_off_started_{false};
     i2c_master_dev_handle_t qmi_dev_ = nullptr;
+    bool deferred_boot_init_done_ = false;
+
+    void FinishDeferredBootInit() {
+        if (deferred_boot_init_done_) {
+            return;
+        }
+        deferred_boot_init_done_ = true;
+        InitializeSdCard();
+        InitializeMotion();
+    }
 
     static constexpr uint32_t kLcdPixelClockHz = 40 * 1000 * 1000;
     static constexpr uint32_t kBacklightUiSettleDelayMs = 2500;
     static constexpr uint16_t kLowBatteryMv = 3300;
-
-    void InitializePowerLatch() {
-        gpio_config_t io_conf = {};
-        io_conf.intr_type = GPIO_INTR_DISABLE;
-        io_conf.mode = GPIO_MODE_OUTPUT;
-        io_conf.pin_bit_mask = 1ULL << PG2_HOLD_GPIO;
-        io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-        ESP_ERROR_CHECK(gpio_config(&io_conf));
-        gpio_set_level(PG2_HOLD_GPIO, PG2_HOLD_ACTIVE_LEVEL);
-        ESP_LOGI(TAG, "PG2 latch ready GPIO%d=%d", PG2_HOLD_GPIO, PG2_HOLD_ACTIVE_LEVEL);
-    }
 
     void InitializeMl307Enable() {
         if (ML307_EN_PIN == GPIO_NUM_NC) {
@@ -396,49 +428,6 @@ private:
                                              kBacklightUiSettleDelayMs * 1000));
         ESP_LOGI(TAG, "Backlight restore scheduled (%u ms)",
                  static_cast<unsigned>(kBacklightUiSettleDelayMs));
-    }
-
-    bool IsPowerKeyPressed() const {
-        return gpio_get_level(PG1_POWER_KEY_GPIO) == PG1_POWER_KEY_ACTIVE_LEVEL;
-    }
-
-    void InitializePowerKey() {
-        gpio_config_t io_conf = {};
-        io_conf.intr_type = GPIO_INTR_DISABLE;
-        io_conf.mode = GPIO_MODE_INPUT;
-        io_conf.pin_bit_mask = 1ULL << PG1_POWER_KEY_GPIO;
-        io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
-        ESP_ERROR_CHECK(gpio_config(&io_conf));
-        ESP_LOGI(TAG, "PG1 power key ready GPIO%d", PG1_POWER_KEY_GPIO);
-
-        xTaskCreate(
-            [](void* arg) {
-                auto* self = static_cast<EspVocat*>(arg);
-                bool armed = !self->IsPowerKeyPressed();
-                int pressed_ms = 0;
-                for (;;) {
-                    const bool down = self->IsPowerKeyPressed();
-                    if (!armed) {
-                        if (!down) {
-                            armed = true;
-                        }
-                    } else if (down) {
-                        pressed_ms += KEY_GPIO_POLL_MS;
-                        if (pressed_ms >= KEY_SW1_LONG_PRESS_MS) {
-                            ESP_LOGW(TAG, "PG1 long-press → soft shutdown");
-                            HomeScreen::RequestSystemShutdown("电源键关机");
-                            for (;;) {
-                                vTaskDelay(pdMS_TO_TICKS(1000));
-                            }
-                        }
-                    } else {
-                        pressed_ms = 0;
-                    }
-                    vTaskDelay(pdMS_TO_TICKS(KEY_GPIO_POLL_MS));
-                }
-            },
-            "vocat_pwr_key", 3072, this, 5, nullptr);
     }
 
     void InitializeButtons() {

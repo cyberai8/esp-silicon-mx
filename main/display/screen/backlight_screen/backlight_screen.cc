@@ -7,6 +7,7 @@
 
 #include "backlight.h"
 #include "board.h"
+#include "config.h"
 #include "home_screen/home_screen.h"
 #include "screen_util.h"
 #include "settings.h"
@@ -19,9 +20,31 @@ namespace {
 
 constexpr const char* TAG = "BacklightScreen";
 
-constexpr int kPanelSize = 720;
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+constexpr bool kRoundLayout = true;
+constexpr int kPanelW = DISPLAY_WIDTH;
+constexpr int kPanelH = DISPLAY_HEIGHT;
+constexpr int kHeaderTopInset = 28;
+constexpr int kHeaderContentH = 36;
+constexpr int kHeaderH = kHeaderTopInset + kHeaderContentH;
+constexpr int kBackBtnSize = 36;
+constexpr int kSideInset = 32;
+constexpr int kCardW = kPanelW - kSideInset * 2;
+constexpr int kCardH = 120;
+constexpr int kCardY = kHeaderH + 12;
+constexpr int kSliderY = kCardY + kCardH + 16;
+#else
+constexpr bool kRoundLayout = false;
+constexpr int kPanelW = 720;
+constexpr int kPanelH = 720;
 constexpr int kHeaderH = 90;
 constexpr int kBackBtnSize = 72;
+constexpr int kSideInset = 30;
+constexpr int kCardW = 660;
+constexpr int kCardH = 220;
+constexpr int kCardY = 110;
+constexpr int kSliderY = 360;
+#endif
 
 struct UiState {
     lv_obj_t* screen = nullptr;
@@ -142,14 +165,14 @@ lv_obj_t* BacklightScreen::Create() {
     lv_obj_t* scr = lv_obj_create(nullptr);
     s_ui.screen = scr;
     screen_strip_obj_chrome(scr);
-    lv_obj_set_size(scr, kPanelSize, kPanelSize);
+    lv_obj_set_size(scr, kPanelW, kPanelH);
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x0E1116), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* header = lv_obj_create(scr);
     screen_strip_obj_chrome(header);
-    lv_obj_set_size(header, kPanelSize, kHeaderH);
+    lv_obj_set_size(header, kPanelW, kHeaderH);
     lv_obj_set_pos(header, 0, 0);
     lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
@@ -157,7 +180,11 @@ lv_obj_t* BacklightScreen::Create() {
     lv_obj_t* back = lv_button_create(header);
     lv_obj_remove_style_all(back);
     lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
-    lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
+    if constexpr (kRoundLayout) {
+        lv_obj_set_pos(back, kSideInset, (kHeaderH - kBackBtnSize) / 2 + 6);
+    } else {
+        lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
+    }
     lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
                               LV_PART_MAIN | LV_STATE_PRESSED);
@@ -175,13 +202,19 @@ lv_obj_t* BacklightScreen::Create() {
     lv_obj_t* title = lv_label_create(header);
     lv_label_set_text(title, I18n::T("屏幕亮度"));
     lv_obj_set_style_text_color(title, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 16 + kBackBtnSize + 16, 0);
+    lv_obj_set_style_text_font(title,
+                               kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
+    if constexpr (kRoundLayout) {
+        lv_obj_align_to(title, back, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+    } else {
+        lv_obj_align(title, LV_ALIGN_LEFT_MID, 16 + kBackBtnSize + 16, 0);
+    }
 
     lv_obj_t* card = lv_obj_create(scr);
     screen_strip_obj_chrome(card);
-    lv_obj_set_size(card, 660, 220);
-    lv_obj_set_pos(card, 30, 110);
+    lv_obj_set_size(card, kCardW, kCardH);
+    lv_obj_set_pos(card, kSideInset, kCardY);
     lv_obj_set_style_bg_color(card, lv_color_hex(0x1B2030), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 28, LV_PART_MAIN);
@@ -193,21 +226,23 @@ lv_obj_t* BacklightScreen::Create() {
     lv_obj_set_width(pct, LV_PCT(100));
     lv_label_set_long_mode(pct, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_color(pct, lv_color_hex(0x60A5FA), LV_PART_MAIN);
-    lv_obj_set_style_text_font(pct, &font_puhui_number_50_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(
+        pct, kRoundLayout ? &font_puhui_30_4 : &font_puhui_number_50_4,
+        LV_PART_MAIN);
     lv_obj_set_style_text_align(pct, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_align(pct, LV_ALIGN_CENTER, 0, -20);
+    lv_obj_align(pct, LV_ALIGN_CENTER, 0, kRoundLayout ? -8 : -20);
     UpdatePctLabel(initial_brightness);
 
     lv_obj_t* hint = lv_label_create(card);
     lv_label_set_text(hint, I18n::T("当前亮度"));
     lv_obj_set_style_text_color(hint, lv_color_hex(0x9AA3B2), LV_PART_MAIN);
     lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -24);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, kRoundLayout ? -12 : -24);
 
     lv_obj_t* slider_row = lv_obj_create(scr);
     lv_obj_remove_style_all(slider_row);
-    lv_obj_set_size(slider_row, 660, LV_SIZE_CONTENT);
-    lv_obj_set_pos(slider_row, 30, 360);
+    lv_obj_set_size(slider_row, kCardW, LV_SIZE_CONTENT);
+    lv_obj_set_pos(slider_row, kSideInset, kSliderY);
     lv_obj_set_flex_flow(slider_row, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(slider_row, 12, LV_PART_MAIN);
     lv_obj_set_style_pad_bottom(slider_row, 18, LV_PART_MAIN);
@@ -242,7 +277,7 @@ lv_obj_t* BacklightScreen::Create() {
     lv_label_set_text(foot, I18n::T("亮度设置会自动保存"));
     lv_obj_set_style_text_color(foot, lv_color_hex(0x9AA3B2), LV_PART_MAIN);
     lv_obj_set_style_text_font(foot, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(foot, LV_ALIGN_BOTTOM_MID, 0, -40);
+    lv_obj_align(foot, LV_ALIGN_BOTTOM_MID, 0, kRoundLayout ? -28 : -40);
 
     screen_attach_swipe_back(scr, OnSwipeBack);
     lv_obj_add_event_cb(scr, OnScreenUnloaded, LV_EVENT_SCREEN_UNLOADED, nullptr);

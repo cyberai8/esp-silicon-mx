@@ -54,6 +54,8 @@ private:
 protected:
     Board();
     std::string GenerateUuid();
+    // UI 未初始化时仍向 OTA 上报屏幕参数（VoCat 等在 LVGL 前发 OTA 请求）。
+    virtual void AppendDisplayJsonFallback(std::string& json) { (void)json; }
 
     // 软件生成的设备唯一标识
     std::string uuid_;
@@ -82,6 +84,11 @@ public:
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) { (void)callback; }
+    // OTA/HTTPS 前降功耗（关屏、延后外设）；完成后恢复。默认空实现。
+    virtual void PrepareForNetworkOta() {}
+    virtual void RestoreAfterNetworkOta() {}
+    // VoCat 等板子在 MQTT/网络就绪后再初始化 LVGL，避免与 4G 峰值叠载。
+    virtual void EnsureUiInitialized() {}
 };
 
 #define DECLARE_BOARD(BOARD_CLASS_NAME) \

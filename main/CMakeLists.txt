@@ -35,6 +35,7 @@ set(SOURCES "audio/audio_codec.cc"
             "display/screen/calculator_screen/calculator_screen.cc"
             "display/screen/calendar_screen/calendar_screen.cc"
             "display/screen/music_screen/music_screen.cc"
+            "display/screen/music_screen/music_screen_sd.cc"
             "display/screen/radio_screen/radio_screen.cc"
             "display/screen/recording_screen/recording_screen.cc"
             "display/screen/weather_screen/weather_screen.cc"
@@ -357,6 +358,9 @@ target_compile_definitions(${COMPONENT_LIB}
                     PRIVATE BOARD_TYPE=\"${BOARD_TYPE}\" BOARD_NAME=\"${BOARD_NAME}\"
                     PRIVATE BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT} BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
                     )
+if(CONFIG_BOARD_TYPE_ESP_VOCAT)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE BOARD_ESP_VOCAT=1)
+endif()
 
 # Add generation rules
 # Use ${PYTHON} (IDF-resolved interpreter). Bare `python` is often missing from

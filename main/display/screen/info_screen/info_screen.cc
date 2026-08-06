@@ -1,4 +1,5 @@
 #include "info_screen.h"
+#include "config.h"
 #include "i18n.h"
 
 #include <cstdio>
@@ -23,12 +24,34 @@ namespace {
 
 constexpr const char* TAG = "InfoScreen";
 
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+// 360 圆屏：顶栏压缩为单行 + 顶部/侧边安全边距，行卡片整体变矮。
+constexpr bool kRoundLayout = true;
+constexpr int kPanelSize = DISPLAY_WIDTH;
+constexpr int kHeaderTopInset = 28;   // 避开顶部圆弧
+constexpr int kHeaderSideInset = 40;  // 左右圆弧安全区
+constexpr int kHeaderRowH = 36;
+constexpr int kHeaderH = kHeaderTopInset + kHeaderRowH;
+constexpr int kBackBtnSize = 34;
+constexpr int kPad = 40;
+constexpr int kRowH = 58;
+constexpr int kRowGap = 6;
+constexpr int kRowPadHor = 14;
+constexpr int kRowPadVer = 6;
+#else
+constexpr bool kRoundLayout = false;
 constexpr int kPanelSize = 720;
+constexpr int kHeaderTopInset = 0;
+constexpr int kHeaderSideInset = 16;
+constexpr int kHeaderRowH = 90;
 constexpr int kHeaderH = 90;
 constexpr int kBackBtnSize = 72;
 constexpr int kPad = 16;
 constexpr int kRowH = 72;
 constexpr int kRowGap = 8;
+constexpr int kRowPadHor = 20;
+constexpr int kRowPadVer = 12;
+#endif
 
 constexpr uint32_t kColorBg = 0x0E1116;
 constexpr uint32_t kColorCard = 0x1B2030;
@@ -70,7 +93,11 @@ void CollectInfoItems(InfoItem* items, int* count) {
     int idx = 0;
 
     items[idx].label = I18n::T("设备型号");
-    std::snprintf(items[idx].value, sizeof(items[idx].value), "%s", "MetalioClaw4");
+    {
+        const std::string board_type = board.GetBoardType();
+        std::snprintf(items[idx].value, sizeof(items[idx].value), "%s",
+                      board_type.c_str());
+    }
     ++idx;
 
     items[idx].label = I18n::T("芯片型号");
@@ -169,6 +196,18 @@ void BuildHeader(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
 
+    if constexpr (kRoundLayout) {
+        // 圆屏：无返回箭头，标题居中；右滑退出。
+        lv_obj_t* title = lv_label_create(header);
+        lv_label_set_text(title, I18n::T("系统信息"));
+        lv_obj_set_style_text_color(title, lv_color_hex(kColorText),
+                                    LV_PART_MAIN);
+        lv_obj_set_style_text_font(title, &font_puhui_20_4, LV_PART_MAIN);
+        const int32_t title_y = kHeaderTopInset + (kHeaderRowH - 20) / 2;
+        lv_obj_align(title, LV_ALIGN_TOP_MID, 0, title_y);
+        return;
+    }
+
     lv_obj_t* back = lv_button_create(header);
     lv_obj_remove_style_all(back);
     lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
@@ -202,8 +241,8 @@ lv_obj_t* CreateInfoRow(lv_obj_t* parent, const InfoItem& item) {
     lv_obj_set_style_bg_color(row, lv_color_hex(kColorCard), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(row, 16, LV_PART_MAIN);
-    lv_obj_set_style_pad_hor(row, 20, LV_PART_MAIN);
-    lv_obj_set_style_pad_ver(row, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(row, kRowPadHor, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(row, kRowPadVer, LV_PART_MAIN);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
@@ -235,7 +274,7 @@ void BuildInfoList(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(list, kRowGap, LV_PART_MAIN);
-    lv_obj_set_style_pad_bottom(list, kPad, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(list, kRoundLayout ? 40 : kPad, LV_PART_MAIN);
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
 

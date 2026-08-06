@@ -197,6 +197,10 @@ void AfeWakeWord::Feed(const std::vector<int16_t>& data) {
     if (afe_data_ == nullptr) {
         return;
     }
+    // Stop() 清掉 DETECTION_RUNNING_EVENT 后禁止再 feed，避免与复位缓冲竞态。
+    if ((xEventGroupGetBits(event_group_) & DETECTION_RUNNING_EVENT) == 0) {
+        return;
+    }
     afe_iface_->feed(afe_data_, data.data());
 }
 
@@ -246,9 +250,23 @@ void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
 
 void AfeWakeWord::EncodeWakeWordData() {
     const size_t stack_size = 4096 * 7;
-    wake_word_opus_.clear();
+    {
+        std::lock_guard<std::mutex> lock(wake_word_mutex_);
+        if (wake_word_encode_task_ != nullptr) {
+            ESP_LOGW(TAG, "Encode wake word already running, skip");
+            return;
+        }
+        wake_word_opus_.clear();
+    }
     if (wake_word_encode_task_stack_ == nullptr) {
-        wake_word_encode_task_stack_ = (StackType_t*)heap_caps_malloc(stack_size, MALLOC_CAP_SPIRAM);
+        // Prefer internal RAM: PSRAM-stack tasks assert when concurrent flash/NVS/TLS
+        // disables the cache (esp_task_stack_is_sane_cache_disabled).
+        wake_word_encode_task_stack_ = (StackType_t*)heap_caps_malloc(
+            stack_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (wake_word_encode_task_stack_ == nullptr) {
+            wake_word_encode_task_stack_ =
+                (StackType_t*)heap_caps_malloc(stack_size, MALLOC_CAP_SPIRAM);
+        }
         assert(wake_word_encode_task_stack_ != nullptr);
     }
     if (wake_word_encode_task_buffer_ == nullptr) {
@@ -275,10 +293,15 @@ void AfeWakeWord::EncodeWakeWordData() {
             this_->wake_word_pcm_.clear();
 
             auto end_time = esp_timer_get_time();
-            ESP_LOGI(TAG, "Encode wake word opus %d packets in %ld ms", packets, (long)((end_time - start_time) / 1000));
+            // Avoid ESP_LOG* here: format strings live in flash; with a PSRAM fallback
+            // stack that races cache-disable and reboots.
+            (void)start_time;
+            (void)end_time;
+            (void)packets;
 
             std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
             this_->wake_word_opus_.push_back(std::vector<uint8_t>());
+            this_->wake_word_encode_task_ = nullptr;
             this_->wake_word_cv_.notify_all();
         }
         vTaskDelete(NULL);

@@ -1,4 +1,5 @@
 #include "openclaw_screen.h"
+#include "config.h"
 #include "i18n.h"
 
 #include <atomic>
@@ -59,12 +60,37 @@ constexpr int  kMinRecordMs       = 300;  // 低于此时长视为误触
 //   │        └───────────────┘                  │
 //   └───────────────────────────────────────────┘ 720
 // ---------------------------------------------------------------------------
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+// 360 圆屏：header/footer 安全边距，列表/气泡约 280 宽。
+constexpr bool    kRoundLayout  = true;
+constexpr int32_t kPanelW       = DISPLAY_WIDTH;
+constexpr int32_t kPanelH       = DISPLAY_HEIGHT;
+constexpr int32_t kHeaderTopInset    = 28;  // 避开顶部圆弧
+constexpr int32_t kFooterBottomInset = 28;  // 避开底部圆弧
+constexpr int32_t kHeaderH      = 56;
+constexpr int32_t kBackBtnSize  = 36;
+constexpr int32_t kFooterH      = 92;
+constexpr int32_t kListH        = kPanelH - kHeaderTopInset - kHeaderH -
+                                  kFooterH - kFooterBottomInset;
+constexpr int32_t kRefreshIntervalMs = 3000;
+constexpr int32_t kListPadH     = 40;
+constexpr int32_t kBubblePadX   = 12;
+constexpr int32_t kBubblePadY   = 8;
+constexpr int32_t kBubbleRadius = 14;
+constexpr int32_t kSideMargin   = 40;
+constexpr int32_t kRowGap       = 8;
+constexpr int32_t kMaxMessages  = 50;
+#else
+constexpr bool    kRoundLayout  = false;
 constexpr int32_t kPanelW       = 720;
 constexpr int32_t kPanelH       = 720;
+constexpr int32_t kHeaderTopInset    = 0;
+constexpr int32_t kFooterBottomInset = 0;
 constexpr int32_t kHeaderH      = 88;
 constexpr int32_t kBackBtnSize  = 72;
 constexpr int32_t kFooterH      = 140;
-constexpr int32_t kListH        = kPanelH - kHeaderH - kFooterH;
+constexpr int32_t kListH        = kPanelH - kHeaderTopInset - kHeaderH -
+                                  kFooterH - kFooterBottomInset;
 constexpr int32_t kRefreshIntervalMs = 3000;
 constexpr int32_t kListPadH     = 18;
 constexpr int32_t kBubblePadX   = 18;
@@ -73,6 +99,7 @@ constexpr int32_t kBubbleRadius = 18;
 constexpr int32_t kSideMargin   = 8;
 constexpr int32_t kRowGap       = 12;
 constexpr int32_t kMaxMessages  = 50;
+#endif
 
 constexpr uint32_t kColorBg          = 0x0E1116;
 constexpr uint32_t kColorHeaderBg    = 0x12151C;
@@ -215,7 +242,9 @@ ActivationBlockedDialogUi s_activation_dlg;
 bool s_activation_blocked = false;
 screen_lifecycle_cb_t s_lifecycle_cb = nullptr;
 
-const lv_font_t* chat_font() { return &font_puhui_30_4; }
+const lv_font_t* chat_font() {
+    return kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4;
+}
 
 std::string get_upload_url() {
     return api::Url(api::kOpenClawUpload);
@@ -300,10 +329,12 @@ void open_activation_blocked_dialog(lv_obj_t* parent_screen) {
     auto& app = Application::GetInstance();
     const bool has_code = app.HasPendingActivation();
 
-    constexpr int32_t kCardW = 520;
-    const int32_t kCardH = has_code ? 420 : 340;
-    constexpr int32_t kBackBtnW = 200;
-    constexpr int32_t kBackBtnH = 72;
+    const int32_t kCardW = kRoundLayout ? 280 : 520;
+    const int32_t kCardH = kRoundLayout ? (has_code ? 240 : 200)
+                                        : (has_code ? 420 : 340);
+    const int32_t kBackBtnW = kRoundLayout ? 120 : 200;
+    const int32_t kBackBtnH = kRoundLayout ? 44 : 72;
+    const int32_t kCardPad = kRoundLayout ? 16 : 28;
 
     lv_obj_t* mask = lv_obj_create(parent_screen);
     screen_strip_obj_chrome(mask);
@@ -330,13 +361,15 @@ void open_activation_blocked_dialog(lv_obj_t* parent_screen) {
     lv_obj_t* title = lv_label_create(card);
     lv_label_set_text(title, I18n::T("设备未激活"));
     lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(
+        title, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+        LV_PART_MAIN);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_remove_flag(title, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t* desc = lv_label_create(card);
     lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(desc, kCardW - 56);
+    lv_obj_set_width(desc, kCardW - kCardPad * 2);
     lv_label_set_text(desc, I18n::T("请先完成设备激活后再使用 OpenClaw。"));
     lv_obj_set_style_text_color(desc, lv_color_hex(0x9AA3B2), LV_PART_MAIN);
     lv_obj_set_style_text_font(desc, &font_puhui_20_4, LV_PART_MAIN);
@@ -352,7 +385,9 @@ void open_activation_blocked_dialog(lv_obj_t* parent_screen) {
         lv_label_set_text(code_lbl, code_buf);
         lv_obj_set_style_text_color(code_lbl, lv_color_hex(0xFBBF24),
                                     LV_PART_MAIN);
-        lv_obj_set_style_text_font(code_lbl, &font_puhui_30_4, LV_PART_MAIN);
+        lv_obj_set_style_text_font(
+            code_lbl, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+            LV_PART_MAIN);
         lv_obj_align(code_lbl, LV_ALIGN_BOTTOM_MID, 0, -(kBackBtnH + 24));
         lv_obj_remove_flag(code_lbl, LV_OBJ_FLAG_CLICKABLE);
     }
@@ -372,7 +407,9 @@ void open_activation_blocked_dialog(lv_obj_t* parent_screen) {
     lv_obj_t* back_lbl = lv_label_create(back);
     lv_label_set_text(back_lbl, I18n::T("返回"));
     lv_obj_set_style_text_color(back_lbl, lv_color_hex(0xE5E7EB), LV_PART_MAIN);
-    lv_obj_set_style_text_font(back_lbl, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(
+        back_lbl, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+        LV_PART_MAIN);
     lv_obj_center(back_lbl);
     lv_obj_remove_flag(back_lbl, LV_OBJ_FLAG_CLICKABLE);
 }
@@ -1521,11 +1558,11 @@ void on_create_conv_clicked(lv_event_t* /*e*/) {
 void add_conv_list_row(lv_obj_t* parent, const char* title_text,
                        const char* id_text, const char* actual_title,
                        bool is_create) {
-    constexpr int32_t kRowH = 92;
-    constexpr int32_t kCreateRowH = 88;
-    constexpr int32_t kIconSize = 48;
-    constexpr int32_t kCreateIconSize = 64;
-    constexpr int32_t kTextLeft = 14 + kIconSize + 14;
+    const int32_t kRowH = kRoundLayout ? 64 : 92;
+    const int32_t kCreateRowH = kRoundLayout ? 56 : 88;
+    const int32_t kIconSize = kRoundLayout ? 32 : 48;
+    const int32_t kCreateIconSize = kRoundLayout ? 40 : 64;
+    const int32_t kTextLeft = 14 + kIconSize + 14;
 
     lv_obj_t* row = lv_obj_create(parent);
     screen_strip_obj_chrome(row);
@@ -2098,10 +2135,10 @@ void open_clear_confirm_dialog(ClearDialogMode mode) {
         return;
     }
 
-    constexpr int32_t kCardW = 480;
-    constexpr int32_t kCardH = 280;
-    constexpr int32_t kBtnW = 200;
-    constexpr int32_t kBtnH = 80;
+    const int32_t kCardW = kRoundLayout ? 280 : 480;
+    const int32_t kCardH = kRoundLayout ? 200 : 280;
+    const int32_t kBtnW = kRoundLayout ? 110 : 200;
+    const int32_t kBtnH = kRoundLayout ? 44 : 80;
 
     lv_obj_t* mask = lv_obj_create(parent);
     screen_strip_obj_chrome(mask);
@@ -2125,7 +2162,7 @@ void open_clear_confirm_dialog(ClearDialogMode mode) {
     lv_obj_set_style_bg_color(card, lv_color_hex(0x1B2030), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 24, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 24, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, kRoundLayout ? 16 : 24, LV_PART_MAIN);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
 
@@ -2134,7 +2171,9 @@ void open_clear_confirm_dialog(ClearDialogMode mode) {
                       mode == ClearDialogMode::RemoveAll ? I18n::T("清空会话")
                                                          : I18n::T("删除会话"));
     lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(
+        title, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+        LV_PART_MAIN);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_remove_flag(title, LV_OBJ_FLAG_CLICKABLE);
 
@@ -2161,7 +2200,9 @@ void open_clear_confirm_dialog(ClearDialogMode mode) {
         lv_obj_t* lbl = lv_label_create(cancel);
         lv_label_set_text(lbl, I18n::T("取消"));
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xE5E7EB), LV_PART_MAIN);
-        lv_obj_set_style_text_font(lbl, &font_puhui_30_4, LV_PART_MAIN);
+        lv_obj_set_style_text_font(
+            lbl, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+            LV_PART_MAIN);
         lv_obj_center(lbl);
         lv_obj_remove_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
     }
@@ -2179,7 +2220,9 @@ void open_clear_confirm_dialog(ClearDialogMode mode) {
         lv_obj_t* lbl = lv_label_create(ok);
         lv_label_set_text(lbl, I18n::T("确定"));
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-        lv_obj_set_style_text_font(lbl, &font_puhui_30_4, LV_PART_MAIN);
+        lv_obj_set_style_text_font(
+            lbl, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+            LV_PART_MAIN);
         lv_obj_center(lbl);
         lv_obj_remove_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
     }
@@ -2307,7 +2350,7 @@ void build_list_header(lv_obj_t* parent) {
     lv_obj_t* header = lv_obj_create(parent);
     screen_strip_obj_chrome(header);
     lv_obj_set_size(header, kPanelW, kHeaderH);
-    lv_obj_set_pos(header, 0, 0);
+    lv_obj_set_pos(header, 0, kHeaderTopInset);
     lv_obj_set_style_bg_color(header, lv_color_hex(kColorHeaderBg),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_opa(header, LV_OPA_COVER, LV_PART_MAIN);
@@ -2325,7 +2368,7 @@ void build_list_header(lv_obj_t* parent) {
     lv_obj_t* back = lv_button_create(header);
     lv_obj_remove_style_all(back);
     lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
-    lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
+    lv_obj_align(back, LV_ALIGN_LEFT_MID, kRoundLayout ? 36 : 16, 0);
     lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
                               LV_PART_MAIN | LV_STATE_PRESSED);
@@ -2346,12 +2389,16 @@ void build_list_header(lv_obj_t* parent) {
     lv_label_set_text(title, "OpenClaw");
     lv_obj_set_style_text_color(title, lv_color_hex(kColorHeaderText),
                                 LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 16 + kBackBtnSize + 12, 0);
+    lv_obj_set_style_text_font(
+        title, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+        LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_LEFT_MID,
+                (kRoundLayout ? 36 : 16) + kBackBtnSize + (kRoundLayout ? 8 : 12),
+                0);
 
-    constexpr int32_t kHdrBtnW = 88;
-    constexpr int32_t kHdrBtnH = 56;
-    constexpr int32_t kHdrRightPad = 12;
+    const int32_t kHdrBtnW = kRoundLayout ? 56 : 88;
+    const int32_t kHdrBtnH = kRoundLayout ? 32 : 56;
+    const int32_t kHdrRightPad = kRoundLayout ? 8 : 12;
 
     lv_obj_t* clear = lv_button_create(header);
     s_list_clear_btn = clear;
@@ -2368,12 +2415,15 @@ void build_list_header(lv_obj_t* parent) {
 }
 
 void build_list_body(lv_obj_t* parent) {
+    const int32_t body_top = kHeaderTopInset + kHeaderH;
     s_list_container = lv_obj_create(parent);
-    lv_obj_set_size(s_list_container, kPanelW, kPanelH - kHeaderH);
-    lv_obj_set_pos(s_list_container, 0, kHeaderH);
+    lv_obj_set_size(s_list_container, kPanelW,
+                    kPanelH - body_top - kFooterBottomInset);
+    lv_obj_set_pos(s_list_container, 0, body_top);
     screen_strip_obj_chrome(s_list_container);
     lv_obj_set_style_bg_opa(s_list_container, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_pad_hor(s_list_container, 16, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(s_list_container, kRoundLayout ? 40 : 16,
+                            LV_PART_MAIN);
     lv_obj_set_style_pad_top(s_list_container, 12, LV_PART_MAIN);
     lv_obj_set_style_pad_bottom(s_list_container, 16, LV_PART_MAIN);
     lv_obj_set_style_pad_row(s_list_container, 10, LV_PART_MAIN);
@@ -2393,7 +2443,8 @@ void build_list_body(lv_obj_t* parent) {
     lv_obj_set_style_text_color(s_list_hint, lv_color_hex(kColorHintText),
                                 LV_PART_MAIN);
     lv_obj_align(s_list_hint, LV_ALIGN_TOP_MID, 0,
-                 kHeaderH + (kPanelH - kHeaderH) / 2 - 20);
+                 body_top + (kPanelH - body_top - kFooterBottomInset) / 2 -
+                     20);
     screen_make_input_passive(s_list_hint);
 }
 
@@ -2401,7 +2452,7 @@ void build_detail_header(lv_obj_t* parent) {
     lv_obj_t* header = lv_obj_create(parent);
     screen_strip_obj_chrome(header);
     lv_obj_set_size(header, kPanelW, kHeaderH);
-    lv_obj_set_pos(header, 0, 0);
+    lv_obj_set_pos(header, 0, kHeaderTopInset);
     lv_obj_set_style_bg_color(header, lv_color_hex(kColorHeaderBg),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_opa(header, LV_OPA_COVER, LV_PART_MAIN);
@@ -2419,7 +2470,7 @@ void build_detail_header(lv_obj_t* parent) {
     lv_obj_t* back = lv_button_create(header);
     lv_obj_remove_style_all(back);
     lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
-    lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
+    lv_obj_align(back, LV_ALIGN_LEFT_MID, kRoundLayout ? 36 : 16, 0);
     lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
                               LV_PART_MAIN | LV_STATE_PRESSED);
@@ -2436,8 +2487,9 @@ void build_detail_header(lv_obj_t* parent) {
     lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_center(back_icon);
 
-    const int32_t title_left = 16 + kBackBtnSize + 12;
-    const int32_t title_w = kPanelW - title_left - 120;
+    const int32_t title_left =
+        (kRoundLayout ? 36 : 16) + kBackBtnSize + (kRoundLayout ? 8 : 12);
+    const int32_t title_w = kPanelW - title_left - (kRoundLayout ? 70 : 120);
 
     s_detail_title_lbl = lv_label_create(header);
     lv_label_set_text(s_detail_title_lbl,
@@ -2449,7 +2501,8 @@ void build_detail_header(lv_obj_t* parent) {
                                 lv_color_hex(kColorHeaderText), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_detail_title_lbl, &font_puhui_20_4,
                                LV_PART_MAIN);
-    lv_obj_align(s_detail_title_lbl, LV_ALIGN_LEFT_MID, title_left, -12);
+    lv_obj_align(s_detail_title_lbl, LV_ALIGN_LEFT_MID, title_left,
+                kRoundLayout ? -10 : -12);
 
     s_detail_id_lbl = lv_label_create(header);
     if (s_conversation_id.empty()) {
@@ -2462,11 +2515,12 @@ void build_detail_header(lv_obj_t* parent) {
     lv_obj_set_style_text_color(s_detail_id_lbl, lv_color_hex(kColorHintText),
                                 LV_PART_MAIN);
     lv_obj_set_style_text_font(s_detail_id_lbl, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(s_detail_id_lbl, LV_ALIGN_LEFT_MID, title_left, 14);
+    lv_obj_align(s_detail_id_lbl, LV_ALIGN_LEFT_MID, title_left,
+                kRoundLayout ? 11 : 14);
 
-    constexpr int32_t kHdrBtnW = 88;
-    constexpr int32_t kHdrBtnH = 56;
-    constexpr int32_t kHdrRightPad = 12;
+    const int32_t kHdrBtnW = kRoundLayout ? 56 : 88;
+    const int32_t kHdrBtnH = kRoundLayout ? 32 : 56;
+    const int32_t kHdrRightPad = kRoundLayout ? 8 : 12;
 
     lv_obj_t* clear = lv_button_create(header);
     lv_obj_set_size(clear, kHdrBtnW, kHdrBtnH);
@@ -2483,9 +2537,10 @@ void build_detail_header(lv_obj_t* parent) {
 }
 
 void build_message_list(lv_obj_t* parent) {
+    const int32_t list_top = kHeaderTopInset + kHeaderH;
     s_msg_list = lv_obj_create(parent);
     lv_obj_set_size(s_msg_list, kPanelW, kListH);
-    lv_obj_set_pos(s_msg_list, 0, kHeaderH);
+    lv_obj_set_pos(s_msg_list, 0, list_top);
     screen_strip_obj_chrome(s_msg_list);
     lv_obj_set_style_bg_opa(s_msg_list, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_pad_left(s_msg_list, kListPadH, LV_PART_MAIN);
@@ -2504,11 +2559,13 @@ void build_message_list(lv_obj_t* parent) {
     lv_label_set_long_mode(s_empty_hint, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(s_empty_hint, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_empty_hint, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(
+        s_empty_hint, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+        LV_PART_MAIN);
     lv_obj_set_style_text_color(s_empty_hint, lv_color_hex(kColorHintText),
                                 LV_PART_MAIN);
     lv_obj_align(s_empty_hint, LV_ALIGN_TOP_MID, 0,
-                 kHeaderH + (kListH / 2) - 50);
+                 list_top + (kListH / 2) - (kRoundLayout ? 30 : 50));
     screen_make_input_passive(s_empty_hint);
     update_empty_hint();
 }
@@ -2517,7 +2574,7 @@ void build_footer(lv_obj_t* parent) {
     lv_obj_t* footer = lv_obj_create(parent);
     screen_strip_obj_chrome(footer);
     lv_obj_set_size(footer, kPanelW, kFooterH);
-    lv_obj_set_pos(footer, 0, kPanelH - kFooterH);
+    lv_obj_set_pos(footer, 0, kPanelH - kFooterH - kFooterBottomInset);
     lv_obj_set_style_bg_color(footer, lv_color_hex(kColorBg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(footer, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(footer, LV_OBJ_FLAG_SCROLLABLE);
@@ -2530,11 +2587,11 @@ void build_footer(lv_obj_t* parent) {
     lv_obj_align(s_status_lbl, LV_ALIGN_TOP_MID, 0, 10);
     screen_make_input_passive(s_status_lbl);
 
-    constexpr int32_t kBtnW = 400;
-    constexpr int32_t kBtnH = 72;
+    const int32_t kBtnW = kRoundLayout ? 220 : 400;
+    const int32_t kBtnH = kRoundLayout ? 44 : 72;
     s_record_btn = lv_button_create(footer);
     lv_obj_set_size(s_record_btn, kBtnW, kBtnH);
-    lv_obj_align(s_record_btn, LV_ALIGN_BOTTOM_MID, 0, -16);
+    lv_obj_align(s_record_btn, LV_ALIGN_BOTTOM_MID, 0, kRoundLayout ? -10 : -16);
     lv_obj_set_style_radius(s_record_btn, kBtnH / 2, LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_record_btn, lv_color_hex(kColorRecordBtnIdle),
                               LV_PART_MAIN);

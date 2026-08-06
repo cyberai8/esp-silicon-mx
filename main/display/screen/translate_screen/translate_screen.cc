@@ -1,4 +1,5 @@
 #include "translate_screen.h"
+#include "config.h"
 #include "i18n.h"
 
 #include <atomic>
@@ -41,15 +42,57 @@ constexpr int kMinPcmBytes = 80;
 constexpr int kHttpTimeoutMs = 20000;
 constexpr int kEndWaitMs = 800;
 
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+// 360 圆屏：顶栏/底栏安全边距；语言选择器半宽并排；正文约 280 宽。
+constexpr bool kRoundLayout = true;
+constexpr int32_t kPanelW = DISPLAY_WIDTH;
+constexpr int32_t kPanelH = DISPLAY_HEIGHT;
+constexpr int32_t kHeaderTopInset = 28;    // 避开顶部圆弧
+constexpr int32_t kHeaderSideInset = 40;   // 左右圆弧安全区
+constexpr int32_t kHeaderRowH = 34;
+constexpr int32_t kHeaderH = kHeaderTopInset + kHeaderRowH + 6;
+constexpr int32_t kBackBtnSize = 34;
+constexpr int32_t kFooterH = 76;
+constexpr int32_t kFooterBottomInset = 28;  // 按钮底部与屏幕底边的安全距离
+constexpr int32_t kLangRowH = 40;
+constexpr int32_t kStatusH = 22;
+constexpr int32_t kBodyH = kPanelH - kHeaderH - kFooterH;
+constexpr int32_t kHeaderSidePad = kHeaderSideInset;
+constexpr int32_t kBodySidePad = 40;
+constexpr int32_t kBodyTopPad = 8;
+constexpr int32_t kBodyBottomPad = 6;
+constexpr int32_t kBodyRowGap = 6;
+constexpr int32_t kDropdownW = 120;
+constexpr int32_t kDropdownH = 36;
+constexpr int32_t kCardPad = 10;
+constexpr int32_t kCardRowGap = 6;
+constexpr int32_t kDropdownListMaxH = 200;
+constexpr int32_t kActionBtnW = 176;
+constexpr int32_t kActionBtnH = 44;
+#else
+constexpr bool kRoundLayout = false;
 constexpr int32_t kPanelW = 720;
 constexpr int32_t kPanelH = 720;
 constexpr int32_t kHeaderH = 88;
 constexpr int32_t kBackBtnSize = 72;
 constexpr int32_t kFooterH = 108;
+constexpr int32_t kFooterBottomInset = 0;
 constexpr int32_t kLangRowH = 64;
 constexpr int32_t kStatusH = 36;
 constexpr int32_t kBodyH = kPanelH - kHeaderH - kFooterH;
 constexpr int32_t kHeaderSidePad = 8;
+constexpr int32_t kBodySidePad = 20;
+constexpr int32_t kBodyTopPad = 12;
+constexpr int32_t kBodyBottomPad = 8;
+constexpr int32_t kBodyRowGap = 10;
+constexpr int32_t kDropdownW = 280;
+constexpr int32_t kDropdownH = 52;
+constexpr int32_t kCardPad = 14;
+constexpr int32_t kCardRowGap = 8;
+constexpr int32_t kDropdownListMaxH = 360;
+constexpr int32_t kActionBtnW = 400;
+constexpr int32_t kActionBtnH = 72;
+#endif
 
 constexpr uint32_t kColorBg = 0x0E1116;
 constexpr uint32_t kColorHeaderBg = 0x12151C;
@@ -823,7 +866,7 @@ void on_dropdown_ready(lv_event_t* e) {
     lv_obj_set_style_text_color(list, lv_color_hex(kColorText), LV_PART_MAIN);
     lv_obj_set_style_text_font(list, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_radius(list, 10, LV_PART_MAIN);
-    lv_obj_set_style_max_height(list, 360, LV_PART_MAIN);
+    lv_obj_set_style_max_height(list, kDropdownListMaxH, LV_PART_MAIN);
     screen_swipe_back_ignore(list, true);
 }
 
@@ -849,9 +892,9 @@ lv_obj_t* make_text_card(lv_obj_t* parent, const char* title,
     lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 16, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 14, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, kCardPad, LV_PART_MAIN);
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(card, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(card, kCardRowGap, LV_PART_MAIN);
     lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_AUTO);
     screen_swipe_back_ignore(card, true);
 
@@ -891,7 +934,26 @@ void build_header(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, LV_PART_MAIN);
     screen_make_input_passive(divider);
 
-    lv_obj_t* back = lv_button_create(top);
+    // 圆屏：顶部安全边距 + 居中标题（无返回箭头，右滑退出）。
+    lv_obj_t* row = top;
+    if constexpr (kRoundLayout) {
+        row = lv_obj_create(top);
+        screen_strip_obj_chrome(row);
+        lv_obj_set_size(row, kPanelW - kHeaderSideInset * 2, kHeaderRowH);
+        lv_obj_set_pos(row, kHeaderSideInset, kHeaderTopInset);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t* title = lv_label_create(row);
+        lv_label_set_text(title, I18n::T("翻译"));
+        lv_obj_set_style_text_font(title, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_set_style_text_color(title, lv_color_hex(kColorText), LV_PART_MAIN);
+        lv_obj_align(title, LV_ALIGN_CENTER, 0, 0);
+        screen_make_input_passive(title);
+        return;
+    }
+
+    lv_obj_t* back = lv_button_create(row);
     lv_obj_remove_style_all(back);
     lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
     lv_obj_align(back, LV_ALIGN_LEFT_MID, kHeaderSidePad, 0);
@@ -908,12 +970,11 @@ void build_header(lv_obj_t* parent) {
     lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_center(back_icon);
 
-    lv_obj_t* title = lv_label_create(top);
+    lv_obj_t* title = lv_label_create(row);
     lv_label_set_text(title, I18n::T("翻译"));
     lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
     lv_obj_set_style_text_color(title, lv_color_hex(kColorText), LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, kHeaderSidePad + kBackBtnSize + 8,
-                 0);
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, kHeaderSidePad + kBackBtnSize + 8, 0);
     screen_make_input_passive(title);
 }
 
@@ -926,12 +987,12 @@ void build_body(lv_obj_t* parent) {
     lv_obj_set_pos(body, 0, kHeaderH);
     lv_obj_set_style_bg_color(body, lv_color_hex(kColorBg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(body, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_pad_left(body, 20, LV_PART_MAIN);
-    lv_obj_set_style_pad_right(body, 20, LV_PART_MAIN);
-    lv_obj_set_style_pad_top(body, 12, LV_PART_MAIN);
-    lv_obj_set_style_pad_bottom(body, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_left(body, kBodySidePad, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(body, kBodySidePad, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(body, kBodyTopPad, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(body, kBodyBottomPad, LV_PART_MAIN);
     lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(body, 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(body, kBodyRowGap, LV_PART_MAIN);
     lv_obj_remove_flag(body, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* lang_row = lv_obj_create(body);
@@ -943,8 +1004,9 @@ void build_body(lv_obj_t* parent) {
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(lang_row, LV_OBJ_FLAG_SCROLLABLE);
 
+    // 360 圆屏：横向空间有限，两个选择器改半宽并排（kDropdownW 更小）。
     s_from_dd = lv_dropdown_create(lang_row);
-    lv_obj_set_size(s_from_dd, 280, 52);
+    lv_obj_set_size(s_from_dd, kDropdownW, kDropdownH);
     style_dropdown(s_from_dd);
     lv_dropdown_set_options(s_from_dd, s_lang_options.c_str());
     lv_dropdown_set_selected(s_from_dd, kDefaultFromIdx);
@@ -957,7 +1019,7 @@ void build_body(lv_obj_t* parent) {
     screen_make_input_passive(arrow);
 
     s_to_dd = lv_dropdown_create(lang_row);
-    lv_obj_set_size(s_to_dd, 280, 52);
+    lv_obj_set_size(s_to_dd, kDropdownW, kDropdownH);
     style_dropdown(s_to_dd);
     lv_dropdown_set_options(s_to_dd, s_lang_options.c_str());
     lv_dropdown_set_selected(s_to_dd, kDefaultToIdx);
@@ -985,12 +1047,15 @@ void build_footer(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(footer, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(footer, LV_OBJ_FLAG_SCROLLABLE);
 
-    constexpr int32_t kBtnW = 400;
-    constexpr int32_t kBtnH = 72;
     s_action_btn = lv_button_create(footer);
-    lv_obj_set_size(s_action_btn, kBtnW, kBtnH);
-    lv_obj_align(s_action_btn, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_radius(s_action_btn, kBtnH / 2, LV_PART_MAIN);
+    lv_obj_set_size(s_action_btn, kActionBtnW, kActionBtnH);
+    // 圆屏：按钮整体上移，留出底部安全距离避免被圆弧裁切。
+    if constexpr (kRoundLayout) {
+        lv_obj_align(s_action_btn, LV_ALIGN_BOTTOM_MID, 0, -kFooterBottomInset);
+    } else {
+        lv_obj_align(s_action_btn, LV_ALIGN_CENTER, 0, 0);
+    }
+    lv_obj_set_style_radius(s_action_btn, kActionBtnH / 2, LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_action_btn, lv_color_hex(kColorBtnIdle),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_action_btn, LV_OPA_COVER, LV_PART_MAIN);

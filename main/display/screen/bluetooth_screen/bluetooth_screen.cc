@@ -3,6 +3,7 @@
 
 #include "IOExpander.hpp"
 #include "SimpleUart.hpp"
+#include "config.h"
 #include "screen_util.h"
 
 #include <cstdio>
@@ -19,6 +20,18 @@ LV_FONT_DECLARE(font_puhui_20_4);
 namespace {
 
 constexpr const char* TAG = "BtScreen";
+
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+constexpr bool kRoundLayout = true;
+constexpr int kMode2PanelH = 200;
+constexpr int kDeviceListH = 100;
+constexpr int kScanBtnW = 120;
+#else
+constexpr bool kRoundLayout = false;
+constexpr int kMode2PanelH = 360;
+constexpr int kDeviceListH = 200;
+constexpr int kScanBtnW = 180;
+#endif
 
 constexpr int kAddrHexLen = 12;
 
@@ -612,8 +625,8 @@ void BluetoothScreen::BuildInto(lv_obj_t* parent) {
     s_devices.clear();
     s_ui.root = parent;
 
-    lv_obj_set_style_pad_all(parent, 12, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(parent, 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(parent, kRoundLayout ? 8 : 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(parent, kRoundLayout ? 6 : 10, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(parent, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_flex_flow(parent, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(parent, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
@@ -662,9 +675,11 @@ void BluetoothScreen::BuildInto(lv_obj_t* parent) {
     lv_obj_t* mode_row = lv_obj_create(parent);
     lv_obj_remove_style_all(mode_row);
     lv_obj_set_width(mode_row, LV_PCT(100));
-    lv_obj_set_height(mode_row, 56);
-    lv_obj_set_flex_flow(mode_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_height(mode_row, kRoundLayout ? LV_SIZE_CONTENT : 56);
+    lv_obj_set_flex_flow(mode_row,
+                         kRoundLayout ? LV_FLEX_FLOW_ROW_WRAP : LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_column(mode_row, 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(mode_row, 6, LV_PART_MAIN);
     lv_obj_remove_flag(mode_row, LV_OBJ_FLAG_SCROLLABLE);
 
     const char* mode_labels[] = {I18n::T("模式1"), I18n::T("模式2"), I18n::T("模式3")};
@@ -704,7 +719,7 @@ void BluetoothScreen::BuildInto(lv_obj_t* parent) {
     s_ui.mode2_panel = panel;
     screen_strip_obj_chrome(panel);
     lv_obj_set_width(panel, LV_PCT(100));
-    lv_obj_set_height(panel, 360);
+    lv_obj_set_height(panel, kMode2PanelH);
     lv_obj_set_style_bg_color(panel, lv_color_hex(kColorCard), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(panel, 20, LV_PART_MAIN);
@@ -714,7 +729,7 @@ void BluetoothScreen::BuildInto(lv_obj_t* parent) {
 
     lv_obj_t* scan = lv_button_create(panel);
     s_ui.scan_btn = scan;
-    lv_obj_set_size(scan, 180, 48);
+    lv_obj_set_size(scan, kScanBtnW, 48);
     lv_obj_align(scan, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_set_style_radius(scan, 16, LV_PART_MAIN);
     lv_obj_set_style_bg_color(scan, lv_color_hex(kColorBtnActive),
@@ -731,7 +746,7 @@ void BluetoothScreen::BuildInto(lv_obj_t* parent) {
     lv_obj_t* list = lv_obj_create(panel);
     s_ui.device_list = list;
     screen_strip_obj_chrome(list);
-    lv_obj_set_size(list, LV_PCT(100), 200);
+    lv_obj_set_size(list, LV_PCT(100), kDeviceListH);
     lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 58);
     lv_obj_set_style_bg_color(list, lv_color_hex(0x12151C), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(list, LV_OPA_COVER, LV_PART_MAIN);

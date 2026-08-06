@@ -742,3 +742,7 @@ void StandbyScreen::ReturnHome() {
         lv_obj_delete_async(old_scr);
     }
 }
+
+bool StandbyScreen::IsActive() {
+    return s_ui.screen != nullptr;
+}

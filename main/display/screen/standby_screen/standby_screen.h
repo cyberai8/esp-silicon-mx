@@ -13,4 +13,5 @@ public:
     static void Show();
     // 从待机回到首页（须在 LVGL 线程调用）。
     static void ReturnHome();
+    static bool IsActive();
 };

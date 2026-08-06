@@ -13,6 +13,7 @@ public:
     // 下次进入主屏时从第一页开始（用于主题切换等场景）。
     static void ResetToFirstPage();
 
+    static void WarmStatusCaches();
     // PWR_KEY 长按后弹出 [重启 / 关机] 对话框（须在 LVGL 线程调用）。
     static void ShowPowerOptionsDialog();
     // 软件关机（UI / 空闲策略共用）。

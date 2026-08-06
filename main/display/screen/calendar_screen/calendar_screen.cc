@@ -1,4 +1,5 @@
 #include "calendar_screen.h"
+#include "config.h"
 #include "i18n.h"
 
 #include "home_screen/home_screen.h"
@@ -31,6 +32,31 @@ namespace {
 //   grid total = 6*72 + 5*4 = 452
 //   grid bottom = 22 + 84 + 16 + 18 + 36 + 12 + 452 = 640 (within 668)
 // ---------------------------------------------------------------------------
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+// 360 圆屏：全新网格布局，四周留安全边距避免圆弧裁切；顶栏改双行（标题 + 今日徽标）。
+constexpr bool    kRoundLayout      = true;
+constexpr int32_t kScreenWidth      = DISPLAY_WIDTH;
+
+constexpr int32_t kCardMarginX      = 40;
+constexpr int32_t kCardMarginTop    = 36;
+constexpr int32_t kCardMarginBottom = 36;
+
+constexpr int32_t kHeaderTop        = 0;
+constexpr int32_t kHeaderRowHeight  = 52;
+constexpr int32_t kHeaderInnerPadX  = 4;
+
+constexpr int32_t kColumns          = 7;
+constexpr int32_t kRows             = 6;
+constexpr int32_t kGridLeftPad      = 2;
+constexpr int32_t kGridRightPad     = 2;
+constexpr int32_t kCellHeight       = 28;
+constexpr int32_t kRowGap           = 2;
+constexpr int32_t kWeekdayRowHeight = 18;
+constexpr int32_t kWeekdayMarginTop = 4;
+constexpr int32_t kGridMarginTop    = 2;
+constexpr int32_t kDividerOffsetY   = 2;
+#else
+constexpr bool    kRoundLayout      = false;
 constexpr int32_t kScreenWidth      = 720;
 
 constexpr int32_t kCardMarginX      = 28;
@@ -51,6 +77,7 @@ constexpr int32_t kWeekdayRowHeight = 36;
 constexpr int32_t kWeekdayMarginTop = 18;
 constexpr int32_t kGridMarginTop    = 12;
 constexpr int32_t kDividerOffsetY   = 16;
+#endif
 
 // ---- color palette (深色 + 黄色高亮) -------------------------------------
 constexpr uint32_t kColorBg            = 0x0E1116;
@@ -111,7 +138,7 @@ void OnSwipeBack() {
 
 void BuildAccentBar(lv_obj_t* parent) {
     lv_obj_t* bar = lv_obj_create(parent);
-    lv_obj_set_size(bar, 6, 40);
+    lv_obj_set_size(bar, kRoundLayout ? 4 : 6, kRoundLayout ? 22 : 40);
     lv_obj_align(bar, LV_ALIGN_LEFT_MID, kHeaderInnerPadX, 0);
     screen_strip_obj_chrome(bar);
     lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
@@ -121,12 +148,19 @@ void BuildAccentBar(lv_obj_t* parent) {
 }
 
 void BuildTodayBadge(lv_obj_t* parent, int month, int mday, int wday) {
-    constexpr int32_t kBadgeW = 240;
-    constexpr int32_t kBadgeH = 48;
+    const int32_t kBadgeW = kRoundLayout ? 156 : 240;
+    const int32_t kBadgeH = kRoundLayout ? 22 : 48;
+    const int32_t kDotSize = kRoundLayout ? 8 : 12;
+    const int32_t kDotOfs = kRoundLayout ? 10 : 16;
+    const int32_t kLblOfs = kRoundLayout ? 22 : 36;
 
     lv_obj_t* badge = lv_obj_create(parent);
     lv_obj_set_size(badge, kBadgeW, kBadgeH);
-    lv_obj_align(badge, LV_ALIGN_RIGHT_MID, -kHeaderInnerPadX, 0);
+    if (kRoundLayout) {
+        lv_obj_align(badge, LV_ALIGN_BOTTOM_MID, 0, 0);
+    } else {
+        lv_obj_align(badge, LV_ALIGN_RIGHT_MID, -kHeaderInnerPadX, 0);
+    }
     screen_strip_obj_chrome(badge);
     lv_obj_remove_flag(badge, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(badge, lv_color_hex(kColorBadgeBg),
@@ -139,8 +173,8 @@ void BuildTodayBadge(lv_obj_t* parent, int month, int mday, int wday) {
 
     // Yellow dot.
     lv_obj_t* dot = lv_obj_create(badge);
-    lv_obj_set_size(dot, 12, 12);
-    lv_obj_align(dot, LV_ALIGN_LEFT_MID, 16, 0);
+    lv_obj_set_size(dot, kDotSize, kDotSize);
+    lv_obj_align(dot, LV_ALIGN_LEFT_MID, kDotOfs, 0);
     screen_strip_obj_chrome(dot);
     lv_obj_remove_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(dot, lv_color_hex(kColorAccent), LV_PART_MAIN);
@@ -156,8 +190,8 @@ void BuildTodayBadge(lv_obj_t* parent, int month, int mday, int wday) {
     lv_obj_set_style_text_color(lbl, lv_color_hex(kColorAccent),
                                 LV_PART_MAIN);
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
-    lv_obj_set_width(lbl, kBadgeW - 50);
-    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 36, 0);
+    lv_obj_set_width(lbl, kBadgeW - kLblOfs - 8);
+    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, kLblOfs, 0);
 }
 
 void BuildHeaderRow(lv_obj_t* content, int year, int month, int mday,
@@ -175,10 +209,17 @@ void BuildHeaderRow(lv_obj_t* content, int year, int month, int mday,
     snprintf(buf, sizeof(buf), I18n::T("%d 年 %d 月"), year, month);
     lv_obj_t* title = lv_label_create(header);
     lv_label_set_text(title, buf);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(
+        title, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+        LV_PART_MAIN);
     lv_obj_set_style_text_color(title, lv_color_hex(kColorHeaderText),
                                 LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, kHeaderInnerPadX + 22, 0);
+    if (kRoundLayout) {
+        // 圆屏双行顶栏：标题在上，今日徽标在下，整体居中避免圆弧裁切。
+        lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
+    } else {
+        lv_obj_align(title, LV_ALIGN_LEFT_MID, kHeaderInnerPadX + 22, 0);
+    }
 
     BuildTodayBadge(header, month, mday, wday);
 
@@ -249,7 +290,8 @@ void BuildDayCell(lv_obj_t* content, int row, int col, int day_num,
     snprintf(buf, sizeof(buf), "%d", day_num);
     lv_obj_t* lbl = lv_label_create(cell);
     lv_label_set_text(lbl, buf);
-    lv_obj_set_style_text_font(lbl, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(
+        lbl, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4, LV_PART_MAIN);
 
     uint32_t color = kColorDateText;
     if (is_today)            color = kColorTodayText;
@@ -366,7 +408,7 @@ lv_obj_t* CalendarScreen::Create() {
     lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_color(hint, lv_color_hex(kColorSubtleText),
                                 LV_PART_MAIN);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, kRoundLayout ? -4 : -10);
 
     // Make the entire content tree input-passive so PRESSED/RELEASED events
     // bubble up to the screen-level swipe-back handler.

@@ -27,16 +27,29 @@ LV_FONT_DECLARE(font_puhui_30_4);
 namespace {
 
 #if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+// 360 圆屏：头部收成两行 + 顶/侧安全边距，内容约 280 宽。
+constexpr bool  kRoundLayout   = true;
 constexpr int32_t kPanelW = DISPLAY_WIDTH;
-constexpr int32_t kHeaderH  = 48;
-constexpr int32_t kBackBtnSize = 40;
-constexpr int32_t kHeaderSidePad = 8;
-constexpr int32_t kRegionBtnW = 48;
-constexpr int32_t kRefreshBtnW = 48;
-constexpr int32_t kHeaderBtnH = 36;
-constexpr int32_t kHeaderBtnGap = 4;
+constexpr int32_t kHeaderTopInset = 28;
+constexpr int32_t kHeaderRow1H = 36;
+constexpr int32_t kHeaderRow2H = 32;
+constexpr int32_t kHeaderH  = kHeaderTopInset + kHeaderRow1H + kHeaderRow2H;
+constexpr int32_t kBackBtnSize = 34;
+constexpr int32_t kHeaderSidePad = 36;
+constexpr int32_t kRegionBtnW = 56;
+constexpr int32_t kRefreshBtnW = 56;
+constexpr int32_t kHeaderBtnH = 28;
+constexpr int32_t kHeaderBtnGap = 6;
+// 弹窗（选择地区）：<=280 安全区
+constexpr int32_t kModalCardW = 280;
+constexpr int32_t kModalCardPad = 14;
+constexpr int32_t kModalDdH = 32;
 #else
+constexpr bool  kRoundLayout   = false;
 constexpr int32_t kPanelW = 720;
+constexpr int32_t kHeaderTopInset = 0;
+constexpr int32_t kHeaderRow1H = 0;   // 未使用（单行头部）
+constexpr int32_t kHeaderRow2H = 0;   // 未使用（单行头部）
 constexpr int32_t kHeaderH  = 88;
 constexpr int32_t kBackBtnSize = 72;
 constexpr int32_t kHeaderSidePad = 16;
@@ -44,18 +57,19 @@ constexpr int32_t kRegionBtnW = 72;
 constexpr int32_t kRefreshBtnW = 72;
 constexpr int32_t kHeaderBtnH = 56;
 constexpr int32_t kHeaderBtnGap = 8;
-#endif
 constexpr int32_t kModalCardW = 560;
 constexpr int32_t kModalCardPad = 24;
-constexpr int32_t kModalDdW = kModalCardW - kModalCardPad * 2;
 constexpr int32_t kModalDdH = 44;
-constexpr int32_t kTabBarH = 52;
-constexpr int32_t kTabPad  = 14;
+#endif
+constexpr int32_t kModalDdW = kModalCardW - kModalCardPad * 2;
+constexpr int32_t kTabBarH = kRoundLayout ? 44 : 52;
+constexpr int32_t kTabPad  = kRoundLayout ? 40 : 14;
 constexpr int32_t kInnerW = kPanelW - kTabPad * 2;
 
-// 资源原生 128×128；6 日预报（跳过今天）3 列网格
-constexpr int32_t kHeroIconSize      = 128;
-constexpr int32_t kForecastIconSize  = 128;
+// 资源原生 128×128；6 日预报（跳过今天）3 列网格。圆屏把图标和卡高一起
+// 按比例缩小，否则 kForecastCardW（约 101px）根本放不下 128px 大图。
+constexpr int32_t kHeroIconSize      = kRoundLayout ? 72 : 128;
+constexpr int32_t kForecastIconSize  = kRoundLayout ? 56 : 128;
 constexpr int32_t kForecastCols        = 3;
 constexpr int32_t kForecastDayCount    = 6;
 constexpr int32_t kForecastGridPadH  = 4;
@@ -66,7 +80,7 @@ constexpr int32_t kForecastUsableW =
     kInnerW - kForecastGridPadH * 2;
 constexpr int32_t kForecastCardW =
     (kForecastUsableW - kForecastColGap * (kForecastCols - 1)) / kForecastCols;
-constexpr int32_t kForecastCardH = 244;
+constexpr int32_t kForecastCardH = kRoundLayout ? 172 : 244;
 
 constexpr uint32_t kColorBg         = 0x0E1116;
 constexpr uint32_t kColorBgGrad     = 0x161A22;
@@ -98,7 +112,9 @@ std::string s_dist_options;
 bool s_dd_syncing        = false;
 std::atomic<uint32_t> s_session{0};
 
-const lv_font_t* font_main() { return &font_puhui_30_4; }
+const lv_font_t* font_main() {
+    return kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4;
+}
 const lv_font_t* font_sub()  { return &font_puhui_20_4; }
 
 void TriggerFetch();
@@ -144,7 +160,8 @@ void OnDropdownListOpened(lv_event_t* e) {
     lv_obj_set_style_text_color(list, lv_color_hex(kColorText), LV_PART_MAIN);
     lv_obj_set_style_text_font(list, font_sub(), LV_PART_MAIN);
     lv_obj_set_style_radius(list, 10, LV_PART_MAIN);
-    lv_obj_set_style_max_height(list, 320, LV_PART_MAIN);
+    // 圆屏卡片本身只有 280 高，下拉列表撑满 320 会探出卡片/屏幕之外。
+    lv_obj_set_style_max_height(list, kRoundLayout ? 180 : 320, LV_PART_MAIN);
     lv_obj_set_style_bg_color(list, lv_color_hex(kColorTabActive),
                               static_cast<lv_part_t>(LV_PART_SELECTED) |
                                   static_cast<lv_state_t>(LV_STATE_CHECKED));
@@ -328,10 +345,13 @@ void OpenCityPickerDialog() {
         return;
     }
 
-    constexpr int32_t kCardH = 480;
-    constexpr int32_t kBtnW = 200;
-    constexpr int32_t kBtnH = 56;
-    constexpr int32_t kBtnRowH = 72;
+    // 圆屏把卡片压到 <=280 高：标题 + 3 个下拉行（每行 label+30px 下拉，
+    // 行间距收紧到 3px）+ 按钮行，总高约 273px，刚好塞进 280x280 安全区。
+    constexpr int32_t kCardH = kRoundLayout ? 264 : 480;
+    constexpr int32_t kBtnW = kRoundLayout ? 116 : 200;
+    constexpr int32_t kBtnH = kRoundLayout ? 40 : 56;
+    constexpr int32_t kBtnRowH = kRoundLayout ? 48 : 72;
+    constexpr int32_t kRowGap = kRoundLayout ? 3 : 8;
 
     lv_obj_t* mask = lv_obj_create(s_screen);
     s_city_dlg_mask = mask;
@@ -356,7 +376,7 @@ void OpenCityPickerDialog() {
     lv_obj_set_style_pad_all(card, kModalCardPad, LV_PART_MAIN);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(card, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(card, kRowGap, LV_PART_MAIN);
 
     lv_obj_t* dlg_title = lv_label_create(card);
     lv_label_set_text(dlg_title, I18n::T("选择地区"));
@@ -364,7 +384,7 @@ void OpenCityPickerDialog() {
     lv_obj_set_style_text_font(dlg_title, font_main(), LV_PART_MAIN);
     lv_obj_set_style_text_align(dlg_title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_width(dlg_title, LV_PCT(100));
-    lv_obj_set_style_pad_bottom(dlg_title, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(dlg_title, kRoundLayout ? 2 : 8, LV_PART_MAIN);
     lv_obj_remove_flag(dlg_title, LV_OBJ_FLAG_CLICKABLE);
 
     auto make_picker_row = [&](const char* label, lv_obj_t** out_dd) {
@@ -375,8 +395,8 @@ void OpenCityPickerDialog() {
         lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, LV_PART_MAIN);
         lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_style_pad_row(row, 6, LV_PART_MAIN);
-        lv_obj_set_style_pad_bottom(row, 4, LV_PART_MAIN);
+        lv_obj_set_style_pad_row(row, kRoundLayout ? 1 : 6, LV_PART_MAIN);
+        lv_obj_set_style_pad_bottom(row, kRoundLayout ? 0 : 4, LV_PART_MAIN);
 
         lv_obj_t* lbl = lv_label_create(row);
         lv_label_set_text(lbl, label);
@@ -412,7 +432,7 @@ void OpenCityPickerDialog() {
     lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_top(btn_row, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(btn_row, kRoundLayout ? 4 : 12, LV_PART_MAIN);
 
     lv_obj_t* cancel = lv_button_create(btn_row);
     lv_obj_set_size(cancel, kBtnW, kBtnH);
@@ -704,28 +724,35 @@ void BuildOverviewTab(const WeatherDistrictData& data) {
     lv_obj_remove_flag(hero_text, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(hero_text, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(hero_text, 4, LV_PART_MAIN);
+    // 圆屏内容区只有 ~332 宽，图标已经占了 kHeroIconSize + 列间距，文字块
+    // 必须限宽换行，否则地名/风向这类长句会直接把屏幕撑爆。
+    const int32_t hero_text_w = kInnerW - kHeroIconSize - 8;
 
     char loc[128];
     std::snprintf(loc, sizeof(loc), "%s %s %s", data.province.c_str(),
                   data.city.c_str(), data.district.c_str());
-    MakeLabel(hero_text, loc, font_main(), kColorText);
+    lv_obj_t* loc_lbl = MakeLabel(hero_text, loc, font_main(), kColorText);
+    if constexpr (kRoundLayout) lv_obj_set_width(loc_lbl, hero_text_w);
 
     char temp_line[48];
     std::snprintf(temp_line, sizeof(temp_line), "%" PRId32 "°  %s", data.temp,
                   I18n::T(data.text.c_str()));
-    MakeLabel(hero_text, temp_line, font_main(), kColorAccent);
+    lv_obj_t* temp_lbl = MakeLabel(hero_text, temp_line, font_main(), kColorAccent);
+    if constexpr (kRoundLayout) lv_obj_set_width(temp_lbl, hero_text_w);
 
     char feel_line[48];
     std::snprintf(feel_line, sizeof(feel_line), I18n::T("体感 %d°  湿度 %d%%"),
                   static_cast<int>(data.feels_like), static_cast<int>(data.rh));
-    MakeLabel(hero_text, feel_line, font_sub(), kColorSubtle);
+    lv_obj_t* feel_lbl = MakeLabel(hero_text, feel_line, font_sub(), kColorSubtle);
+    if constexpr (kRoundLayout) lv_obj_set_width(feel_lbl, hero_text_w);
 
     char wind_line[64];
     std::snprintf(wind_line, sizeof(wind_line), I18n::T("%s %s  风向角 %d°"),
                   I18n::T(data.wind_dir.c_str()),
                   I18n::T(data.wind_class.c_str()),
                   static_cast<int>(data.wind_angle));
-    MakeLabel(hero_text, wind_line, font_sub(), kColorSubtle);
+    lv_obj_t* wind_lbl = MakeLabel(hero_text, wind_line, font_sub(), kColorSubtle);
+    if constexpr (kRoundLayout) lv_obj_set_width(wind_lbl, hero_text_w);
 
     screen_make_input_passive(hero);
 
@@ -798,7 +825,7 @@ void BuildOverviewTab(const WeatherDistrictData& data) {
         }
     }
 
-    lv_obj_set_style_pad_bottom(s_tab_overview, 24, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(s_tab_overview, kRoundLayout ? 32 : 24, LV_PART_MAIN);
 }
 
 void BuildForecastTab(const WeatherDistrictData& data) {
@@ -850,7 +877,7 @@ void BuildForecastTab(const WeatherDistrictData& data) {
         }
     }
     screen_make_input_passive(fc_grid);
-    lv_obj_set_style_pad_bottom(s_tab_forecast, 24, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(s_tab_forecast, kRoundLayout ? 32 : 24, LV_PART_MAIN);
 }
 
 void BuildIndexTab(const WeatherDistrictData& data) {
@@ -877,7 +904,7 @@ void BuildIndexTab(const WeatherDistrictData& data) {
         CreateIndexCard(idx_box, idx);
     }
     screen_make_input_passive(idx_box);
-    lv_obj_set_style_pad_bottom(s_tab_index, 24, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(s_tab_index, kRoundLayout ? 32 : 24, LV_PART_MAIN);
 }
 
 void BuildHoursTab(const WeatherDistrictData& data) {
@@ -905,7 +932,7 @@ void BuildHoursTab(const WeatherDistrictData& data) {
         CreateHourRow(hour_box, hour);
     }
     screen_make_input_passive(hour_box);
-    lv_obj_set_style_pad_bottom(s_tab_hours, 24, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(s_tab_hours, kRoundLayout ? 32 : 24, LV_PART_MAIN);
 }
 
 void BuildWeatherUi(const WeatherDistrictData& data) {
@@ -1076,54 +1103,101 @@ lv_obj_t* WeatherScreen::Create() {
     lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, LV_PART_MAIN);
     screen_make_input_passive(divider);
 
-    lv_obj_t* back = lv_button_create(top);
-    lv_obj_remove_style_all(back);
-    lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
-    lv_obj_align(back, LV_ALIGN_LEFT_MID, kHeaderSidePad, 0);
-    lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
-                              LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(back, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
-    lv_obj_add_event_cb(back, OnBackClicked, LV_EVENT_CLICKED, nullptr);
-    screen_swipe_back_ignore(back, true);
+    lv_obj_t* back = nullptr;
+    if constexpr (!kRoundLayout) {
+        back = lv_button_create(top);
+        lv_obj_remove_style_all(back);
+        lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
+        lv_obj_align(back, LV_ALIGN_LEFT_MID, kHeaderSidePad, 0);
+        lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
+                                  LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(back, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
+        lv_obj_add_event_cb(back, OnBackClicked, LV_EVENT_CLICKED, nullptr);
+        screen_swipe_back_ignore(back, true);
 
-    lv_obj_t* back_icon = lv_image_create(back);
-    lv_image_set_src(back_icon, "A:ic_app_back.spng");
-    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(back_icon);
+        lv_obj_t* back_icon = lv_image_create(back);
+        lv_image_set_src(back_icon, "A:ic_app_back.spng");
+        lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(back_icon);
+    }
 
     lv_obj_t* title = MakeLabel(top, I18n::T("天气"), font_main(), kColorText);
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, kHeaderSidePad + kBackBtnSize + 12, 0);
 
-    s_status_lbl = MakeLabel(top, "", font_sub(), kColorSubtle);
-    lv_obj_align_to(s_status_lbl, title, LV_ALIGN_OUT_RIGHT_MID, 12, 0);
+    if constexpr (kRoundLayout) {
+        // 圆屏：标题居中；第二行状态 + 地区/刷新。
+        lv_obj_align(title, LV_ALIGN_TOP_MID, 0,
+                    kHeaderTopInset +
+                        (kHeaderRow1H - font_main()->line_height) / 2);
 
-    lv_obj_t* refresh = lv_button_create(top);
-    lv_obj_set_size(refresh, kRefreshBtnW, kHeaderBtnH);
-    lv_obj_align(refresh, LV_ALIGN_RIGHT_MID, -kHeaderSidePad, 0);
-    StyleHeaderBtn(refresh);
-    lv_obj_add_event_cb(refresh, OnRefreshClicked, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t* refresh_lbl = lv_label_create(refresh);
-    lv_label_set_text(refresh_lbl, I18n::T("刷新"));
-    lv_obj_set_style_text_font(refresh_lbl, font_sub(), LV_PART_MAIN);
-    lv_obj_set_style_text_color(refresh_lbl, lv_color_hex(kColorText), LV_PART_MAIN);
-    lv_obj_center(refresh_lbl);
-    lv_obj_remove_flag(refresh_lbl, LV_OBJ_FLAG_CLICKABLE);
+        s_status_lbl = MakeLabel(top, "", font_sub(), kColorSubtle);
+        lv_obj_set_width(s_status_lbl, kPanelW - kHeaderSidePad * 2 - 140);
+        lv_label_set_long_mode(s_status_lbl, LV_LABEL_LONG_DOT);
+        lv_obj_align(s_status_lbl, LV_ALIGN_TOP_LEFT, kHeaderSidePad,
+                    kHeaderTopInset + kHeaderRow1H +
+                        (kHeaderRow2H - font_sub()->line_height) / 2);
 
-    lv_obj_t* region = lv_button_create(top);
-    lv_obj_set_size(region, kRegionBtnW, kHeaderBtnH);
-    lv_obj_align(region, LV_ALIGN_RIGHT_MID,
-                 -(kHeaderSidePad + kRefreshBtnW + kHeaderBtnGap), 0);
-    StyleHeaderBtn(region);
-    lv_obj_add_event_cb(region, OnCityPickerOpenClicked, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t* region_lbl = lv_label_create(region);
-    lv_label_set_text(region_lbl, I18n::T("地区"));
-    lv_obj_set_style_text_font(region_lbl, font_sub(), LV_PART_MAIN);
-    lv_obj_set_style_text_color(region_lbl, lv_color_hex(kColorText), LV_PART_MAIN);
-    lv_obj_center(region_lbl);
-    lv_obj_remove_flag(region_lbl, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t* refresh = lv_button_create(top);
+        lv_obj_set_size(refresh, kRefreshBtnW, kHeaderBtnH);
+        lv_obj_align(refresh, LV_ALIGN_TOP_RIGHT, -kHeaderSidePad,
+                    kHeaderTopInset + kHeaderRow1H +
+                        (kHeaderRow2H - kHeaderBtnH) / 2);
+        StyleHeaderBtn(refresh);
+        lv_obj_add_event_cb(refresh, OnRefreshClicked, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t* refresh_lbl = lv_label_create(refresh);
+        lv_label_set_text(refresh_lbl, I18n::T("刷新"));
+        lv_obj_set_style_text_font(refresh_lbl, font_sub(), LV_PART_MAIN);
+        lv_obj_set_style_text_color(refresh_lbl, lv_color_hex(kColorText), LV_PART_MAIN);
+        lv_obj_center(refresh_lbl);
+        lv_obj_remove_flag(refresh_lbl, LV_OBJ_FLAG_CLICKABLE);
+
+        lv_obj_t* region = lv_button_create(top);
+        lv_obj_set_size(region, kRegionBtnW, kHeaderBtnH);
+        lv_obj_align(region, LV_ALIGN_TOP_RIGHT,
+                    -(kHeaderSidePad + kRefreshBtnW + kHeaderBtnGap),
+                    kHeaderTopInset + kHeaderRow1H +
+                        (kHeaderRow2H - kHeaderBtnH) / 2);
+        StyleHeaderBtn(region);
+        lv_obj_add_event_cb(region, OnCityPickerOpenClicked, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t* region_lbl = lv_label_create(region);
+        lv_label_set_text(region_lbl, I18n::T("地区"));
+        lv_obj_set_style_text_font(region_lbl, font_sub(), LV_PART_MAIN);
+        lv_obj_set_style_text_color(region_lbl, lv_color_hex(kColorText), LV_PART_MAIN);
+        lv_obj_center(region_lbl);
+        lv_obj_remove_flag(region_lbl, LV_OBJ_FLAG_CLICKABLE);
+    } else {
+        lv_obj_align(title, LV_ALIGN_LEFT_MID, kHeaderSidePad + kBackBtnSize + 12, 0);
+
+        s_status_lbl = MakeLabel(top, "", font_sub(), kColorSubtle);
+        lv_obj_align_to(s_status_lbl, title, LV_ALIGN_OUT_RIGHT_MID, 12, 0);
+
+        lv_obj_t* refresh = lv_button_create(top);
+        lv_obj_set_size(refresh, kRefreshBtnW, kHeaderBtnH);
+        lv_obj_align(refresh, LV_ALIGN_RIGHT_MID, -kHeaderSidePad, 0);
+        StyleHeaderBtn(refresh);
+        lv_obj_add_event_cb(refresh, OnRefreshClicked, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t* refresh_lbl = lv_label_create(refresh);
+        lv_label_set_text(refresh_lbl, I18n::T("刷新"));
+        lv_obj_set_style_text_font(refresh_lbl, font_sub(), LV_PART_MAIN);
+        lv_obj_set_style_text_color(refresh_lbl, lv_color_hex(kColorText), LV_PART_MAIN);
+        lv_obj_center(refresh_lbl);
+        lv_obj_remove_flag(refresh_lbl, LV_OBJ_FLAG_CLICKABLE);
+
+        lv_obj_t* region = lv_button_create(top);
+        lv_obj_set_size(region, kRegionBtnW, kHeaderBtnH);
+        lv_obj_align(region, LV_ALIGN_RIGHT_MID,
+                     -(kHeaderSidePad + kRefreshBtnW + kHeaderBtnGap), 0);
+        StyleHeaderBtn(region);
+        lv_obj_add_event_cb(region, OnCityPickerOpenClicked, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t* region_lbl = lv_label_create(region);
+        lv_label_set_text(region_lbl, I18n::T("地区"));
+        lv_obj_set_style_text_font(region_lbl, font_sub(), LV_PART_MAIN);
+        lv_obj_set_style_text_color(region_lbl, lv_color_hex(kColorText), LV_PART_MAIN);
+        lv_obj_center(region_lbl);
+        lv_obj_remove_flag(region_lbl, LV_OBJ_FLAG_CLICKABLE);
+    }
 
     const std::string saved_id = LoadSavedDistrictId();
     WeatherService::Instance().SetDistrictId(saved_id);

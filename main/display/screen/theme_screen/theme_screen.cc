@@ -1,4 +1,5 @@
 #include "theme_screen.h"
+#include "config.h"
 #include "i18n.h"
 
 #include <algorithm>
@@ -19,10 +20,31 @@ namespace {
 
 constexpr const char* TAG = "ThemeScreen";
 
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+// 360 圆屏：顶/底安全边距 ≥28，卡片网格居中避免圆弧裁切。
+constexpr bool kRoundLayout = true;
+constexpr int kPanelSize   = DISPLAY_WIDTH;
+constexpr int kHeaderH     = 68;
+constexpr int kPad         = 28;
+constexpr int kBackBtnSize = 34;
+constexpr int kHintBottomMargin = 28;
+
+// 4 个主题、2 列 2 行；卡片压到 110，保证两行 + 底部提示都留在安全区内。
+constexpr int kCardSize     = 110;
+constexpr int kCardColGap   = 18;
+constexpr int kCardRowGap   = 10;
+constexpr int kCardRadius   = 22;
+constexpr int kCardBorder   = 3;   // 选中描边宽度；未选中用透明边框占位保持对齐
+constexpr int kCardLabelH   = 16;
+constexpr int kCardLabelPad = 4;
+constexpr int kGridCols     = 2;
+#else
+constexpr bool kRoundLayout = false;
 constexpr int kPanelSize   = 720;
 constexpr int kHeaderH     = 90;
 constexpr int kPad         = 16;
 constexpr int kBackBtnSize = 72;
+constexpr int kHintBottomMargin = 20;
 
 // 预览卡片尺寸：与 home_screen 上的 app cell 同尺寸 + 同圆角，让用户一眼
 // 看出"这就是主页磁贴的样子"。
@@ -38,6 +60,7 @@ constexpr int kCardBorder   = 3;   // 选中描边宽度；未选中用透明边
 constexpr int kCardLabelH   = 36;
 constexpr int kCardLabelPad = 12;
 constexpr int kGridCols     = 2;
+#endif
 
 constexpr uint32_t kColorBg            = 0x000000;
 constexpr uint32_t kColorText          = 0xFFFFFF;
@@ -163,7 +186,8 @@ void BuildHeader(lv_obj_t* parent) {
                             Sel(LV_PART_MAIN, LV_STATE_PRESSED));
     lv_obj_set_style_radius(back_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(back_btn, 0, LV_PART_MAIN);
-    lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, kPad + 8, kPad + 8);
+    lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, kPad + (kRoundLayout ? 16 : 8),
+                kPad + (kRoundLayout ? 4 : 8));
     screen_swipe_back_ignore(back_btn, true);
 
     lv_obj_t* back_icon = lv_image_create(back_btn);
@@ -176,8 +200,10 @@ void BuildHeader(lv_obj_t* parent) {
     lv_obj_t* title = lv_label_create(parent);
     lv_label_set_text(title, I18n::T("主题"));
     lv_obj_set_style_text_color(title, lv_color_hex(kColorText), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, kPad + 20);
+    lv_obj_set_style_text_font(
+        title, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+        LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, kPad + (kRoundLayout ? 8 : 20));
     lv_obj_remove_flag(title, LV_OBJ_FLAG_CLICKABLE);
 }
 
@@ -189,7 +215,7 @@ void BuildHeader(lv_obj_t* parent) {
 // （只占一行，水平居中）。
 void BuildContent(lv_obj_t* parent) {
     constexpr int kCellH = kCardSize + kCardLabelH + kCardLabelPad;
-    constexpr int kHintReservedH = 60;  // 底部提示占用的高度（含余量）
+    const int kHintReservedH = kRoundLayout ? 56 : 60;  // 底部提示占用的高度（含余量）
 
     const int cols = std::min(kGridCols, ThemeManager::kThemeCount);
     const int rows = (ThemeManager::kThemeCount + cols - 1) / cols;
@@ -222,7 +248,14 @@ void BuildContent(lv_obj_t* parent) {
     lv_label_set_text(hint, I18n::T("切换后将立即应用，并返回主页查看新图标"));
     lv_obj_set_style_text_color(hint, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
+    if (kRoundLayout) {
+        lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(hint, kPanelSize - 80);
+        lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -kHintBottomMargin);
+    } else {
+        lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
+    }
     lv_obj_remove_flag(hint, LV_OBJ_FLAG_CLICKABLE);
 }
 
@@ -270,10 +303,10 @@ void OpenConfirmDialog(int theme_id) {
     }
     s_dlg.target_theme = theme_id;
 
-    constexpr int kCardW = 480;
-    constexpr int kCardH = 280;
-    constexpr int kBtnW  = 200;
-    constexpr int kBtnH  = 80;
+    const int kCardW = kRoundLayout ? 280 : 480;
+    const int kCardH = kRoundLayout ? 200 : 280;
+    const int kBtnW  = kRoundLayout ? 110 : 200;
+    const int kBtnH  = kRoundLayout ? 44 : 80;
 
     // 全屏遮罩 —— FLOATING 让它脱离父屏布局（即便父屏后续接上 flex）
     lv_obj_t* mask = lv_obj_create(s_ui.screen);
@@ -297,7 +330,7 @@ void OpenConfirmDialog(int theme_id) {
     lv_obj_set_style_bg_color(card, lv_color_hex(kColorDialogBg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 24, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 24, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, kRoundLayout ? 16 : 24, LV_PART_MAIN);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     // card 必须 clickable —— 否则点中 card 的事件会冒泡到 mask 触发关闭
     lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
@@ -307,7 +340,9 @@ void OpenConfirmDialog(int theme_id) {
     lv_obj_t* title = lv_label_create(card);
     lv_label_set_text(title, title_buf);
     lv_obj_set_style_text_color(title, lv_color_hex(kColorText), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(
+        title, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+        LV_PART_MAIN);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_remove_flag(title, LV_OBJ_FLAG_CLICKABLE);
 
@@ -331,7 +366,9 @@ void OpenConfirmDialog(int theme_id) {
         lv_obj_t* lbl = lv_label_create(cancel);
         lv_label_set_text(lbl, I18n::T("取消"));
         lv_obj_set_style_text_color(lbl, lv_color_hex(kColorText), LV_PART_MAIN);
-        lv_obj_set_style_text_font(lbl, &font_puhui_30_4, LV_PART_MAIN);
+        lv_obj_set_style_text_font(
+            lbl, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+            LV_PART_MAIN);
         lv_obj_center(lbl);
         lv_obj_remove_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
     }
@@ -348,7 +385,9 @@ void OpenConfirmDialog(int theme_id) {
         lv_obj_t* lbl = lv_label_create(ok);
         lv_label_set_text(lbl, I18n::T("切换"));
         lv_obj_set_style_text_color(lbl, lv_color_hex(kColorText), LV_PART_MAIN);
-        lv_obj_set_style_text_font(lbl, &font_puhui_30_4, LV_PART_MAIN);
+        lv_obj_set_style_text_font(
+            lbl, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
+            LV_PART_MAIN);
         lv_obj_center(lbl);
         lv_obj_remove_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
     }
