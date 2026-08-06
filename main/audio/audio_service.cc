@@ -33,6 +33,9 @@ AudioService::~AudioService() {
 
 
 void AudioService::Initialize(AudioCodec* codec) {
+    if (codec_ != nullptr) {
+        return;
+    }
     codec_ = codec;
     // codec_->Start() 推迟到 Start()：OTA/HTTPS 期间避免 I2S 与 modem 并发拉高功耗。
 
@@ -77,6 +80,9 @@ void AudioService::Initialize(AudioCodec* codec) {
 }
 
 void AudioService::Start() {
+    if (audio_output_task_handle_ != nullptr) {
+        return;
+    }
     if (codec_ != nullptr) {
         codec_->Start();
     }
@@ -611,6 +617,15 @@ void AudioService::SetCallbacks(AudioServiceCallbacks& callbacks) {
 }
 
 void AudioService::PlaySound(const std::string_view& ogg) {
+    // VoCat 等板会推迟 Initialize；配网 Alert 可能早于音频就绪，必须防空。
+    if (codec_ == nullptr || audio_power_timer_ == nullptr) {
+        ESP_LOGW(TAG, "PlaySound skipped: audio not initialized");
+        return;
+    }
+    // 配网等早期路径：已 Initialize 但尚未 Start，按需拉起输出任务。
+    if (audio_output_task_handle_ == nullptr) {
+        Start();
+    }
     if (!codec_->output_enabled()) {
         esp_timer_stop(audio_power_timer_);
         esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);

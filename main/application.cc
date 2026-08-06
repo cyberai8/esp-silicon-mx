@@ -484,7 +484,12 @@ void Application::Start() {
 
     Display* display = board.GetDisplay();
 
-#if !CONFIG_BOARD_TYPE_ESP_VOCAT
+#if CONFIG_BOARD_TYPE_ESP_VOCAT
+    // VoCat 原先把音频推迟到 MQTT 之后；但无 WiFi 时 StartNetwork→配网会
+    // Alert+PlaySound 并永久阻塞，必须先 Initialize，否则 codec_ 空指针崩溃。
+    // Initialize 不启动 I2S（Start 才开），OTA/联网阶段仍可保持低功耗。
+    audio_service_.Initialize(board.GetAudioCodec());
+#else
     // Print board name/version info
     display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
 
@@ -492,7 +497,7 @@ void Application::Start() {
     auto codec = board.GetAudioCodec();
     audio_service_.Initialize(codec);
 #endif
-    // VoCat：板级构造时已拉起 BootScreen；音频仍推迟到 MQTT 之后。
+    // VoCat：板级构造时已拉起 BootScreen；AudioService::Start 仍推迟到 MQTT 之后。
 
     AudioServiceCallbacks callbacks;
     callbacks.on_send_queue_available = [this]() {
