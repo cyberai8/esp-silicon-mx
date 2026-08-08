@@ -249,9 +249,10 @@ public:
 
 class EspVocat : public DualNetworkBoard {
 public:
-    // default_net_type=1 → 4G 优先，与 network_screen / metalio-claw-4 一致。
+    // default_net_type=0 → 首次烧录 / NVS 无记录时默认 WiFi（便于配网）；
+    // 用户之后可在网络设置里切到 4G 并写入 NVS。
     EspVocat()
-        : DualNetworkBoard(ML307_TX_PIN, ML307_RX_PIN, GPIO_NUM_NC, 1),
+        : DualNetworkBoard(ML307_TX_PIN, ML307_RX_PIN, GPIO_NUM_NC, 0),
           boot_button_(BOOT_BUTTON_GPIO),
           head_touch_button_(HEAD_TOUCH_GPIO, HEAD_TOUCH_ACTIVE_LEVEL != 0) {
         ESP_LOGI(TAG, "Boot ESP-VoCat");

@@ -11,6 +11,7 @@
 #include <cstring>
 #include <vector>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -18,6 +19,7 @@
 
 #include "application.h"
 #include "audio_codec.h"
+#include "audio_service.h"
 #include "board.h"
 #include "home_screen/home_screen.h"
 #include "screen_util.h"
@@ -48,37 +50,37 @@ constexpr const char* TAG = "RadioScreen";
 constexpr int kRadioSampleRate = 16000;
 
 #if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
-// 360 圆屏：下面这套数值是按 0..360 从上到下顺序算出来的，每一段都紧跟
-// 上一段的下边界 + 一个小 gap，避免旧版本「音量条被控制行盖住」的重叠。
-//   list 按钮行        y 28-60
-//   title              y 56-80（居中，无返回箭头）
-//   status             y 84-106
-//   visualizer         y 112-200 (88 高)
-//   volume label       y 206-228
-//   control row        y 234-286 (52 高)
-//   hint (底部)         距底 32px 安全边距
+// 360 圆屏安全区：靠近上下边缘弦宽只有 ~200，角上控件/底部长文会被裁切。
+// 布局全部收进中部 ~280 宽、上下各留 ~48 的可视圆内。
+//   list                顶中偏右，inset 72（避免贴圆边）
+//   title / status      顶中
+//   visualizer          中部略压缩
+//   volume / controls
+//   hint                控件下方短文，宽 220
 constexpr bool kRoundLayout = true;
 constexpr auto kPanelSize = DISPLAY_WIDTH;
-constexpr int32_t kTitleY = 56;
-constexpr int32_t kStatusY = 84;
-constexpr int32_t kVizY = 112;
-constexpr int32_t kVizW = 280;
-constexpr int32_t kVizH = 88;
-constexpr int32_t kCtrlRowY = 234;
-constexpr int32_t kCtrlRowWidth = 280;
-constexpr int32_t kCtrlRowHeight = 52;
+constexpr int32_t kTitleY = 48;
+constexpr int32_t kStatusY = 74;
+constexpr int32_t kVizY = 100;
+constexpr int32_t kVizW = 260;
+constexpr int32_t kVizH = 72;
+constexpr int32_t kCtrlRowY = 208;
+constexpr int32_t kCtrlRowWidth = 260;
+constexpr int32_t kCtrlRowHeight = 48;
 constexpr int32_t kCtrlSideBtnSize = 34;
 constexpr int32_t kCtrlPlayBtnSize = 44;
-constexpr int32_t kHintBottomMargin = 32;
+constexpr int32_t kHintY = 268;
+constexpr int32_t kHintWidth = 220;
+constexpr int32_t kHintBottomMargin = 48;  // 方屏兜底；圆屏用 kHintY
 constexpr int32_t kBackBtnSize = 32;
-constexpr int32_t kBackBtnX = 36;
-constexpr int32_t kBackBtnY = 28;
-constexpr int32_t kListBtnW = 64;
-constexpr int32_t kListBtnH = 32;
+constexpr int32_t kBackBtnX = 72;
+constexpr int32_t kBackBtnY = 40;
+constexpr int32_t kListBtnW = 56;
+constexpr int32_t kListBtnH = 28;
 constexpr int32_t kListHeaderH = 56;
 constexpr int32_t kListRowH = 48;
-constexpr int kBarGap = 8;
-constexpr int kBarMinH = 8;
+constexpr int kBarGap = 6;
+constexpr int kBarMinH = 6;
 #else
 constexpr bool kRoundLayout = false;
 constexpr int32_t kPanelSize = 720;
@@ -92,6 +94,8 @@ constexpr int32_t kCtrlRowWidth = 520;
 constexpr int32_t kCtrlRowHeight = 120;
 constexpr int32_t kCtrlSideBtnSize = 80;
 constexpr int32_t kCtrlPlayBtnSize = 112;
+constexpr int32_t kHintY = 0;
+constexpr int32_t kHintWidth = 0;
 constexpr int32_t kHintBottomMargin = 16;
 constexpr int32_t kBackBtnSize = 72;
 constexpr int32_t kBackBtnX = 32;
@@ -153,6 +157,7 @@ struct RadioUi {
 
 RadioUi s_ui;
 lv_obj_t* s_bound_scr = nullptr;  // 仅当前前台页可改 UI / 响应 unload
+lv_timer_t* s_deferred_start_timer = nullptr;
 std::atomic<int> s_station_index{kDefaultRadioStationIndex};
 
 enum class LifeState : uint8_t {
@@ -201,8 +206,13 @@ void UpdateVolumeLabel();
 void UpdateTitleLabel();
 void RequestPlayerStop();
 void RequestSessionStart();
+void ScheduleDeferredSessionStart();
+void CancelDeferredSessionStart();
 void RequestSessionStop(bool allow_restart);
 void SessionStartWorker(void* arg);
+bool SpawnSessionStartWorker();
+void RadioPlayTask(void* arg);
+bool SpawnRadioPlayTask(uint32_t gen);
 void SessionStopWorker(void* arg);
 void KickSessionStopWorker();
 void StartSpectrumAnalyzer();
@@ -221,6 +231,125 @@ const RadioStation& CurrentStation() {
         idx = kDefaultRadioStationIndex;
     }
     return kRadioStations[static_cast<size_t>(idx)];
+}
+
+// 唤醒词 AFE 占用大量内部 DRAM；在 radio_on worker 内释放。
+// 注意：不要走 StopSystemAudioForStressTest→DismissAlert→SetEmotion，
+// 否则与电台首帧 QSPI flush 抢 LVGL，易 spi transmit failed / wait_for_flushing 卡死。
+void FreeInternalRamForRadioTasks() {
+    auto& app = Application::GetInstance();
+    auto& audio = app.GetAudioService();
+    audio.EnableAudioTesting(false);
+    audio.EnableVoiceProcessing(false);
+    audio.EnableWakeWordDetection(false);
+    audio.ResetDecoder();
+    for (int i = 0; i < 10 && !audio.IsIdle(); ++i) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    audio.ReleaseWakeWordDetection();
+    ESP_LOGI(TAG,
+             "radio prep heap: internal free=%u largest=%u spiram free=%u",
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(
+                 heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+}
+
+// radio_on / radio_hls：内部 DRAM 紧张或碎片时用可复用 PSRAM 静态栈。
+StackType_t* s_radio_on_stack = nullptr;
+StaticTask_t* s_radio_on_tcb = nullptr;
+StackType_t* s_radio_hls_stack = nullptr;
+StaticTask_t* s_radio_hls_tcb = nullptr;
+constexpr uint32_t kRadioOnStack = 4096;
+constexpr uint32_t kRadioHlsStack = 8192;
+
+bool CreateRadioTask(TaskFunction_t fn, const char* name, uint32_t stack_bytes,
+                     void* arg, UBaseType_t prio, TaskHandle_t* out_handle) {
+    if (xTaskCreate(fn, name, stack_bytes, arg, prio, out_handle) == pdPASS) {
+        return true;
+    }
+
+    const size_t largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    ESP_LOGW(TAG,
+             "%s create failed stack=%u internal free=%u largest=%u",
+             name, static_cast<unsigned>(stack_bytes),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(largest));
+
+    // 碎片：尝试压到仍够用的内部连续块（留 256B 余量）。
+    if (largest > 4096 + 256) {
+        const uint32_t shrink = static_cast<uint32_t>(
+            std::min<size_t>(stack_bytes - 1, largest - 256));
+        if (shrink >= 4096 &&
+            xTaskCreate(fn, name, shrink, arg, prio, out_handle) == pdPASS) {
+            ESP_LOGW(TAG, "%s started with shrunk stack=%u", name,
+                     static_cast<unsigned>(shrink));
+            return true;
+        }
+    }
+
+    if (out_handle != nullptr) {
+        *out_handle = nullptr;
+    }
+    return false;
+}
+
+bool SpawnStaticSpiramTask(TaskFunction_t fn, const char* name,
+                           uint32_t stack_bytes, void* arg, UBaseType_t prio,
+                           StackType_t** stack_slot, StaticTask_t** tcb_slot,
+                           TaskHandle_t* out_handle) {
+    if (*stack_slot == nullptr) {
+        *stack_slot = static_cast<StackType_t*>(
+            heap_caps_malloc(stack_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+    if (*tcb_slot == nullptr) {
+        *tcb_slot = static_cast<StaticTask_t*>(heap_caps_malloc(
+            sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+    if (*stack_slot == nullptr || *tcb_slot == nullptr) {
+        ESP_LOGE(TAG, "%s SPIRAM stack alloc failed", name);
+        if (out_handle != nullptr) {
+            *out_handle = nullptr;
+        }
+        return false;
+    }
+    TaskHandle_t handle = xTaskCreateStatic(fn, name, stack_bytes, arg, prio,
+                                            *stack_slot, *tcb_slot);
+    if (handle == nullptr) {
+        ESP_LOGE(TAG, "%s static create failed", name);
+        if (out_handle != nullptr) {
+            *out_handle = nullptr;
+        }
+        return false;
+    }
+    if (out_handle != nullptr) {
+        *out_handle = handle;
+    }
+    ESP_LOGW(TAG, "%s started with SPIRAM static stack=%u", name,
+             static_cast<unsigned>(stack_bytes));
+    return true;
+}
+
+bool SpawnSessionStartWorker() {
+    if (CreateRadioTask(SessionStartWorker, "radio_on", kRadioOnStack, nullptr,
+                        5, nullptr)) {
+        return true;
+    }
+    return SpawnStaticSpiramTask(SessionStartWorker, "radio_on", kRadioOnStack,
+                                 nullptr, 5, &s_radio_on_stack, &s_radio_on_tcb,
+                                 nullptr);
+}
+
+bool SpawnRadioPlayTask(uint32_t gen) {
+    void* arg = reinterpret_cast<void*>(static_cast<uintptr_t>(gen));
+    if (CreateRadioTask(RadioPlayTask, "radio_hls", kRadioHlsStack, arg, 5,
+                        &s_play_task)) {
+        return true;
+    }
+    return SpawnStaticSpiramTask(RadioPlayTask, "radio_hls", kRadioHlsStack, arg,
+                                 5, &s_radio_hls_stack, &s_radio_hls_tcb,
+                                 &s_play_task);
 }
 
 const char* CurrentStreamUrl() {
@@ -505,6 +634,12 @@ void WaitTaskGone(TaskHandle_t* slot, int max_ms) {
 }
 
 void StartSpectrumAnalyzer() {
+    if constexpr (kRoundLayout) {
+        // VoCat QSPI：FFT + 30FPS 柱状图易触发 spi transmit failed，
+        // LVGL 卡在 wait_for_flushing 进而 IDLE1 WDT。圆屏跳过频谱。
+        ESP_LOGI(TAG, "spectrum disabled on round LCD (QSPI bandwidth)");
+        return;
+    }
     if (s_spectrum_task != nullptr) {
         return;
     }
@@ -600,7 +735,7 @@ void ForcePoolRateCvt16k(esp_gmf_pool_handle_t pool) {
 #endif
 }
 
-void ApplyRateCvt16k(esp_asp_handle_t player) {
+void ApplyRateCvtToCodec(esp_asp_handle_t player) {
 #ifdef CONFIG_ESP_AUDIO_SIMPLE_PLAYER_RESAMPLE_EN
     esp_gmf_pipeline_handle_t pipe = nullptr;
     esp_gmf_element_handle_t rate_el = nullptr;
@@ -611,8 +746,9 @@ void ApplyRateCvt16k(esp_asp_handle_t player) {
     if (esp_gmf_pipeline_get_el_by_name(pipe, "aud_rate_cvt", &rate_el) ==
             ESP_GMF_ERR_OK &&
         rate_el != nullptr) {
-        esp_gmf_rate_cvt_set_dest_rate(rate_el,
-                                       static_cast<uint32_t>(kRadioSampleRate));
+        const int dest = (s_codec != nullptr) ? s_codec->output_sample_rate()
+                                              : kRadioSampleRate;
+        esp_gmf_rate_cvt_set_dest_rate(rate_el, static_cast<uint32_t>(dest));
     }
 #else
     (void)player;
@@ -659,6 +795,8 @@ int RadioOutCallback(uint8_t* data, int data_size, void* ctx) {
         SetStatus(StatusKind::Playing);
         SetPlayIcon(true);
     }
+    // 直接写 codec 时刷新 AudioService 活跃时间，避免电源定时器关输出。
+    Application::GetInstance().GetAudioService().NotifyExternalPlayback();
     codec->OutputData(s_pcm_buf);
     return 0;
 }
@@ -666,7 +804,7 @@ int RadioOutCallback(uint8_t* data, int data_size, void* ctx) {
 extern "C" int RadioPrevCallback(esp_asp_handle_t* handle, void* ctx) {
     (void)ctx;
 #ifdef CONFIG_ESP_AUDIO_SIMPLE_PLAYER_RESAMPLE_EN
-    ApplyRateCvt16k(reinterpret_cast<esp_asp_handle_t>(handle));
+    ApplyRateCvtToCodec(reinterpret_cast<esp_asp_handle_t>(handle));
 #else
     (void)handle;
 #endif
@@ -815,9 +953,11 @@ int HlsMediaTypeCallback(esp_hls_file_seg_info_t* info, void* ctx) {
     music_info.channels = 2;
     music_info.bits = 16;
     esp_gmf_audio_dec_reconfig_by_sound_info(dec_el, &music_info);
-    ApplyRateCvt16k(player);
+    ApplyRateCvtToCodec(player);
+    const int dest = (s_codec != nullptr) ? s_codec->output_sample_rate()
+                                          : kRadioSampleRate;
     ESP_LOGI(TAG, "HLS format %s -> out %d Hz", ESP_FOURCC_TO_STR(info->format),
-             kRadioSampleRate);
+             dest);
     return 0;
 }
 
@@ -881,6 +1021,7 @@ bool CreatePlayerWithHls() {
     }
 
     esp_audio_simple_player_set_event(s_player, RadioEventCallback, nullptr);
+    Application::GetInstance().GetAudioService().NotifyExternalPlayback();
     s_codec->EnableOutput(true);
     return true;
 }
@@ -1035,9 +1176,9 @@ void SessionStopWorker(void* /*arg*/) {
 
     ESP_LOGI(TAG, "session stop done restart=%d", restart ? 1 : 0);
     if (restart) {
-        if (xTaskCreate(SessionStartWorker, "radio_on", 6144, nullptr, 5,
-                        nullptr) != pdPASS) {
+        if (!SpawnSessionStartWorker()) {
             s_life.store(LifeState::Idle, std::memory_order_release);
+            Application::GetInstance().RestoreSystemAudioAfterStressTest();
             ESP_LOGE(TAG, "restart start worker failed");
         }
     }
@@ -1047,10 +1188,17 @@ void SessionStopWorker(void* /*arg*/) {
 void SessionStartWorker(void* /*arg*/) {
     ESP_LOGI(TAG, "session start begin");
 
+    // 等首帧 QSPI flush 结束，再释放唤醒词 / 建播放任务。
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    // 在 worker 内释放唤醒词，腾出内部 DRAM 给 radio_hls；不堵 LVGL。
+    FreeInternalRamForRadioTasks();
+
     // 已被 Stop 抢占：直接退出，由 StopWorker 负责收尾
     if (s_life.load(std::memory_order_relaxed) == LifeState::Stopping ||
         (s_shutdown.load(std::memory_order_relaxed) &&
          s_life.load(std::memory_order_relaxed) != LifeState::Starting)) {
+        Application::GetInstance().RestoreSystemAudioAfterStressTest();
         ESP_LOGW(TAG, "session start aborted (stopping)");
         vTaskDelete(nullptr);
         return;
@@ -1059,6 +1207,7 @@ void SessionStartWorker(void* /*arg*/) {
     s_codec = Board::GetInstance().GetAudioCodec();
     if (s_codec == nullptr) {
         SetStatus(StatusKind::Failed);
+        Application::GetInstance().RestoreSystemAudioAfterStressTest();
         EnsureLifeMutex();
         if (s_life_mu != nullptr &&
             xSemaphoreTake(s_life_mu, pdMS_TO_TICKS(1000)) == pdTRUE) {
@@ -1072,8 +1221,6 @@ void SessionStartWorker(void* /*arg*/) {
         vTaskDelete(nullptr);
         return;
     }
-
-    Application::GetInstance().StopSystemAudioForStressTest();
 
     if (s_shutdown.load(std::memory_order_relaxed) ||
         s_life.load(std::memory_order_relaxed) == LifeState::Stopping) {
@@ -1125,9 +1272,7 @@ void SessionStartWorker(void* /*arg*/) {
         }
     }
 
-    if (xTaskCreate(RadioPlayTask, "radio_hls", 8192,
-                    reinterpret_cast<void*>(static_cast<uintptr_t>(gen)), 5,
-                    &s_play_task) != pdPASS) {
+    if (!SpawnRadioPlayTask(gen)) {
         s_play_task = nullptr;
         s_want_play.store(false, std::memory_order_relaxed);
         StopSpectrumAnalyzer();
@@ -1173,6 +1318,37 @@ void SessionStartWorker(void* /*arg*/) {
 
     ESP_LOGI(TAG, "session start done gen=%u", gen);
     vTaskDelete(nullptr);
+}
+
+void CancelDeferredSessionStart() {
+    if (s_deferred_start_timer != nullptr) {
+        lv_timer_delete(s_deferred_start_timer);
+        s_deferred_start_timer = nullptr;
+    }
+}
+
+void DeferredSessionStartCb(lv_timer_t* t) {
+    // repeat_count=1 时由 LVGL 自动删除 timer，这里只清句柄。
+    if (t == s_deferred_start_timer) {
+        s_deferred_start_timer = nullptr;
+    }
+    if (!s_screen_active.load(std::memory_order_relaxed)) {
+        return;
+    }
+    RequestSessionStart();
+}
+
+void ScheduleDeferredSessionStart() {
+    CancelDeferredSessionStart();
+    // 圆屏 QSPI：LOAD 当帧立刻抢音频/唤醒词，易与首帧 flush 叠成 SPI queue 满、
+    // LVGL 卡在 wait_for_flushing。延后一帧多再开播。
+    s_deferred_start_timer =
+        lv_timer_create(DeferredSessionStartCb, kRoundLayout ? 500 : 50, nullptr);
+    if (s_deferred_start_timer != nullptr) {
+        lv_timer_set_repeat_count(s_deferred_start_timer, 1);
+    } else {
+        RequestSessionStart();
+    }
 }
 
 void RequestSessionStart() {
@@ -1229,8 +1405,8 @@ void RequestSessionStart() {
     s_life.store(LifeState::Starting, std::memory_order_release);
     xSemaphoreGive(s_life_mu);
 
-    if (xTaskCreate(SessionStartWorker, "radio_on", 6144, nullptr, 5,
-                    nullptr) != pdPASS) {
+    // 不在此（常为 LVGL 线程）同步 Release 唤醒词；交给 radio_on worker。
+    if (!SpawnSessionStartWorker()) {
         s_life.store(LifeState::Idle, std::memory_order_release);
         SetStatusDirect(StatusKind::Failed);
         ESP_LOGE(TAG, "session start worker create failed");
@@ -1406,6 +1582,7 @@ void OnScreenUnloaded(lv_event_t* e) {
     if (target == nullptr || target != s_bound_scr) {
         return;
     }
+    CancelDeferredSessionStart();
     s_bound_scr = nullptr;
     s_screen_active.store(false, std::memory_order_relaxed);
     if (s_ui.viz_timer != nullptr) {
@@ -1500,7 +1677,7 @@ void BuildBackButton(lv_obj_t* scr) {
             nullptr);
     }
 
-    // 右上角「列表」入口
+    // 「列表」入口：圆屏内收，避免贴圆边被裁切
     lv_obj_t* list_btn = lv_button_create(scr);
     lv_obj_remove_style_all(list_btn);
     lv_obj_set_size(list_btn, kListBtnW, kListBtnH);
@@ -1511,8 +1688,11 @@ void BuildBackButton(lv_obj_t* scr) {
                             Sel(LV_PART_MAIN, LV_STATE_PRESSED));
     lv_obj_set_style_radius(list_btn, kRoundLayout ? 12 : 20, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(list_btn, 0, LV_PART_MAIN);
-    lv_obj_align(list_btn, LV_ALIGN_TOP_RIGHT, kRoundLayout ? -kBackBtnX : -24,
-                kBackBtnY);
+    if constexpr (kRoundLayout) {
+        lv_obj_align(list_btn, LV_ALIGN_TOP_RIGHT, -kBackBtnX, kBackBtnY);
+    } else {
+        lv_obj_align(list_btn, LV_ALIGN_TOP_RIGHT, -24, kBackBtnY);
+    }
     screen_swipe_back_ignore(list_btn, true);
 
     lv_obj_t* list_lbl = lv_label_create(list_btn);
@@ -1537,7 +1717,7 @@ void BuildTitle(lv_obj_t* scr) {
     lv_obj_set_style_text_align(s_ui.lbl_title, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
     lv_label_set_long_mode(s_ui.lbl_title, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_ui.lbl_title, kPanelSize - (kRoundLayout ? 140 : 220));
+    lv_obj_set_width(s_ui.lbl_title, kPanelSize - (kRoundLayout ? 160 : 220));
     lv_obj_align(s_ui.lbl_title, LV_ALIGN_TOP_MID, 0, kTitleY);
     // 点标题也可打开台表
     lv_obj_add_flag(s_ui.lbl_title, LV_OBJ_FLAG_CLICKABLE);
@@ -1553,7 +1733,7 @@ void BuildTitle(lv_obj_t* scr) {
                                 LV_PART_MAIN);
     lv_obj_set_style_text_align(s_ui.lbl_status, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
-    lv_obj_set_width(s_ui.lbl_status, kPanelSize - 80);
+    lv_obj_set_width(s_ui.lbl_status, kPanelSize - (kRoundLayout ? 100 : 80));
     lv_obj_align(s_ui.lbl_status, LV_ALIGN_TOP_MID, 0, kStatusY);
     screen_make_input_passive(s_ui.lbl_status);
 }
@@ -1700,7 +1880,10 @@ void BuildVisualizer(lv_obj_t* scr) {
         s_ui.bars[i] = bar;
     }
 
-    s_ui.viz_timer = lv_timer_create(VizTimerCb, 33, nullptr);
+    // 圆屏不做 30FPS 柱状图刷新，避免与 QSPI LCD flush 争用。
+    if constexpr (!kRoundLayout) {
+        s_ui.viz_timer = lv_timer_create(VizTimerCb, 33, nullptr);
+    }
 }
 
 void BuildVolumeLabel(lv_obj_t* scr) {
@@ -1711,9 +1894,9 @@ void BuildVolumeLabel(lv_obj_t* scr) {
                                 LV_PART_MAIN);
     lv_obj_set_style_text_align(s_ui.lbl_volume, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
-    lv_obj_set_width(s_ui.lbl_volume, kPanelSize - 80);
+    lv_obj_set_width(s_ui.lbl_volume, kPanelSize - (kRoundLayout ? 100 : 80));
     lv_obj_align(s_ui.lbl_volume, LV_ALIGN_TOP_MID, 0,
-                kVizY + kVizH + (kRoundLayout ? 6 : 24));
+                kVizY + kVizH + (kRoundLayout ? 4 : 24));
     screen_make_input_passive(s_ui.lbl_volume);
 }
 
@@ -1743,15 +1926,22 @@ void BuildControls(lv_obj_t* scr) {
 
 void BuildUsageHint(lv_obj_t* scr) {
     lv_obj_t* hint = lv_label_create(scr);
-    lv_label_set_text(
-        hint,
-        I18n::T("请勿在 4G 模式下使用电台，非常消耗流量，请在 WiFi 下使用"));
+    // 圆屏弦宽有限：短文案 + 窄宽 + 上移，避免贴底被裁切。
+    if constexpr (kRoundLayout) {
+        lv_label_set_text(hint, I18n::T("建议在 WiFi 下使用，节省流量"));
+        lv_obj_set_width(hint, kHintWidth);
+        lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, kHintY);
+    } else {
+        lv_label_set_text(
+            hint,
+            I18n::T("请勿在 4G 模式下使用电台，非常消耗流量，请在 WiFi 下使用"));
+        lv_obj_set_width(hint, kPanelSize - 64);
+        lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -kHintBottomMargin);
+    }
     lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_color(hint, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(hint, kPanelSize - 64);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -kHintBottomMargin);
     screen_make_input_passive(hint);
 }
 
@@ -1797,7 +1987,7 @@ void RadioScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         ESP_LOGI(TAG, "load: radio_screen");
         SetStatusDirect(StatusKind::Connecting);
         SetPlayIconDirect(true);
-        RequestSessionStart();
+        ScheduleDeferredSessionStart();
         // 若会话其实已在播，把缓存状态刷到 UI（避免一直「连接中」）
         lv_async_call(
             [](void*) {
@@ -1815,6 +2005,7 @@ void RadioScreen::LifecycleCallback(screen_lifecycle_event_t event) {
             nullptr);
     } else {
         ESP_LOGI(TAG, "unload: radio_screen");
+        CancelDeferredSessionStart();
         RequestSessionStop(false);
     }
 }

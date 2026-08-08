@@ -1,5 +1,6 @@
 #include "touch_feed.h"
 
+#include <driver/gpio.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -54,10 +55,36 @@ void LogSnapshotIfChanged(const TouchSnapshot& next) {
 }
 #endif
 
+// CST816S 等控制器：无触摸事件时会休眠，I2C 读会 NACK。
+// 有 INT 脚时只在中断有效时读；无 INT 则保持轮询。
+bool TouchControllerIsAwake() {
+    if (s_handle == nullptr) {
+        return false;
+    }
+    const gpio_num_t int_gpio = s_handle->config.int_gpio_num;
+    if (int_gpio == GPIO_NUM_NC) {
+        return true;
+    }
+    const int level = gpio_get_level(int_gpio);
+    const int active = s_handle->config.levels.interrupt ? 1 : 0;
+    return level == active;
+}
+
 void UpdateSnapshotFromChip() {
     TouchSnapshot next = s_snap;
 
     if (s_handle == nullptr) {
+        return;
+    }
+
+    if (!TouchControllerIsAwake() && !s_snap.pressed) {
+        // 无触摸：保持 released，避免对休眠芯片盲读刷 I2C 错误日志
+        next.pressed = false;
+        if (s_mutex != nullptr &&
+            xSemaphoreTake(s_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            s_snap = next;
+            xSemaphoreGive(s_mutex);
+        }
         return;
     }
 

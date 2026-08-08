@@ -5,7 +5,8 @@
 #include <esp_heap_caps.h>
 #include <sstream>
 
-#define DETECTION_RUNNING_EVENT 1
+#define DETECTION_RUNNING_EVENT (1 << 0)
+#define DETECTION_EXIT_EVENT (1 << 1)
 
 #define TAG "AfeWakeWord"
 
@@ -27,18 +28,36 @@ AfeWakeWord::~AfeWakeWord() {
 }
 
 void AfeWakeWord::ReleaseResources() {
+    // 先请求检测任务自行退出，避免在 fetch_with_delay(portMAX_DELAY) 上强杀后
+    // destroy AFE 死锁（电台等路径在 LVGL 线程调 Release 会直接卡死 UI）。
+    if (event_group_ != nullptr) {
+        xEventGroupClearBits(event_group_, DETECTION_RUNNING_EVENT);
+        xEventGroupSetBits(event_group_, DETECTION_EXIT_EVENT);
+    }
+
+    for (int i = 0; audio_detection_task_ != nullptr && i < 40; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
     if (audio_detection_task_ != nullptr) {
+        ESP_LOGW(TAG, "audio detection task did not exit, force delete");
         vTaskDelete(audio_detection_task_);
         audio_detection_task_ = nullptr;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    } else {
+        // 任务已自行清 handle，再稍等其真正结束，避免与 destroy 竞态
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 
     if (wake_word_encode_task_stack_ != nullptr) {
         heap_caps_free(wake_word_encode_task_stack_);
+        wake_word_encode_task_stack_ = nullptr;
     }
 
     if (wake_word_encode_task_buffer_ != nullptr) {
         heap_caps_free(wake_word_encode_task_buffer_);
+        wake_word_encode_task_buffer_ = nullptr;
     }
+    wake_word_encode_task_ = nullptr;
 
     if (afe_data_ != nullptr) {
         afe_iface_->destroy(afe_data_);
@@ -47,15 +66,17 @@ void AfeWakeWord::ReleaseResources() {
 
     if (audio_detection_task_stack_ != nullptr) {
         heap_caps_free(audio_detection_task_stack_);
+        audio_detection_task_stack_ = nullptr;
     }
 
     if (audio_detection_task_buffer_ != nullptr) {
         heap_caps_free(audio_detection_task_buffer_);
+        audio_detection_task_buffer_ = nullptr;
     }
 
     if (models_ != nullptr) {
         if (owns_model_list_) {
-        esp_srmodel_deinit(models_);
+            esp_srmodel_deinit(models_);
         }
         models_ = nullptr;
     }
@@ -64,6 +85,10 @@ void AfeWakeWord::ReleaseResources() {
     wake_words_.clear();
     wake_word_pcm_.clear();
     wake_word_opus_.clear();
+
+    if (event_group_ != nullptr) {
+        xEventGroupClearBits(event_group_, DETECTION_EXIT_EVENT | DETECTION_RUNNING_EVENT);
+    }
 }
 
 bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
@@ -155,6 +180,8 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
         return false;
     }
 
+    xEventGroupClearBits(event_group_, DETECTION_EXIT_EVENT | DETECTION_RUNNING_EVENT);
+
     audio_detection_task_ = xTaskCreateStatic([](void* arg) {
         auto this_ = (AfeWakeWord*)arg;
         this_->AudioDetectionTask();
@@ -218,11 +245,23 @@ void AfeWakeWord::AudioDetectionTask() {
         feed_size, fetch_size);
 
     while (true) {
-        xEventGroupWaitBits(event_group_, DETECTION_RUNNING_EVENT, pdFALSE, pdTRUE, portMAX_DELAY);
+        EventBits_t bits = xEventGroupWaitBits(
+            event_group_, DETECTION_RUNNING_EVENT | DETECTION_EXIT_EVENT,
+            pdFALSE, pdFALSE, pdMS_TO_TICKS(100));
+        if ((bits & DETECTION_EXIT_EVENT) != 0) {
+            break;
+        }
+        if ((bits & DETECTION_RUNNING_EVENT) == 0) {
+            continue;
+        }
 
-        auto res = afe_iface_->fetch_with_delay(afe_data_, portMAX_DELAY);
+        // 短超时：ReleaseResources 置 EXIT 后能尽快离开 fetch，避免 destroy 死锁。
+        auto res = afe_iface_->fetch_with_delay(afe_data_, pdMS_TO_TICKS(100));
+        if ((xEventGroupGetBits(event_group_) & DETECTION_EXIT_EVENT) != 0) {
+            break;
+        }
         if (res == nullptr || res->ret_value == ESP_FAIL) {
-            continue;;
+            continue;
         }
 
         // Store the wake word data for voice recognition, like who is speaking
@@ -237,6 +276,8 @@ void AfeWakeWord::AudioDetectionTask() {
             }
         }
     }
+
+    audio_detection_task_ = nullptr;
 }
 
 void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {

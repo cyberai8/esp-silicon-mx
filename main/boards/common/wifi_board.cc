@@ -2,6 +2,7 @@
 
 #include "application.h"
 #include "assets/lang_config.h"
+#include "backlight.h"
 #include "display.h"
 #include "settings.h"
 #include "system_info.h"
@@ -16,6 +17,11 @@
 #include <wifi_configuration_ap.h>
 #include <wifi_station.h>
 #include "afsk_demod.h"
+
+#ifdef HAVE_LVGL
+#include "esp_lv_adapter.h"
+#include "wifi_config_tip_screen/wifi_config_tip_screen.h"
+#endif
 
 static const char* TAG = "WifiBoard";
 
@@ -43,14 +49,34 @@ void WifiBoard::EnterWifiConfigMode() {
     vTaskDelay(pdMS_TO_TICKS(1500));
 
     // Display WiFi configuration AP SSID and web server URL
+    const std::string ssid = wifi_ap.GetSsid();
+    const std::string url = wifi_ap.GetWebServerUrl();
     std::string hint = Lang::Strings::CONNECT_TO_HOTSPOT;
-    hint += wifi_ap.GetSsid();
+    hint += ssid;
     hint += Lang::Strings::ACCESS_VIA_BROWSER;
-    hint += wifi_ap.GetWebServerUrl();
+    hint += url;
 
-    // Announce WiFi configuration prompt
-    application.Alert(Lang::Strings::WIFI_CONFIG_MODE, hint.c_str(), "gear",
-                      Lang::Sounds::OGG_WIFICONFIG);
+    // LVGL 板：结束开机动画，单独全屏展示配网提示（Boot 时 Chat 屏未激活，
+    // Alert→SetChatMessage 会被丢弃）。同时跳过配网提示音，避免与 WiFi AP
+    // 叠载触发欠压复位（VoCat 上尤为明显）。
+    bool tip_shown = false;
+#ifdef HAVE_LVGL
+    if (esp_lv_adapter_is_initialized()) {
+        WifiConfigTipScreen::Show(Lang::Strings::WIFI_CONFIG_MODE, ssid.c_str(),
+                                  url.c_str());
+        tip_shown = true;
+        if (auto* backlight = Board::GetInstance().GetBacklight()) {
+            backlight->RestoreBrightness();
+        }
+    }
+#endif
+    if (tip_shown) {
+        ESP_LOGW(TAG, "Alert [gear] %s: %s", Lang::Strings::WIFI_CONFIG_MODE,
+                 hint.c_str());
+    } else {
+        application.Alert(Lang::Strings::WIFI_CONFIG_MODE, hint.c_str(), "gear",
+                          Lang::Sounds::OGG_WIFICONFIG);
+    }
 
 #if CONFIG_USE_ACOUSTIC_WIFI_PROVISIONING
     auto display = Board::GetInstance().GetDisplay();

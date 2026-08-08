@@ -23,7 +23,8 @@ struct Nt26CeregState {
     }
 };
 
-#if defined(CONFIG_IDF_TARGET_ESP32S31) || defined(CONFIG_BOARD_TYPE_ESP_VOCAT)
+#if defined(CONFIG_IDF_TARGET_ESP32S31) || defined(CONFIG_BOARD_TYPE_ESP_VOCAT) || \
+    defined(CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
 
 // WiFi-only boards have no NT26/4G modem. Keep a polymorphic stub so UI code that
 // dynamic_casts Board → Nt26Board still compiles; GetNt26Board() returns null.
@@ -104,6 +105,6 @@ public:
                                         bool bypass_init_check = false);
 };
 
-#endif // CONFIG_IDF_TARGET_ESP32S31 || CONFIG_BOARD_TYPE_ESP_VOCAT
+#endif // WiFi-only NT26 stub
 
 #endif // NT26_BOARD_H

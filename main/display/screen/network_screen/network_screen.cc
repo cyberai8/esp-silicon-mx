@@ -320,7 +320,7 @@ int GetSavedNetworkType() {
                                                               : kNetTypeWifi;
     }
     const NetworkType type =
-        DualNetworkBoard::LoadNetworkTypeFromSettings(kNetTypeCellular);
+        DualNetworkBoard::LoadNetworkTypeFromSettings(kNetTypeWifi);
     return type == NetworkType::ML307 ? kNetTypeCellular : kNetTypeWifi;
 }
 

@@ -27,6 +27,7 @@ set(SOURCES "audio/audio_codec.cc"
             "display/screen/pwr_key_handler.cc"
             "display/screen/boot_screen/boot_screen.cc"
             "display/screen/ota_screen/ota_screen.cc"
+            "display/screen/wifi_config_tip_screen/wifi_config_tip_screen.cc"
             "display/screen/home_screen/home_screen.cc"
             "display/screen/theme_screen/theme_screen.cc"
             "display/screen/info_screen/info_screen.cc"
@@ -99,7 +100,7 @@ set(SOURCES "audio/audio_codec.cc"
             "main.cc"
             )
 
-set(INCLUDE_DIRS "." "i18n" "display" "display/font" "display/lvgl_display" "display/lvgl_display/jpg" "display/screen" "display/screen/boot_screen" "display/screen/ota_screen" "display/screen/home_screen" "display/screen/game_2048_screen" "display/screen/calculator_screen" "display/screen/calendar_screen" "display/screen/music_screen" "display/screen/radio_screen" "display/screen/recording_screen" "display/screen/weather_screen" "display/screen/gps_screen" "display/screen/camera_screen" "display/screen/vibrate_screen" "display/screen/backlight_screen" "display/screen/settings_screen" "display/screen/call_screen" "display/screen/bluetooth_screen" "display/screen/chat_screen" "display/screen/network_screen" "display/screen/digital_people_screen" "display/screen/level_screen" "display/screen/magnet_screen" "display/screen/sd_card_screen" "display/screen/pin_test_screen" "display/screen/test_screen" "display/screen/openclaw_screen" "display/screen/ai_image_gen_screen" "display/screen/translate_screen" "display/screen/theme_screen" "display/screen/info_screen" "display/screen/standby_screen" "audio" "protocols")
+set(INCLUDE_DIRS "." "i18n" "display" "display/font" "display/lvgl_display" "display/lvgl_display/jpg" "display/screen" "display/screen/boot_screen" "display/screen/ota_screen" "display/screen/wifi_config_tip_screen" "display/screen/home_screen" "display/screen/game_2048_screen" "display/screen/calculator_screen" "display/screen/calendar_screen" "display/screen/music_screen" "display/screen/radio_screen" "display/screen/recording_screen" "display/screen/weather_screen" "display/screen/gps_screen" "display/screen/camera_screen" "display/screen/vibrate_screen" "display/screen/backlight_screen" "display/screen/settings_screen" "display/screen/call_screen" "display/screen/bluetooth_screen" "display/screen/chat_screen" "display/screen/network_screen" "display/screen/digital_people_screen" "display/screen/level_screen" "display/screen/magnet_screen" "display/screen/sd_card_screen" "display/screen/pin_test_screen" "display/screen/test_screen" "display/screen/openclaw_screen" "display/screen/ai_image_gen_screen" "display/screen/translate_screen" "display/screen/theme_screen" "display/screen/info_screen" "display/screen/standby_screen" "audio" "protocols")
 
 # Add board common files
 file(GLOB BOARD_COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/boards/common/*.cc)
@@ -115,6 +116,13 @@ elseif(CONFIG_BOARD_TYPE_ESP_VOCAT)
     list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/esp32_camera\\.cc$")
     list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/nt26_board\\.cc$")
     list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/uart_eth_modem\\.cc$")
+elseif(CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+    # Waveshare 1.85B：无相机 / NT26 / 4G
+    list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/esp32_camera\\.cc$")
+    list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/nt26_board\\.cc$")
+    list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/uart_eth_modem\\.cc$")
+    list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/dual_network_board\\.cc$")
+    list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/ml307_board\\.cc$")
 endif()
 list(APPEND SOURCES ${BOARD_COMMON_SOURCES})
 list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/common)
@@ -150,6 +158,11 @@ elseif(CONFIG_BOARD_TYPE_ESP32_S31_KORVO_1)
 elseif(CONFIG_BOARD_TYPE_ESP_VOCAT)
     set(BOARD_TYPE "esp-vocat")
     # Classic SpiLcdDisplay chat UI needs full CJK glyphs; basic lacks common Chinese chars.
+    set(BUILTIN_TEXT_FONT font_puhui_20_4)
+    set(BUILTIN_ICON_FONT font_awesome_20_4)
+    set(DEFAULT_EMOJI_COLLECTION twemoji_64)
+elseif(CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+    set(BOARD_TYPE "waveshare-s3-touch-lcd-1.85b")
     set(BUILTIN_TEXT_FONT font_puhui_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
@@ -318,8 +331,8 @@ if(CONFIG_IDF_TARGET_ESP32)
                              )
 endif()
 
-# ESP32-S31 / ESP-VoCat：MetalioClaw4 相机页是 P4 MIPI-CSI 路径，改用空壳桩
-if(CONFIG_IDF_TARGET_ESP32S31 OR CONFIG_BOARD_TYPE_ESP_VOCAT)
+# ESP32-S31 / ESP-VoCat / Waveshare 1.85B：MetalioClaw4 相机页是 P4 MIPI-CSI 路径，改用空壳桩
+if(CONFIG_IDF_TARGET_ESP32S31 OR CONFIG_BOARD_TYPE_ESP_VOCAT OR CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
     list(REMOVE_ITEM SOURCES
         "display/screen/camera_screen/camera_screen.cc"
         "display/screen/test_screen/camera_test.cc"
@@ -358,8 +371,12 @@ target_compile_definitions(${COMPONENT_LIB}
                     PRIVATE BOARD_TYPE=\"${BOARD_TYPE}\" BOARD_NAME=\"${BOARD_NAME}\"
                     PRIVATE BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT} BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
                     )
-if(CONFIG_BOARD_TYPE_ESP_VOCAT)
+if(CONFIG_BOARD_TYPE_ESP_VOCAT OR CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+    # 360 圆屏 UI 适配（home/radio 等）复用 VoCat 分支
     target_compile_definitions(${COMPONENT_LIB} PRIVATE BOARD_ESP_VOCAT=1)
+endif()
+if(CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE BOARD_WAVESHARE_S3_TOUCH_LCD_1_85B=1)
 endif()
 
 # Add generation rules

@@ -484,7 +484,7 @@ void Application::Start() {
 
     Display* display = board.GetDisplay();
 
-#if CONFIG_BOARD_TYPE_ESP_VOCAT
+#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
     // VoCat 原先把音频推迟到 MQTT 之后；但无 WiFi 时 StartNetwork→配网会
     // Alert+PlaySound 并永久阻塞，必须先 Initialize，否则 codec_ 空指针崩溃。
     // Initialize 不启动 I2S（Start 才开），OTA/联网阶段仍可保持低功耗。
@@ -533,7 +533,7 @@ void Application::Start() {
 
     /* Wait for the network to be ready */
 #ifdef HAVE_LVGL
-#if !CONFIG_BOARD_TYPE_ESP_VOCAT
+#if !(CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
     // VoCat：保持开机动画播放，不要 pause LVGL。
     if (esp_lv_adapter_is_initialized() && esp_lv_adapter_pause(-1) != ESP_OK) {
         ESP_LOGW(TAG, "LVGL pause before network/OTA failed");
@@ -546,7 +546,7 @@ void Application::Start() {
     board.PrepareForNetworkOta();
     board.StartNetwork();
 
-#if !CONFIG_BOARD_TYPE_ESP_VOCAT
+#if !(CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
     // Update the status bar immediately to show the network state
     if (display != nullptr) {
         display->UpdateStatusBar(true);
@@ -557,7 +557,7 @@ void Application::Start() {
 
     board.RestoreAfterNetworkOta();
 
-#if CONFIG_BOARD_TYPE_ESP_VOCAT
+#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
     // 开机动画已在板级构造时拉起；这里只取 display，并稍歇再开 MQTT。
     display = board.GetDisplay();
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -713,7 +713,7 @@ void Application::Start() {
     });
     bool protocol_started = protocol_->Start();
 
-#if CONFIG_BOARD_TYPE_ESP_VOCAT
+#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
     display = board.GetDisplay();
     if (display == nullptr) {
         board.EnsureUiInitialized();
@@ -728,7 +728,7 @@ void Application::Start() {
 #endif
 
 #ifdef HAVE_LVGL
-#if !CONFIG_BOARD_TYPE_ESP_VOCAT
+#if !(CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
     if (auto* backlight = board.GetBacklight()) {
         backlight->RestoreBrightness();
     }
@@ -743,7 +743,7 @@ void Application::Start() {
 
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
-#if !CONFIG_BOARD_TYPE_ESP_VOCAT
+#if !(CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
     // Home/chat launcher owns wake-word lifecycle (enabled when entering chat).
     // Classic LcdDisplay boards (e.g. ESP-VoCat) keep wake word on in idle.
     audio_service_.EnableWakeWordDetection(false);

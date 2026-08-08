@@ -131,6 +131,13 @@ config BOARD_TYPE_ESP_VOCAT
     help
         ESP-VoCat 喵伴：ESP32-S3、360x360 ST77916 QSPI 圆屏、CST816S 触摸、ES8311/ES7210、BQ27220、ML307。
 
+config BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B
+    bool "Waveshare ESP32-S3-Touch-LCD-1.85B"
+    depends on IDF_TARGET_ESP32S3
+    help
+        微雪 ESP32-S3-Touch-LCD-1.85B：360x360 ST77916 QSPI 圆屏、CST816S、ES8311/ES7210、BQ27220、SDMMC 4-bit（仅 WiFi）。
+        文档: https://docs.waveshare.net/ESP32-S3-Touch-LCD-1.85B/
+
 choice DISPLAY_STYLE
     prompt "Select display style"
     default USE_DEFAULT_MESSAGE_STYLE

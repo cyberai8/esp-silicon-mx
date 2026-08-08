@@ -9,9 +9,9 @@ enum class NetworkType {
     ML307
 };
 
-#if defined(CONFIG_IDF_TARGET_ESP32S31)
+#if defined(CONFIG_IDF_TARGET_ESP32S31) || defined(CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
 
-// WiFi-only S31 boards (no DualNetworkBoard instances). Stub keeps dynamic_cast OK.
+// WiFi-only boards (no DualNetworkBoard instances). Stub keeps dynamic_cast OK.
 class DualNetworkBoard : public Board {
 public:
     ~DualNetworkBoard() override = default;
@@ -81,6 +81,6 @@ public:
     virtual std::string GetDeviceStatusJson() override;
 };
 
-#endif // CONFIG_IDF_TARGET_ESP32S31
+#endif // CONFIG_IDF_TARGET_ESP32S31 || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B
 
 #endif // DUAL_NETWORK_BOARD_H

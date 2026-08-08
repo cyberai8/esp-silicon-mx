@@ -122,6 +122,10 @@ public:
     void ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
 
+    // 电台 / SD 音乐等绕过 AudioService 直接写 codec 时调用：刷新输出活跃时间，
+    // 防止 audio_power_timer 把扬声器关掉。
+    void NotifyExternalPlayback();
+
 private:
     AudioCodec* codec_ = nullptr;
     AudioServiceCallbacks callbacks_;

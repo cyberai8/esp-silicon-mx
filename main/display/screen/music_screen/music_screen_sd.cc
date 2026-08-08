@@ -276,6 +276,7 @@ extern "C" int SdMusicOutCallback(uint8_t* data, int data_size, void* ctx) {
     const auto* pcm = reinterpret_cast<const int16_t*>(data);
     s_pcm_buf.resize(static_cast<size_t>(samples));
     std::memcpy(s_pcm_buf.data(), pcm, static_cast<size_t>(data_size));
+    Application::GetInstance().GetAudioService().NotifyExternalPlayback();
     codec->OutputData(s_pcm_buf);
     return 0;
 }
