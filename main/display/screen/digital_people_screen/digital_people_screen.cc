@@ -352,12 +352,13 @@ SpeechBubbleHandles BuildSpeechBubble(lv_obj_t* parent) {
     lv_obj_t* label = lv_label_create(bubble);
     lv_obj_set_width(label, inner_w);
     lv_obj_set_height(label, line_h);
-    lv_label_set_long_mode(label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
     lv_label_set_text(label, "");
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(label, font, LV_PART_MAIN);
     lv_obj_set_style_text_color(label, lv_color_hex(kColorBubbleText),
                                 LV_PART_MAIN);
-    lv_obj_align(label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
 
     screen_make_input_passive(bubble);
     return {bubble, label};
@@ -387,13 +388,48 @@ void HideSpeechBubble() {
 }
 
 void ApplySpeechToLabel(const char* text) {
-    if (s_ui.speech_label == nullptr || text == nullptr) {
+    if (s_ui.speech_label == nullptr || s_ui.speech_bubble == nullptr ||
+        text == nullptr) {
         return;
     }
+
+    const lv_font_t* font = bubble_font();
+    const int32_t inner_max_w =
+        kSpeechBubbleMaxW - kBubblePadX * 2 - kBubbleBorder * 2;
+    const int32_t line_h = lv_font_get_line_height(font);
+    int32_t text_w =
+        lv_txt_get_width(text, std::strlen(text), font, 0);
+    if (text_w < 1) {
+        text_w = 1;
+    }
+
     lv_label_set_text(s_ui.speech_label, text);
-    // 切换文案时重启横向滚动动画。
-    lv_label_set_long_mode(s_ui.speech_label, LV_LABEL_LONG_CLIP);
-    lv_label_set_long_mode(s_ui.speech_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+
+    if (text_w <= inner_max_w) {
+        // 短文案：气泡随内容收窄，文字在气泡内水平居中。
+        int32_t bubble_w = text_w + kBubblePadX * 2 + kBubbleBorder * 2;
+        if (bubble_w < 48) {
+            bubble_w = 48;
+        }
+        const int32_t inner_w = bubble_w - kBubblePadX * 2 - kBubbleBorder * 2;
+        lv_obj_set_width(s_ui.speech_bubble, bubble_w);
+        lv_obj_set_width(s_ui.speech_label, inner_w);
+        lv_obj_set_height(s_ui.speech_label, line_h);
+        lv_label_set_long_mode(s_ui.speech_label, LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_text_align(s_ui.speech_label, LV_TEXT_ALIGN_CENTER,
+                                    LV_PART_MAIN);
+        lv_obj_align(s_ui.speech_label, LV_ALIGN_CENTER, 0, 0);
+    } else {
+        // 长文案：气泡拉满宽度，横向循环滚动。
+        lv_obj_set_width(s_ui.speech_bubble, kSpeechBubbleMaxW);
+        lv_obj_set_width(s_ui.speech_label, inner_max_w);
+        lv_obj_set_height(s_ui.speech_label, line_h);
+        lv_obj_set_style_text_align(s_ui.speech_label, LV_TEXT_ALIGN_LEFT,
+                                    LV_PART_MAIN);
+        lv_obj_align(s_ui.speech_label, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_label_set_long_mode(s_ui.speech_label, LV_LABEL_LONG_CLIP);
+        lv_label_set_long_mode(s_ui.speech_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    }
 }
 
 void OnSpeechCarouselTimer(lv_timer_t* /*t*/) {
