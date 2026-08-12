@@ -39,6 +39,19 @@
 
 #define TAG "Application"
 
+#ifdef HAVE_LVGL
+namespace {
+void ShowWakeWordOnDigitalPeople(const std::string& wake_word) {
+    if (wake_word.empty() || !DigitalPeopleScreen::IsActive()) {
+        return;
+    }
+    if (auto* disp = Board::GetInstance().GetDisplay()) {
+        disp->SetChatMessage("user", wake_word.c_str());
+    }
+}
+}  // namespace
+#endif
+
 namespace {
 
 const char* ResetReasonName(esp_reset_reason_t reason) {
@@ -878,8 +891,11 @@ void Application::OnWakeWordDetected() {
         SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
         audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
 #endif
+        ShowWakeWordOnDigitalPeople(wake_word);
     } else if (device_state_ == kDeviceStateSpeaking) {
+        const auto wake_word = audio_service_.GetLastWakeWord();
         AbortSpeaking(kAbortReasonWakeWordDetected);
+        ShowWakeWordOnDigitalPeople(wake_word);
     } else if (device_state_ == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);
     }
@@ -1088,6 +1104,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
         SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
         audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
 #endif
+        ShowWakeWordOnDigitalPeople(wake_word);
     } else if (device_state_ == kDeviceStateSpeaking) {
         Schedule([this]() {
             AbortSpeaking(kAbortReasonNone);

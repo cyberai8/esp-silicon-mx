@@ -81,11 +81,10 @@ struct UiState {
 UiState s_ui;
 
 constexpr size_t kSpeechTextMax = 384;
-constexpr uint32_t kSpeechCarouselPeriodMs = 3500;
 char s_user_speech[kSpeechTextMax] = "";
 char s_system_speech[kSpeechTextMax] = "";
+// true=当前展示用户侧文案，false=当前展示设备侧文案（由最近一次 Show* 决定）。
 bool s_speech_show_user = true;
-lv_timer_t* s_speech_carousel_timer = nullptr;
 
 // 切换表情读入 PSRAM + 首帧解码时短暂关唤醒词，避免瞬时 feed 堆积。
 struct WakeWordGuard {
@@ -220,7 +219,7 @@ lv_obj_t* CreateEmotionWidget(lv_obj_t* parent) {
 //   ┌─────────────────────────────────────────┐
 //   │            (EAF 表情动画)                 │
 //   │        ╭─ speech bubble ─╮              │ ← bottom-center，单行
-//   │        ╰──────────────────╯              │   过长横向滚动；用户/设备轮流
+//   │        ╰──────────────────╯              │   过长横向滚动；谁最后说话显示谁
 //   └─────────────────────────────────────────┘
 // ---------------------------------------------------------------------------
 #if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
@@ -342,13 +341,6 @@ SpeechBubbleHandles BuildSpeechBubble(lv_obj_t* parent) {
     return {bubble, label};
 }
 
-void StopSpeechCarouselTimer() {
-    if (s_speech_carousel_timer != nullptr) {
-        lv_timer_delete(s_speech_carousel_timer);
-        s_speech_carousel_timer = nullptr;
-    }
-}
-
 void ClearSpeechStorage() {
     s_user_speech[0]   = '\0';
     s_system_speech[0] = '\0';
@@ -408,21 +400,13 @@ void ApplySpeechToLabel(const char* text) {
     }
 }
 
-void OnSpeechCarouselTimer(lv_timer_t* /*t*/) {
-    if (s_user_speech[0] == '\0' || s_system_speech[0] == '\0') {
-        StopSpeechCarouselTimer();
-        return;
+const char* ActiveSpeechText() {
+    const char* primary =
+        s_speech_show_user ? s_user_speech : s_system_speech;
+    if (primary[0] != '\0') {
+        return primary;
     }
-    s_speech_show_user = !s_speech_show_user;
-    ApplySpeechToLabel(s_speech_show_user ? s_user_speech : s_system_speech);
-}
-
-void StartSpeechCarouselTimer() {
-    if (s_speech_carousel_timer != nullptr) {
-        return;
-    }
-    s_speech_carousel_timer = lv_timer_create(OnSpeechCarouselTimer,
-                                              kSpeechCarouselPeriodMs, nullptr);
+    return s_speech_show_user ? s_system_speech : s_user_speech;
 }
 
 void RefreshSpeechBar() {
@@ -433,25 +417,13 @@ void RefreshSpeechBar() {
     if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
         ClearSpeechStorage();
         HideSpeechBubble();
-        StopSpeechCarouselTimer();
         return;
     }
 
-    const bool has_user = s_user_speech[0] != '\0';
-    const bool has_sys  = s_system_speech[0] != '\0';
-    if (!has_user && !has_sys) {
+    const char* text = ActiveSpeechText();
+    if (text == nullptr || text[0] == '\0') {
         HideSpeechBubble();
-        StopSpeechCarouselTimer();
         return;
-    }
-
-    const char* text = nullptr;
-    if (has_user && has_sys) {
-        text = s_speech_show_user ? s_user_speech : s_system_speech;
-        StartSpeechCarouselTimer();
-    } else {
-        text = has_user ? s_user_speech : s_system_speech;
-        StopSpeechCarouselTimer();
     }
 
     ApplySpeechToLabel(text);
@@ -616,7 +588,6 @@ void OnScreenUnloaded(lv_event_t* /*e*/) {
         lv_timer_delete(s_activation_guard_timer);
         s_activation_guard_timer = nullptr;
     }
-    StopSpeechCarouselTimer();
     ClearSpeechStorage();
     CancelPendingEmotionLoad();
     s_applied_emotion[0] = '\0';
@@ -720,7 +691,6 @@ void DigitalPeopleScreen::ShowSystemMessage(const char* text) {
 void DigitalPeopleScreen::ClearMessages() {
     ClearSpeechStorage();
     HideSpeechBubble();
-    StopSpeechCarouselTimer();
 }
 
 void DigitalPeopleScreen::RefreshDeviceState() {
