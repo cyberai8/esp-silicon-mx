@@ -1,6 +1,10 @@
 #include "bq27220_gauge.h"
 
 #include <esp_log.h>
+#include "soc/soc_caps.h"
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+#include "driver/usb_serial_jtag.h"
+#endif
 
 #define TAG "Bq27220Gauge"
 
@@ -8,7 +12,16 @@ namespace {
 // BQ27220 standard 寄存器（参考 TI 数据手册 Table 2-1 Standard Commands）。
 // 读取均为 little-endian uint16。
 constexpr uint8_t  kRegVoltage     = 0x08;  // mV
+constexpr uint8_t  kRegFlags       = 0x0A;  // BatteryStatus / Flags
 constexpr uint8_t  kRegCurrent     = 0x0C;  // int16, mA (+ 充电 / - 放电)
+constexpr uint8_t  kRegAvgCurrent  = 0x14;  // int16, mA
+constexpr uint8_t  kRegTimeToFull  = 0x18;  // uint16, minutes; 65535=未在充电
+constexpr uint16_t kFlagDsg        = 0x0001;  // BatteryStatus()[DSG]
+constexpr uint16_t kFlagFc         = 0x0200;  // BatteryStatus()[FC]
+constexpr uint16_t kTtfNotCharging = 0xFFFF;
+constexpr int      kChargeMa       = 0;   // 任意正电流即视为充电
+constexpr int      kDischargeMa    = 5;
+constexpr uint16_t kMaintainerMv   = 4150;  // 满电插充电器时电压常被顶在此附近
 constexpr uint32_t kI2cSpeedHz     = 100 * 1000;  // 100 kHz, 上限 400 kHz
 constexpr int      kI2cTimeoutMs   = 50;
 constexpr int      kProbeTimeoutMs = 50;
@@ -18,6 +31,59 @@ constexpr int      kProbeTimeoutMs = 50;
 // 单节锂电典型：3.3V≈0%，4.2V≈100%。
 constexpr float kBatteryEmptyV = 3.3f;
 constexpr float kBatteryFullV  = 4.2f;
+
+bool InferCharging(int16_t current_ma, int16_t avg_ma, uint16_t mv,
+                   uint16_t flags, uint16_t ttf, bool discharging) {
+    if (discharging) {
+        return false;
+    }
+    if (current_ma > kChargeMa || avg_ma > kChargeMa) {
+        return true;
+    }
+    if (ttf != kTtfNotCharging) {
+        return true;
+    }
+
+    const bool dsg = (flags & kFlagDsg) != 0;
+    const bool fc  = (flags & kFlagFc) != 0;
+    // 满电插充电头：电流为 0，但 FC 置位且电压被维持在较高平台。
+    if (!dsg && fc && mv >= kMaintainerMv) {
+        return true;
+    }
+
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    // 插电脑 USB：无充电电流时仍可通过 SOF 判定外接供电。
+    if (usb_serial_jtag_is_connected()) {
+        return true;
+    }
+#endif
+    return false;
+}
+
+// 充电头插入时电压会在数秒内抬高；用近 1 分钟最低电压作基线做辅助判定。
+bool InferChargingByVoltageBoost(uint16_t mv, bool discharging) {
+    if (discharging) {
+        return false;
+    }
+    static uint16_t baseline_mv = 0;
+    static int boost_streak = 0;
+    if (baseline_mv == 0 || mv + 80 < baseline_mv) {
+        baseline_mv = mv;
+        boost_streak = 0;
+        return false;
+    }
+    if (mv >= static_cast<uint16_t>(baseline_mv + 25)) {
+        if (++boost_streak >= 2) {
+            return true;
+        }
+    } else if (mv + 10 < baseline_mv) {
+        baseline_mv = mv;
+        boost_streak = 0;
+    } else if (mv < baseline_mv) {
+        baseline_mv = mv;
+    }
+    return false;
+}
 }  // namespace
 
 bool Bq27220Gauge::Begin(i2c_master_bus_handle_t bus, uint8_t addr) {
@@ -114,9 +180,22 @@ bool Bq27220Gauge::GetBatteryLevel(int& level, bool& charging, bool& discharging
     if (level > 100) level = 100;
 
     int16_t current_ma = 0;
-    (void)ReadCurrentMa(current_ma);   // 失败时按 0 mA 处理
-    charging    = (current_ma >  5);   // 留 5mA 死区，避免空载抖动
-    discharging = (current_ma < -5);
+    int16_t avg_ma = 0;
+    uint16_t flags = 0;
+    uint16_t ttf = kTtfNotCharging;
+    (void)ReadCurrentMa(current_ma);
+    uint16_t avg_raw = 0;
+    if (ReadU16(kRegAvgCurrent, &avg_raw)) {
+        avg_ma = static_cast<int16_t>(avg_raw);
+    }
+    (void)ReadU16(kRegFlags, &flags);
+    (void)ReadU16(kRegTimeToFull, &ttf);
+
+    discharging = (current_ma < -kDischargeMa) || (avg_ma < -kDischargeMa);
+    charging = InferCharging(current_ma, avg_ma, mv, flags, ttf, discharging);
+    if (!charging && !discharging) {
+        charging = InferChargingByVoltageBoost(mv, discharging);
+    }
 
     return true;
 }

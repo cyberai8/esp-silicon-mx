@@ -18,8 +18,7 @@
 //   - GetBatteryLevel() 走 "电压 -> SOC 线性内插 + 60 点滑动平均" 路径，
 //     不依赖芯片未标定的 SOC 寄存器；同时会自动节流重试 probe（10s/次），
 //     后插电池场景能自愈。
-//   - 充电方向用电流寄存器 (0x0C, int16, mA) 的符号判定，留 5mA 死区避免
-//     空载抖动。
+//   - 充电判定：瞬时/平均电流、TimeToFull、满电维持电压、USB SOF、电压抬升辅助。
 //   - 读寄存器失败按 10 次连错才打一条警告，不会刷屏。
 //
 // Typical use:
@@ -64,7 +63,7 @@ public:
     // ---- 高层接口 ----
     // 完整电量 / 充放电状态。语义和 Board::GetBatteryLevel 对齐：
     //   level       : 0..100，电压 → SOC 线性内插 + 60 点滑动平均
-    //   charging    : 电流 > +5mA
+    //   charging    : 见实现（电流 / Flags / USB 供电）
     //   discharging : 电流 < -5mA
     // 返回 false 表示 device 没挂上、或这一帧总线读失败；调用方应保留上次值
     // 或显示占位。
