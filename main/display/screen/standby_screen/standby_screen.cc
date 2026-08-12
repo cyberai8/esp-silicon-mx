@@ -32,7 +32,6 @@ constexpr int kChargeFxH = kRoundSmall ? 160 : 360;
 constexpr int kParticleCount = kRoundSmall ? 28 : 52;
 constexpr uint32_t kChargeBlueSoft = 0x59B2FF;
 constexpr uint32_t kChargeBlueBright = 0x9AD0FF;
-constexpr uint32_t kChargeEffectMs = 10000;
 constexpr uint32_t kParticleTickMs = 33;
 
 // 翻页时钟：大屏 HH MM SS；圆屏 HH MM，用 120 号数字放大填满安全区。
@@ -99,7 +98,6 @@ struct UiState {
     lv_obj_t* charge_tip = nullptr;
     Particle particles[kParticleCount]{};
     lv_timer_t* charge_tick_timer = nullptr;
-    lv_timer_t* charge_stop_timer = nullptr;
     uint32_t charge_rng = 1;
     bool charge_playing = false;
     bool last_charging = false;
@@ -442,10 +440,6 @@ void RespawnParticle(Particle* p, bool birth_at_bottom) {
 }
 
 void StopChargeEffect() {
-    if (s_ui.charge_stop_timer != nullptr) {
-        lv_timer_delete(s_ui.charge_stop_timer);
-        s_ui.charge_stop_timer = nullptr;
-    }
     if (s_ui.charge_tick_timer != nullptr) {
         lv_timer_delete(s_ui.charge_tick_timer);
         s_ui.charge_tick_timer = nullptr;
@@ -461,9 +455,18 @@ void StopChargeEffect() {
     s_ui.charge_playing = false;
 }
 
-void OnChargeEffectTimeout(lv_timer_t* /*timer*/) {
-    s_ui.charge_stop_timer = nullptr;
-    StopChargeEffect();
+void UpdateChargeTip(int battery_level) {
+    if (s_ui.charge_tip == nullptr) {
+        return;
+    }
+    char tip_buf[32];
+    if (battery_level >= 0 && battery_level <= 100) {
+        std::snprintf(tip_buf, sizeof(tip_buf), I18n::T("充电中  %d%%"),
+                      battery_level);
+    } else {
+        std::snprintf(tip_buf, sizeof(tip_buf), I18n::T("充电中"));
+    }
+    lv_label_set_text(s_ui.charge_tip, tip_buf);
 }
 
 void OnParticleTick(lv_timer_t* /*timer*/) {
@@ -539,37 +542,37 @@ void StartChargeEffect(int battery_level) {
     }
 
     lv_obj_t* tip = lv_label_create(root);
-    char tip_buf[32];
-    if (battery_level >= 0 && battery_level <= 100) {
-        std::snprintf(tip_buf, sizeof(tip_buf), I18n::T("充电中  %d%%"), battery_level);
-    } else {
-        std::snprintf(tip_buf, sizeof(tip_buf), I18n::T("充电中"));
-    }
-    lv_label_set_text(tip, tip_buf);
+    s_ui.charge_tip = tip;
+    UpdateChargeTip(battery_level);
     lv_obj_set_style_text_color(tip, lv_color_hex(kChargeBlueSoft),
                                 LV_PART_MAIN);
     lv_obj_set_style_text_font(tip, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_align(tip, LV_ALIGN_BOTTOM_MID, 0, kRoundSmall ? -28 : -52);
     lv_obj_remove_flag(tip, LV_OBJ_FLAG_CLICKABLE);
-    s_ui.charge_tip = tip;
 
     s_ui.charge_tick_timer =
         lv_timer_create(OnParticleTick, kParticleTickMs, nullptr);
-    s_ui.charge_stop_timer =
-        lv_timer_create(OnChargeEffectTimeout, kChargeEffectMs, nullptr);
-    lv_timer_set_repeat_count(s_ui.charge_stop_timer, 1);
 
-    ESP_LOGI(TAG, "charge particle effect start (%d%%, %u ms)", battery_level,
-             static_cast<unsigned>(kChargeEffectMs));
+    ESP_LOGI(TAG, "charge effect start (%d%%), until unplug", battery_level);
 }
 
-void MaybeTriggerChargeEffect(bool charging, int battery_level) {
-    const bool rising = charging && (!s_ui.charge_primed || !s_ui.last_charging);
-    s_ui.last_charging = charging;
-    s_ui.charge_primed = true;
-    if (rising) {
-        StartChargeEffect(battery_level);
+void SyncChargeEffect(bool charging, int battery_level) {
+    if (!s_ui.charge_primed) {
+        s_ui.last_charging = charging;
+        s_ui.charge_primed = true;
     }
+
+    if (charging) {
+        if (!s_ui.charge_playing) {
+            StartChargeEffect(battery_level);
+        } else {
+            UpdateChargeTip(battery_level);
+        }
+    } else if (s_ui.charge_playing) {
+        ESP_LOGI(TAG, "charge unplugged, stop effect");
+        StopChargeEffect();
+    }
+    s_ui.last_charging = charging;
 }
 
 void UpdateClockLabels() {
@@ -630,7 +633,7 @@ void UpdateClockLabels() {
         if (battery_level > 100) {
             battery_level = 100;
         }
-        MaybeTriggerChargeEffect(charging, battery_level);
+        SyncChargeEffect(charging, battery_level);
     }
 }
 
