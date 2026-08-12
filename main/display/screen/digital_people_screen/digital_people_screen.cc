@@ -7,9 +7,12 @@
 #include <sys/stat.h>
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "lv_eaf.h"
 
 #include "application.h"
+#include "audio_service.h"
 #include "device_state.h"
 #include "SdCardManager.hpp"
 #include "home_screen/home_screen.h"
@@ -59,6 +62,8 @@ constexpr size_t kEmotionPathBufSize = 64;
 // 与功放开声叠在一起容易拉垮电源触发 Brownout，因此：
 // 1) 同名表情不重复加载；2) 真正读卡延后一小段，避开 codec 开声尖峰。
 constexpr uint32_t kEmotionLoadDelayMs = 180;
+// 全屏 360×360 EAF 解码较重；略降帧率减轻 core 1 压力，给 AFE fetch 留余量。
+constexpr uint32_t kEmotionFrameDelayMs = 66;
 char s_current_emotion[24] = "neutral";
 char s_applied_emotion[24] = "";
 char s_pending_emotion[24] = "";
@@ -76,6 +81,26 @@ struct UiState {
 };
 
 UiState s_ui;
+
+// 切换表情读入 PSRAM + 首帧解码时短暂关唤醒词，避免瞬时 feed 堆积。
+struct WakeWordGuard {
+    AudioService& as;
+    bool disabled = false;
+    explicit WakeWordGuard(AudioService& audio) : as(audio) {
+        if (as.IsWakeWordRunning()) {
+            as.EnableWakeWordDetection(false);
+            disabled = true;
+            vTaskDelay(pdMS_TO_TICKS(150));
+        }
+    }
+    ~WakeWordGuard() {
+        if (disabled) {
+            as.EnableWakeWordDetection(true);
+        }
+    }
+    WakeWordGuard(const WakeWordGuard&) = delete;
+    WakeWordGuard& operator=(const WakeWordGuard&) = delete;
+};
 
 const char* EmotionCategoryName(const char* category) {
     return (category != nullptr && category[0] != '\0') ? category
@@ -125,10 +150,11 @@ void SetEmotionSrc(lv_obj_t* widget, const char* category) {
     }
     ESP_LOGI(TAG, "emotion file ok: %s (%ld bytes)", posix_path, file_size);
 
+    WakeWordGuard guard(Application::GetInstance().GetAudioService());
     if (EmotionUsesEaf()) {
         lv_eaf_set_src(widget, path);
         lv_eaf_set_loop_count(widget, -1);  // 无限循环
-        lv_eaf_set_frame_delay(widget, 40); // 约 25fps，可按素材再调
+        lv_eaf_set_frame_delay(widget, kEmotionFrameDelayMs);
     } else {
         lv_image_set_src(widget, path);
     }
@@ -176,7 +202,9 @@ void ScheduleEmotionLoad(const char* category) {
 
 lv_obj_t* CreateEmotionWidget(lv_obj_t* parent) {
     if (EmotionUsesEaf()) {
-        return lv_eaf_create(parent);
+        lv_obj_t* eaf = lv_eaf_create(parent);
+        lv_eaf_set_frame_delay(eaf, kEmotionFrameDelayMs);
+        return eaf;
     }
     return lv_image_create(parent);
 }
@@ -552,8 +580,7 @@ lv_obj_t* DigitalPeopleScreen::Create() {
         s_ui.hint_label = BuildMissingResourceHint(scr);
     } else {
         s_ui.eaf = CreateEmotionWidget(scr);
-        // 首进屏立即加载，后续切换走 ScheduleEmotionLoad 错峰。
-        SetEmotionSrc(s_ui.eaf, s_current_emotion);
+        // 真正 set_src 延后到 SCREEN_LOADED，与聊天页一致，避免 Create 阻塞过久。
         lv_image_set_inner_align(s_ui.eaf, LV_IMAGE_ALIGN_CONTAIN);
         lv_obj_center(s_ui.eaf);
         screen_make_input_passive(s_ui.eaf);
@@ -583,10 +610,16 @@ lv_obj_t* DigitalPeopleScreen::Create() {
     }
 
     lv_obj_add_event_cb(scr, [](lv_event_t* e) {
-        if (lv_event_get_code(e) == LV_EVENT_SCREEN_LOADED &&
-            s_activation_blocked) {
+        if (lv_event_get_code(e) != LV_EVENT_SCREEN_LOADED) {
+            return;
+        }
+        if (s_activation_blocked) {
             ESP_LOGW(TAG, "screen loaded while not activated, keep dialog");
             ensure_activation_blocked_dialog();
+            return;
+        }
+        if (s_ui.eaf != nullptr) {
+            ScheduleEmotionLoad(s_current_emotion);
         }
     }, LV_EVENT_SCREEN_LOADED, nullptr);
 

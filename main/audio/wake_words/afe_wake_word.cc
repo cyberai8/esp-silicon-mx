@@ -1,8 +1,9 @@
 #include "afe_wake_word.h"
 #include "audio_service.h"
 
-#include <esp_log.h>
 #include <esp_heap_caps.h>
+#include <esp_log.h>
+#include <sdkconfig.h>
 #include <sstream>
 
 #define DETECTION_RUNNING_EVENT (1 << 0)
@@ -12,7 +13,9 @@
 
 namespace {
 constexpr size_t kAudioDetectionTaskStackSize = 6144;
-}
+// 高于 LVGL(1)/draw(3)，低于 audio_input(8)；与 feed 同核，避免与 EAF 解码抢 core 1。
+constexpr UBaseType_t kAudioDetectionTaskPriority = 6;
+}  // namespace
 
 AfeWakeWord::AfeWakeWord()
     : afe_data_(nullptr),
@@ -139,8 +142,9 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     }
     afe_config->aec_init = codec_->input_reference();
     afe_config->aec_mode = AEC_MODE_SR_HIGH_PERF;
-    afe_config->afe_perferred_core = 1;
-    afe_config->afe_perferred_priority = 1;
+    // LVGL/EAF 动画跑在 core 1；AFE 放到 core 0 与 audio_input 同侧，减少 fetch 饿死。
+    afe_config->afe_perferred_core = 0;
+    afe_config->afe_perferred_priority = 5;
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
     
     afe_iface_ = esp_afe_handle_from_config(afe_config);
@@ -182,12 +186,27 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
 
     xEventGroupClearBits(event_group_, DETECTION_EXIT_EVENT | DETECTION_RUNNING_EVENT);
 
-    audio_detection_task_ = xTaskCreateStatic([](void* arg) {
-        auto this_ = (AfeWakeWord*)arg;
-        this_->AudioDetectionTask();
-        vTaskDelete(NULL);
-    }, "audio_detection", kAudioDetectionTaskStackSize, this, 3,
-       audio_detection_task_stack_, audio_detection_task_buffer_);
+#if CONFIG_SOC_CPU_CORES_NUM > 1
+    audio_detection_task_ = xTaskCreateStaticPinnedToCore(
+        [](void* arg) {
+            auto this_ = (AfeWakeWord*)arg;
+            this_->AudioDetectionTask();
+            vTaskDelete(NULL);
+        },
+        "audio_detection", kAudioDetectionTaskStackSize, this,
+        kAudioDetectionTaskPriority, audio_detection_task_stack_,
+        audio_detection_task_buffer_, 0);
+#else
+    audio_detection_task_ = xTaskCreateStatic(
+        [](void* arg) {
+            auto this_ = (AfeWakeWord*)arg;
+            this_->AudioDetectionTask();
+            vTaskDelete(NULL);
+        },
+        "audio_detection", kAudioDetectionTaskStackSize, this,
+        kAudioDetectionTaskPriority, audio_detection_task_stack_,
+        audio_detection_task_buffer_);
+#endif
     if (audio_detection_task_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create audio detection task");
         heap_caps_free(audio_detection_task_stack_);
