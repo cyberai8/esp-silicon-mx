@@ -224,27 +224,16 @@ lv_obj_t* CreateEmotionWidget(lv_obj_t* parent) {
 //   └─────────────────────────────────────────┘
 // ---------------------------------------------------------------------------
 #if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
-constexpr int32_t  kBubbleRadius       = 14;
-constexpr int32_t  kBubblePadX         = 12;
-constexpr int32_t  kBubblePadY         = 8;
-constexpr int32_t  kBubbleBorder       = 2;
-constexpr int32_t  kSideMargin         = 40;
-constexpr int32_t  kSpeechBubbleBottom = 36;
+constexpr int32_t kSideMargin         = 40;
+constexpr int32_t kSpeechBubbleBottom = 36;
 #else
-constexpr int32_t  kBubbleRadius       = 18;
-constexpr int32_t  kBubblePadX         = 18;
-constexpr int32_t  kBubblePadY         = 14;
-constexpr int32_t  kBubbleBorder       = 2;
-constexpr int32_t  kSideMargin         = 16;
-constexpr int32_t  kSpeechBubbleBottom = 24;
+constexpr int32_t kSideMargin         = 16;
+constexpr int32_t kSpeechBubbleBottom = 24;
 #endif
 constexpr int32_t kSpeechBubbleMaxW = kPanelSize - kSideMargin * 2;
 
-constexpr uint32_t kColorBubbleBg     = 0xFFFFFF;
-constexpr uint32_t kColorBubbleBorder = 0xFFFFFF;
-constexpr uint32_t kColorBubbleText   = 0x1F2937;
-constexpr uint32_t kColorHintText     = 0xC8C9CC;
-constexpr lv_opa_t kBubbleBgOpa       = LV_OPA_30;
+constexpr uint32_t kColorSpeechText = 0xFFFFFF;
+constexpr uint32_t kColorHintText   = 0xC8C9CC;
 
 lv_timer_t* s_activation_guard_timer = nullptr;
 
@@ -312,20 +301,13 @@ lv_obj_t* BuildMissingResourceHint(lv_obj_t* parent) {
     return hint;
 }
 
-void StyleBubble(lv_obj_t* bubble) {
+void StyleSpeechBubble(lv_obj_t* bubble) {
     screen_strip_obj_chrome(bubble);
     lv_obj_remove_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(bubble, lv_color_hex(kColorBubbleBg), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(bubble, kBubbleBgOpa, LV_PART_MAIN);
-    lv_obj_set_style_radius(bubble, kBubbleRadius, LV_PART_MAIN);
-    lv_obj_set_style_border_color(bubble, lv_color_hex(kColorBubbleBorder),
-                                  LV_PART_MAIN);
-    lv_obj_set_style_border_width(bubble, kBubbleBorder, LV_PART_MAIN);
-    lv_obj_set_style_border_opa(bubble, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_pad_hor(bubble, kBubblePadX, LV_PART_MAIN);
-    lv_obj_set_style_pad_ver(bubble, kBubblePadY, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bubble, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(bubble, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(bubble, 0, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(bubble, 0, LV_PART_MAIN);
-    lv_obj_set_height(bubble, LV_SIZE_CONTENT);
 }
 
 // 创建底部单行字幕气泡，初始隐藏。
@@ -337,26 +319,22 @@ struct SpeechBubbleHandles {
 SpeechBubbleHandles BuildSpeechBubble(lv_obj_t* parent) {
     const lv_font_t* font = bubble_font();
     const int32_t line_h  = lv_font_get_line_height(font);
-    const int32_t inner_w =
-        kSpeechBubbleMaxW - kBubblePadX * 2 - kBubbleBorder * 2;
-    const int32_t bubble_h =
-        line_h + kBubblePadY * 2 + kBubbleBorder * 2;
 
     lv_obj_t* bubble = lv_obj_create(parent);
-    StyleBubble(bubble);
+    StyleSpeechBubble(bubble);
     lv_obj_set_width(bubble, kSpeechBubbleMaxW);
-    lv_obj_set_height(bubble, bubble_h);
+    lv_obj_set_height(bubble, line_h);
     lv_obj_align(bubble, LV_ALIGN_BOTTOM_MID, 0, -kSpeechBubbleBottom);
     lv_obj_add_flag(bubble, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t* label = lv_label_create(bubble);
-    lv_obj_set_width(label, inner_w);
+    lv_obj_set_width(label, kSpeechBubbleMaxW);
     lv_obj_set_height(label, line_h);
     lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
     lv_label_set_text(label, "");
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(label, font, LV_PART_MAIN);
-    lv_obj_set_style_text_color(label, lv_color_hex(kColorBubbleText),
+    lv_obj_set_style_text_color(label, lv_color_hex(kColorSpeechText),
                                 LV_PART_MAIN);
     lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
 
@@ -394,8 +372,7 @@ void ApplySpeechToLabel(const char* text) {
     }
 
     const lv_font_t* font = bubble_font();
-    const int32_t inner_max_w =
-        kSpeechBubbleMaxW - kBubblePadX * 2 - kBubbleBorder * 2;
+    const int32_t inner_max_w = kSpeechBubbleMaxW;
     const int32_t line_h = lv_font_get_line_height(font);
     int32_t text_w =
         lv_txt_get_width(text, std::strlen(text), font, 0);
@@ -406,12 +383,11 @@ void ApplySpeechToLabel(const char* text) {
     lv_label_set_text(s_ui.speech_label, text);
 
     if (text_w <= inner_max_w) {
-        // 短文案：气泡随内容收窄，文字在气泡内水平居中。
-        int32_t bubble_w = text_w + kBubblePadX * 2 + kBubbleBorder * 2;
+        int32_t bubble_w = text_w;
         if (bubble_w < 48) {
             bubble_w = 48;
         }
-        const int32_t inner_w = bubble_w - kBubblePadX * 2 - kBubbleBorder * 2;
+        const int32_t inner_w = bubble_w;
         lv_obj_set_width(s_ui.speech_bubble, bubble_w);
         lv_obj_set_width(s_ui.speech_label, inner_w);
         lv_obj_set_height(s_ui.speech_label, line_h);
