@@ -36,7 +36,6 @@ extern "C" void board_release_power_hold_if_supported();
 #include "calculator_screen/calculator_screen.h"
 #include "calendar_screen/calendar_screen.h"
 #include "call_screen/call_screen.h"
-#include "camera_screen/camera_screen.h"
 #include "chat_screen/chat_screen.h"
 #include "digital_people_screen/digital_people_screen.h"
 #include "game_2048_screen/game_2048_screen.h"
@@ -46,7 +45,6 @@ extern "C" void board_release_power_hold_if_supported();
 #include "music_screen/music_screen.h"
 #include "radio_screen/radio_screen.h"
 #include "recording_screen/recording_screen.h"
-#include "openclaw_screen/openclaw_screen.h"
 #include "ai_image_gen_screen/ai_image_gen_screen.h"
 #include "translate_screen/translate_screen.h"
 #include "pwr_key_handler.h"
@@ -168,7 +166,7 @@ void weather_lifecycle_cb(screen_lifecycle_event_t event) {
     }
 }
 
-// GPS ????GPS_POWER ???????GpsScreen::LifecycleCallback????// ??????+ ???? camera / vibrate / bluetooth ??????????
+// GPS ????GPS_POWER ???????GpsScreen::LifecycleCallback????// ??????+ ???? vibrate / bluetooth ??????????
 void gps_lifecycle_cb(screen_lifecycle_event_t event) {
     PwrKey_OnScreenLifecycle("gps", event);
     if (event == SCREEN_LIFECYCLE_LOAD) {
@@ -177,18 +175,6 @@ void gps_lifecycle_cb(screen_lifecycle_event_t event) {
         ESP_LOGI(TAG_HOME, "unload: gps_screen");
     }
     GpsScreen::LifecycleCallback(event);
-}
-
-// ????????????
-// CameraScreen::LifecycleCallback??// ??????CAM_PWDN?TCA9555 IO2?????????? / ??????// esp_video / V4L2 ????????????????App ?????????
-void camera_lifecycle_cb(screen_lifecycle_event_t event) {
-    PwrKey_OnScreenLifecycle("camera", event);
-    if (event == SCREEN_LIFECYCLE_LOAD) {
-        ESP_LOGI(TAG_HOME, "load: camera_screen");
-    } else {
-        ESP_LOGI(TAG_HOME, "unload: camera_screen");
-    }
-    CameraScreen::LifecycleCallback(event);
 }
 
 // ??????????
@@ -281,14 +267,6 @@ void magnet_lifecycle_cb(screen_lifecycle_event_t event) {
         ESP_LOGI(TAG_HOME, "unload: magnet_screen");
     }
     MagnetScreen::LifecycleCallback(event);
-}
-
-// OpenClaw ????????
-// OpenClawScreen::LifecycleCallback????
-// ?????? / ?????????? wake word ????
-void openclaw_lifecycle_cb(screen_lifecycle_event_t event) {
-    PwrKey_OnScreenLifecycle("openclaw", event);
-    OpenClawScreen::LifecycleCallback(event);
 }
 
 void ai_image_gen_lifecycle_cb(screen_lifecycle_event_t event) {
@@ -478,20 +456,6 @@ void LaunchGps(screen_lifecycle_cb_t lifecycle_cb) {
     }
 }
 
-void LaunchCamera(screen_lifecycle_cb_t lifecycle_cb) {
-    lv_obj_t* old_scr = lv_screen_active();
-    lv_obj_t* app = CameraScreen::Create();
-    if (app == nullptr) {
-        ESP_LOGE(TAG_HOME, "CameraScreen::Create() failed");
-        return;
-    }
-    screen_attach_lifecycle(app, lifecycle_cb);
-    lv_screen_load(app);
-    if (old_scr != nullptr && old_scr != app) {
-        lv_obj_delete_async(old_scr);
-    }
-}
-
 void LaunchVibrate(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* old_scr = lv_screen_active();
     lv_obj_t* app = VibrateScreen::Create();
@@ -578,17 +542,6 @@ void LaunchPinTest(screen_lifecycle_cb_t lifecycle_cb) {
 
 void LaunchTest(screen_lifecycle_cb_t lifecycle_cb) {
     TestScreen::LaunchFromHome(lifecycle_cb);
-}
-
-void LaunchOpenClaw(screen_lifecycle_cb_t lifecycle_cb) {
-    lv_obj_t* old_scr = lv_screen_active();
-    OpenClawScreen::SetLifecycleCallback(lifecycle_cb);
-    lv_obj_t* app = OpenClawScreen::Create();
-    screen_attach_lifecycle(app, lifecycle_cb);
-    lv_screen_load(app);
-    if (old_scr != nullptr && old_scr != app) {
-        lv_obj_delete_async(old_scr);
-    }
 }
 
 void LaunchAiImageGen(screen_lifecycle_cb_t lifecycle_cb) {
@@ -820,16 +773,12 @@ void LaunchWake(screen_lifecycle_cb_t /*lifecycle_cb*/) {
 constexpr AppEntry kApps[] = {
     {"chat",           "聊天",     LaunchChat,          chat_lifecycle_cb,          true},
     {"wifi",           "网络配置", LaunchWifi,          wifi_lifecycle_cb,          false},
-    {"digital_people", "数字人",   LaunchDigitalPeople, digital_people_lifecycle_cb, true},
 #if !defined(BOARD_ESP_VOCAT)
     {"call",           "电话",     LaunchCall,          call_lifecycle_cb,          false},
 #endif
     {"music",          "音乐",     LaunchMusic,         music_lifecycle_cb,         false},
     {"calendar",       "日历",     LaunchCalendar,      calendar_lifecycle_cb,      false},
-    {"openclaw",       "OpenClaw", LaunchOpenClaw,      openclaw_lifecycle_cb,      true},
 #if !defined(BOARD_ESP_VOCAT)
-    {"espclaw",        "ESPClaw",  LaunchEspClaw,       nullptr,                    false},
-    {"camera",         "相机",     LaunchCamera,        camera_lifecycle_cb,        false},
     {"gps",            "地图",     LaunchGps,           gps_lifecycle_cb,           true},
     {"spirit_level",   "水平仪",   LaunchLevel,         level_lifecycle_cb,         false},
     {"magnet",         "磁场",     LaunchMagnet,        magnet_lifecycle_cb,        false},
@@ -886,7 +835,7 @@ const AppEntry* ResolveCloverApp(const char* preferred,
 
 // 首页优先顺序（上/右/下/左），其余按 kApps 原序接在后面。
 void BuildCloverAppOrder(int* out_indices, int* out_count) {
-    const char* prefer[] = {"chat", "recording", "camera", "wifi"};
+    const char* prefer[] = {"chat", "recording", "music", "wifi"};
     bool used[kTotalApps] = {};
     int n = 0;
 
@@ -905,7 +854,7 @@ void BuildCloverAppOrder(int* out_indices, int* out_count) {
 
     push_suffix(prefer[0], nullptr);
     push_suffix(prefer[1], nullptr);
-    push_suffix(prefer[2], "digital_people");
+    push_suffix(prefer[2], nullptr);
     push_suffix(prefer[3], nullptr);
 
     for (int i = 0; i < kTotalApps; ++i) {
@@ -1651,7 +1600,7 @@ lv_obj_t* CreateStatusBar(lv_obj_t* screen, HomeStatusState* st) {
     lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_set_style_bg_color(bar, lv_color_hex(kStatusBarBg), LV_PART_MAIN);
     // 四叶瓣首页：状态栏浮在图上，背景接近透明，避免挡瓣区观感
-    lv_obj_set_style_bg_opa(bar, kLayoutRoundSmall ? LV_OPA_20 : LV_OPA_50,
+    lv_obj_set_style_bg_opa(bar, kLayoutRoundSmall ? LV_OPA_TRANSP : LV_OPA_50,
                             LV_PART_MAIN);
     if (kLayoutRoundSmall) {
         lv_obj_add_flag(bar, LV_OBJ_FLAG_FLOATING);
@@ -1789,14 +1738,6 @@ void CloverApplyPage(PagerState* state, int page) {
     if (page < 0 || page >= state->page_count) {
         return;
     }
-    const bool home = (page == 0);
-    if (state->clover_round != nullptr) {
-        if (home) {
-            lv_obj_remove_flag(state->clover_round, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(state->clover_round, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
 
     for (int s = 0; s < kCloverAppsPerPage; ++s) {
         const int oi = page * kCloverAppsPerPage + s;
@@ -1820,23 +1761,13 @@ void CloverApplyPage(PagerState* state, int page) {
             continue;
         }
         const AppEntry& app = kApps[idx];
-        // 首页图标已烘焙进 round.png；其它页只画当前四个图标/文字。
         if (icon != nullptr) {
-            if (home) {
-                lv_obj_add_flag(icon, LV_OBJ_FLAG_HIDDEN);
-            } else {
-                lv_image_set_src(icon, s_clover_icon_paths[idx]);
-                lv_obj_remove_flag(icon, LV_OBJ_FLAG_HIDDEN);
-            }
+            lv_image_set_src(icon, s_clover_icon_paths[idx]);
+            lv_obj_remove_flag(icon, LV_OBJ_FLAG_HIDDEN);
         }
         if (name != nullptr) {
-            if (home) {
-                lv_label_set_text(name, "");
-                lv_obj_add_flag(name, LV_OBJ_FLAG_HIDDEN);
-            } else {
-                lv_label_set_text(name, I18n::T(CloverDisplayName(&app)));
-                lv_obj_remove_flag(name, LV_OBJ_FLAG_HIDDEN);
-            }
+            lv_label_set_text(name, I18n::T(CloverDisplayName(&app)));
+            lv_obj_remove_flag(name, LV_OBJ_FLAG_HIDDEN);
         }
         if (hs != nullptr) {
             lv_obj_set_user_data(hs, const_cast<AppEntry*>(&app));
@@ -1852,13 +1783,9 @@ void CloverFadeExec(void* var, int32_t v) {
     if (state == nullptr) {
         return;
     }
-    const lv_opa_t opa = static_cast<lv_opa_t>(v);
-    if (state->current_page == 0) {
-        if (state->clover_round != nullptr) {
-            lv_obj_set_style_opa(state->clover_round, opa, LV_PART_MAIN);
-        }
-    } else if (state->clover_layer != nullptr) {
-        lv_obj_set_style_opa(state->clover_layer, opa, LV_PART_MAIN);
+    if (state->clover_layer != nullptr) {
+        lv_obj_set_style_opa(state->clover_layer, static_cast<lv_opa_t>(v),
+                             LV_PART_MAIN);
     }
 }
 
@@ -1866,12 +1793,6 @@ void CloverFadeInFinished(lv_anim_t* a) {
     auto* state = static_cast<PagerState*>(lv_anim_get_user_data(a));
     if (state == nullptr) {
         return;
-    }
-    if (state->clover_round != nullptr) {
-        lv_obj_set_style_opa(state->clover_round, LV_OPA_COVER, LV_PART_MAIN);
-        if (state->current_page != 0) {
-            lv_obj_add_flag(state->clover_round, LV_OBJ_FLAG_HIDDEN);
-        }
     }
     if (state->clover_layer != nullptr) {
         lv_obj_set_style_opa(state->clover_layer, LV_OPA_COVER, LV_PART_MAIN);
@@ -1885,11 +1806,7 @@ void CloverFadeOutReady(lv_anim_t* a) {
         return;
     }
     const int pending = state->clover_pending_page;
-    if (pending == 0) {
-        if (state->clover_round != nullptr) {
-            lv_obj_set_style_opa(state->clover_round, LV_OPA_TRANSP, LV_PART_MAIN);
-        }
-    } else if (state->clover_layer != nullptr) {
+    if (state->clover_layer != nullptr) {
         lv_obj_set_style_opa(state->clover_layer, LV_OPA_TRANSP, LV_PART_MAIN);
     }
     CloverApplyPage(state, pending);
@@ -2713,10 +2630,6 @@ const char* CloverDisplayName(const AppEntry* entry) {
     if (std::strcmp(entry->icon_suffix, "wifi") == 0) {
         return "网络";
     }
-    if (std::strcmp(entry->icon_suffix, "digital_people") == 0 &&
-        FindAppBySuffix("camera") == nullptr) {
-        return "相机";
-    }
     if (std::strcmp(entry->icon_suffix, "pin") == 0) {
         return "引脚";
     }
@@ -2728,10 +2641,10 @@ void AddCloverPetalVisual(lv_obj_t* page, const AppEntry* entry, int app_idx,
     if (page == nullptr || entry == nullptr || slot < 0 || slot >= 4) {
         return;
     }
-    constexpr int kIcon = 52;
-    constexpr lv_coord_t kIconCx[4] = {180, 308, 180, 52};
-    constexpr lv_coord_t kIconCy[4] = {50, 176, 306, 176};
-    constexpr lv_coord_t kTextCy[4] = {96, 226, 334, 226};
+    constexpr int kIcon = 64;
+    constexpr lv_coord_t kIconCx[4] = {180, 298, 180, 62};
+    constexpr lv_coord_t kIconCy[4] = {60, 178, 282, 178};
+    constexpr lv_coord_t kTextCy[4] = {104, 222, 326, 222};
 
     lv_obj_t* icon = lv_image_create(page);
     if (app_idx >= 0 && app_idx < kTotalApps) {
@@ -2906,13 +2819,7 @@ lv_obj_t* CreateRoundCloverHome() {
     lv_obj_align(chrome, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_remove_flag(chrome, LV_OBJ_FLAG_CLICKABLE);
     state->clover_chrome = chrome;
-
-    lv_obj_t* round = lv_image_create(screen);
-    lv_image_set_src(round, "A:home_clover_round.spng");
-    lv_obj_set_size(round, kPanelW, kPanelH);
-    lv_obj_align(round, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_obj_remove_flag(round, LV_OBJ_FLAG_CLICKABLE);
-    state->clover_round = round;
+    state->clover_round = nullptr;
 
     auto* status = new HomeStatusState{};
     CreateStatusBar(screen, status);
@@ -2926,10 +2833,11 @@ lv_obj_t* CreateRoundCloverHome() {
     lv_obj_remove_flag(layer, LV_OBJ_FLAG_CLICKABLE);
     state->clover_layer = layer;
 
-    constexpr int kIcon = 52;
-    constexpr lv_coord_t kIconCx[4] = {195, 324, 197, 68};
-    constexpr lv_coord_t kIconCy[4] = {46, 173, 302, 172};
-    constexpr lv_coord_t kTextCy[4] = {84, 213, 324, 213};
+    constexpr int kIcon = 64;
+    // 图标中心略往瓣内收，避开顶栏 / 底部分页点 / 左右瓣缘
+    constexpr lv_coord_t kIconCx[4] = {180, 298, 180, 62};
+    constexpr lv_coord_t kIconCy[4] = {60, 178, 282, 178};
+    constexpr lv_coord_t kTextCy[4] = {104, 222, 326, 222};
     struct Slot {
         int x;
         int y;

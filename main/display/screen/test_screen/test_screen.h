@@ -11,7 +11,6 @@
 // 自动测试项逻辑在独立文件中，由 auto_test_screen 组装：
 //   vibrate_motor_test  震动马达开关，人工确认 pass/fail
 //   audio_test          按住录音 / 松开播放，人工确认 pass/fail
-//   camera_test         读取 OV2710 传感器 ID，匹配即 pass
 //   gps_test            显示 HDOP，收到 NMEA 即 pass
 //   sc7a20h_test        加速度计读数
 //   qmc6309_test        磁力计读数

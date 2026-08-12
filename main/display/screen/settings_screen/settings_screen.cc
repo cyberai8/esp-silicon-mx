@@ -594,7 +594,7 @@ void BuildBluetoothTab(lv_obj_t* tab) {
     lv_obj_set_style_text_font(title, &font_puhui_20_4, LV_PART_MAIN);
 
     lv_obj_t* desc = lv_label_create(tab);
-    lv_label_set_text(desc, "ESP32-S31 内置 Classic BT/A2DP，音乐 App 默认使用音响模式");
+    lv_label_set_text(desc, "本机使用片上蓝牙，音乐 App 默认使用音响模式");
     lv_obj_set_width(desc, LV_PCT(100));
     lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(desc, lv_color_hex(kColorSubtle), LV_PART_MAIN);

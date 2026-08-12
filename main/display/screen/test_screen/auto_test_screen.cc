@@ -4,7 +4,6 @@
 #include "esp_log.h"
 #include "test_screen.h"
 #include "audio_test.h"
-#include "camera_test.h"
 #include "vibrate_motor_test.h"
 #include "qmc6309_test.h"
 #include "sc7a20h_test.h"
@@ -30,7 +29,6 @@ lv_timer_t* s_poll_timer = nullptr;
 
 void OnPollTimer(lv_timer_t* /*t*/) {
     AudioTest::Poll();
-    CameraTest::Poll();
     Sc7a20hTest::Poll();
     Qmc6309Test::Poll();
     SdCardTest::Poll();
@@ -56,7 +54,6 @@ void OnScreenUnloaded(lv_event_t* /*e*/) {
     TestUiSetScreen(nullptr);
     VibrateMotorTest::OnUnload();
     AudioTest::OnUnload();
-    CameraTest::OnUnload();
     Sc7a20hTest::OnUnload();
     Qmc6309Test::OnUnload();
     SdCardTest::OnUnload();
@@ -72,7 +69,6 @@ void OnScreenUnloaded(lv_event_t* /*e*/) {
 void OnScreenLoadItems() {
     VibrateMotorTest::OnLoad();
     AudioTest::OnLoad();
-    CameraTest::OnLoad();
     Sc7a20hTest::OnLoad();
     Qmc6309Test::OnLoad();
     SdCardTest::OnLoad();
@@ -108,7 +104,6 @@ lv_obj_t* AutoTestScreen::Create() {
 
     VibrateMotorTest::BuildRow(body);
     AudioTest::BuildRow(body);
-    CameraTest::BuildRow(body);
     Cell4gTest::BuildRow(body);
     WifiTest::BuildRow(body);
     Sc7a20hTest::BuildRow(body);

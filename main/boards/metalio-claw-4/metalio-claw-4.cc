@@ -64,16 +64,8 @@
 
 static std::string uartBuffer;
 
-// NV3051F panel IO 的全局句柄，供功能界面（如相机界面）在摄像头驱动
-// 对共享 GPIO 3 复位线发出脉冲后重放厂商 DCS 初始化序列。
-// 在 InitializeLCD() 中赋值。
-static esp_lcd_panel_io_handle_t s_metalio_claw_4_panel_io = NULL;
-
-extern "C" esp_lcd_panel_io_handle_t metalio_claw_4_get_panel_io() { return s_metalio_claw_4_panel_io; }
-
 // 板载 I2C 主总线（端口 1，GPIO 7/8）的全局句柄。
-// 摄像头 SCCB 必须复用此句柄，而不是在同一物理引脚上再分配控制器，
-// 否则两个 I2C 外设会抢总线，导致 GT911 / TCA9555 通信失败。
+// 传感器 / 电量计等必须复用此句柄，不要在同一物理引脚上再分配控制器。
 static i2c_master_bus_handle_t s_metalio_claw_4_i2c_bus = NULL;
 
 extern "C" i2c_master_bus_handle_t metalio_claw_4_get_i2c_bus() { return s_metalio_claw_4_i2c_bus; }
@@ -187,8 +179,7 @@ private:
         iOExpander.setLevel(IOExpander::Pin::PA, false);
         iOExpander.setLevel(IOExpander::Pin::PA_SWITCH, true);
         iOExpander.setLevel(IOExpander::Pin::RST_4G, true);
-        // CAM_PWDN: 低电平通电；这里默认拉高 = 摄像头断电。
-        // 只有进入相机 App 时（CameraScreen::LifecycleCallback LOAD）才拉低供电。
+        // CAM_PWDN: 低电平通电；默认拉高保持摄像头断电。
         iOExpander.setLevel(IOExpander::Pin::CAM_PWDN, true);
         iOExpander.setLevel(IOExpander::Pin::SD, false);
 
@@ -313,10 +304,6 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
         ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
         // ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
-
-        // 暴露 panel IO 句柄，供其他组件（相机界面）在 GPIO 3 摄像头
-        // 复位脉冲后重放厂商 DCS 初始化序列。
-        s_metalio_claw_4_panel_io = panel_io_handle;
     }
 
     // ---------- FL7707N (48MHz DPI, RGB888) ----------
@@ -393,12 +380,6 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
         ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
         // ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
-
-        // 暴露 panel IO 句柄，供其他组件（相机界面）在 GPIO 3 摄像头
-        // 复位脉冲后重放厂商 DCS 初始化序列。
-        // 注意：camera_screen 当前调用的是 esp_lcd_nv3051f_replay_vendor_init，
-        // replay 函数并在 camera_screen 里按宏分发。
-        s_metalio_claw_4_panel_io = panel_io_handle;
     }
 
     void InitializeDisplay() {

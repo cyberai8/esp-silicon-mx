@@ -34,31 +34,7 @@ constexpr const char* TAG = "ChatScreen";
 //   │  表情模式：EAF 偏上 + 底部白色字幕           │
 //   └───────────────────────────────────────────┘ 720
 // ---------------------------------------------------------------------------
-#if CONFIG_BOARD_TYPE_ESP32_S31_KORVO_1
-constexpr bool    kRoundLayout     = false;
-constexpr int32_t kPanelW          = 800;
-constexpr int32_t kPanelH          = 480;
-constexpr int32_t kHeaderH         = 64;
-constexpr int32_t kBackBtnSize     = 52;
-constexpr int32_t kListPadH        = 26;
-constexpr int32_t kListPadTop      = 10;
-constexpr int32_t kListPadBottom   = 104;
-constexpr int32_t kRowGap          = 8;
-constexpr int32_t kBubblePadX      = 14;
-constexpr int32_t kBubblePadY      = 10;
-constexpr int32_t kBubbleRadius    = 14;
-constexpr int32_t kSideMargin      = 4;
-constexpr int32_t kMaxMessages     = 16;
-constexpr int32_t kToggleBtnSize   = 64;
-constexpr int32_t kToggleIconSize  = 48;
-constexpr int32_t kToggleBtnMargin = 24;
-constexpr int32_t kClearBtnW       = 90;
-constexpr int32_t kClearBtnH       = 44;
-constexpr int32_t kModeBtnW        = 88;
-constexpr int32_t kModeBtnH        = 44;
-constexpr int32_t kHeaderRightPad  = 16;
-constexpr int32_t kHeaderCtrlGap   = 8;
-#elif defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
 // 360 圆屏：顶栏双行 + 四周安全边距（内容约 280 宽），避免圆弧裁切。
 constexpr bool    kRoundLayout     = true;
 constexpr int32_t kPanelW          = DISPLAY_WIDTH;
@@ -128,11 +104,7 @@ constexpr size_t kEmotionPathBufSize   = 96;
 constexpr uint32_t kEmotionFrameDelayMs = 30;  // 与 boot_screen 一致
 
 constexpr int32_t kEmotionBubbleBorder = 0;
-#if CONFIG_BOARD_TYPE_ESP32_S31_KORVO_1
-constexpr int32_t kEmotionBubbleSide   = 28;
-constexpr int32_t kCaptionBottom       = 22;
-constexpr int32_t kEmotionEafLift      = 56;
-#elif defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
 constexpr int32_t kEmotionBubbleSide   = 24;
 constexpr int32_t kCaptionBottom       = 28;
 constexpr int32_t kEmotionEafLift      = 20;
@@ -198,9 +170,7 @@ char s_applied_emotion[kEmotionNameMax + 1] = "";
 char s_emotion_path_buf[kEmotionPathBufSize];
 
 const lv_font_t* chat_font() {
-#if CONFIG_BOARD_TYPE_ESP32_S31_KORVO_1
-    return &font_puhui_20_4;
-#elif defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+#if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
     return &font_puhui_20_4;
 #else
     return &font_puhui_30_4;

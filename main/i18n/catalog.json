@@ -2825,11 +2825,6 @@
       "en-US": "Could not connect within 15s, check network and retry"
     },
     {
-      "key": "DONE_OPENCLAW",
-      "zh-CN": "请先完成设备激活后再使用 OpenClaw。",
-      "en-US": "Activate the device before using OpenClaw."
-    },
-    {
       "key": "STATUS_QMC6309_NOT_DETECTED",
       "zh-CN": "STATUS=--  未检测到 QMC6309",
       "en-US": "STATUS=--  QMC6309 not detected"
@@ -2855,9 +2850,9 @@
       "en-US": "Mode1 (AT+RX=2 / AT+MODE=1)"
     },
     {
-      "key": "N_6_MIN_LOOP_LVGL_STRESS_BGM_MOTOR_CAMERA",
-      "zh-CN": "6 分钟循环：LVGL 压测 + 背景音乐 → 马达 → 摄像头",
-      "en-US": "6-min loop: LVGL stress + BGM → motor → camera"
+      "key": "N_6_MIN_LOOP_LVGL_STRESS_BGM_MOTOR",
+      "zh-CN": "6 分钟循环：LVGL 压测 + 背景音乐 → 马达",
+      "en-US": "6-min loop: LVGL stress + BGM → motor"
     },
     {
       "key": "SETTINGS_AUDIO_ESP32_C5",

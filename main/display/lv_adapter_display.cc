@@ -224,6 +224,9 @@ void LVAdapterDisplay::SetupUI() {
 }
 
 void LVAdapterDisplay::ShowHomeScreen() {
+    if (home_shown_) {
+        return;
+    }
     if (esp_lv_adapter_lock(-1) != ESP_OK) {
         return;
     }
@@ -233,6 +236,7 @@ void LVAdapterDisplay::ShowHomeScreen() {
     if (old_scr != nullptr && old_scr != home_scr) {
         lv_obj_delete(old_scr);
     }
+    home_shown_ = true;
     esp_lv_adapter_unlock();
 }
 

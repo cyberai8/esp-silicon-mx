@@ -4,7 +4,6 @@
 #include "application.h"
 #include "audio_codec.h"
 #include "board.h"
-#include "camera_screen/camera_screen.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
@@ -40,17 +39,14 @@ constexpr const char* kFactoryTestMount = "/factory_test";
 constexpr const char* kBgMusicUri =
     "file://factory_test/factory_test_audio.mp3";
 
-constexpr uint32_t kLvglMusicDurationMs = 5 * 60 * 1000;
+constexpr uint32_t kLvglMusicDurationMs = 5 * 60 * 1000 + 30 * 1000;
 constexpr uint32_t kMotorDurationMs = 30 * 1000;
-constexpr uint32_t kCameraDurationMs = 30 * 1000;
-static_assert(kLvglMusicDurationMs + kMotorDurationMs + kCameraDurationMs ==
-                  6 * 60 * 1000,
+static_assert(kLvglMusicDurationMs + kMotorDurationMs == 6 * 60 * 1000,
               "stress cycle must be 6 minutes");
 
 enum class StressPhase {
     LvglAndMusic,
     MotorVibrate,
-    CameraPreview,
 };
 
 lv_obj_t* s_screen = nullptr;
@@ -68,9 +64,6 @@ std::vector<int16_t> s_bgm_pcm_buf;
 StressPhase s_phase = StressPhase::LvglAndMusic;
 lv_timer_t* s_cycle_timer = nullptr;
 bool s_cycle_running = false;
-lv_obj_t* s_cam_overlay = nullptr;
-lv_obj_t* s_cam_canvas = nullptr;
-bool s_cam_preview_active = false;
 
 void StartStressCycle();
 void StopStressCycle();
@@ -223,7 +216,7 @@ void BuildSetupPanel(lv_obj_t* scr) {
     lv_obj_center(start_lbl);
 
     lv_obj_t* foot = lv_label_create(s_setup_panel);
-    lv_label_set_text(foot, I18n::T("6 分钟循环：LVGL 压测 + 背景音乐 → 马达 → 摄像头"));
+    lv_label_set_text(foot, I18n::T("6 分钟循环：LVGL 压测 + 背景音乐 → 马达"));
     lv_obj_set_width(foot, kTestPanelW - 2 * kTestSideMargin);
     lv_label_set_long_mode(foot, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(foot, lv_color_hex(kTestColorTextDim),
@@ -457,58 +450,6 @@ void LogHeapFree(const char* where) {
              static_cast<unsigned long>(spiram));
 }
 
-void StopCameraPreview() {
-    if (s_cam_preview_active) {
-        CameraScreen::StopExternalPreview();
-        s_cam_preview_active = false;
-    }
-
-    if (s_cam_canvas != nullptr) {
-        lv_obj_delete(s_cam_canvas);
-        s_cam_canvas = nullptr;
-    }
-    if (s_cam_overlay != nullptr) {
-        lv_obj_delete(s_cam_overlay);
-        s_cam_overlay = nullptr;
-    }
-}
-
-void StartCameraPreview() {
-    StopCameraPreview();
-
-    CameraScreen::PreviewBuffer preview_buf = {};
-    if (!CameraScreen::PreparePreviewBuffer(&preview_buf)) {
-        ESP_LOGE(TAG, "prepare preview buffer failed");
-        return;
-    }
-
-    s_cam_overlay = lv_obj_create(lv_layer_top());
-    screen_strip_obj_chrome(s_cam_overlay);
-    lv_obj_set_size(s_cam_overlay, LV_HOR_RES, LV_VER_RES);
-    lv_obj_set_style_bg_color(s_cam_overlay, lv_color_black(), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_cam_overlay, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_width(s_cam_overlay, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(s_cam_overlay, 0, LV_PART_MAIN);
-    lv_obj_remove_flag(s_cam_overlay, LV_OBJ_FLAG_SCROLLABLE);
-
-    s_cam_canvas = lv_canvas_create(s_cam_overlay);
-    lv_canvas_set_buffer(s_cam_canvas, preview_buf.data, preview_buf.width,
-                         preview_buf.height, LV_COLOR_FORMAT_RGB888);
-    lv_obj_set_size(s_cam_canvas, preview_buf.width, preview_buf.height);
-    lv_obj_center(s_cam_canvas);
-    screen_make_input_passive(s_cam_canvas);
-
-    if (CameraScreen::StartExternalPreview(s_cam_canvas) != ESP_OK) {
-        ESP_LOGE(TAG, "start fullscreen preview failed");
-        StopCameraPreview();
-        return;
-    }
-
-    s_cam_preview_active = true;
-    ESP_LOGI(TAG, "camera preview started (%dx%d)", preview_buf.width,
-             preview_buf.height);
-}
-
 void StopCycleTimer() {
     if (s_cycle_timer != nullptr) {
         lv_timer_delete(s_cycle_timer);
@@ -531,9 +472,6 @@ void OnCycleTimer(lv_timer_t* /*timer*/) {
         EnterPhase(StressPhase::MotorVibrate);
         break;
     case StressPhase::MotorVibrate:
-        EnterPhase(StressPhase::CameraPreview);
-        break;
-    case StressPhase::CameraPreview:
         EnterPhase(StressPhase::LvglAndMusic);
         break;
     }
@@ -550,7 +488,6 @@ void EnterPhase(StressPhase phase) {
     CleanupStressDemoWidgets();
     PauseBgMusicForPhase();
     VibrateMotorTest::StopMotor();
-    StopCameraPreview();
 
     s_phase = phase;
 
@@ -568,12 +505,6 @@ void EnterPhase(StressPhase phase) {
                  static_cast<unsigned long>(kMotorDurationMs / 1000));
         VibrateMotorTest::StartMotor();
         duration_ms = kMotorDurationMs;
-        break;
-    case StressPhase::CameraPreview:
-        ESP_LOGI(TAG, "phase: camera preview (%lus)",
-                 static_cast<unsigned long>(kCameraDurationMs / 1000));
-        StartCameraPreview();
-        duration_ms = kCameraDurationMs;
         break;
     }
 
@@ -606,7 +537,6 @@ void StopStressCycle() {
     ShutdownBgMusicSession();
     VibrateMotorTest::StopMotor();
     VibrateMotorTest::OnUnload();
-    StopCameraPreview();
     auto& app = Application::GetInstance();
     app.SetActivationSuspended(false);
     app.RestoreSystemAudioAfterStressTest();

@@ -62,10 +62,6 @@ dependencies:
     version: ^1.0.0
     rules:
     - if: target not in [esp32s31]
-  espressif/esp_video:
-    version: ^2.1.0
-    rules:
-    - if: target in [esp32p4, esp32s3, esp32s31]
   espressif/esp_image_effects:
     version: ^1.0.1
     rules:

@@ -543,6 +543,13 @@ void Application::Start() {
     IdlePower_WarmSettingsCache();
 #endif
 
+#if CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B
+    // 圆屏：先出首页，WiFi/OTA/MQTT 在后台继续，避免开机黑屏十几秒。
+    if (auto* lv_display = dynamic_cast<LVAdapterDisplay*>(display)) {
+        lv_display->ShowHomeScreen();
+    }
+#endif
+
     board.PrepareForNetworkOta();
     board.StartNetwork();
 

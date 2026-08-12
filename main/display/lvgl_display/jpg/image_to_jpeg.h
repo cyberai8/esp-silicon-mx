@@ -6,13 +6,40 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <linux/videodev2.h>
 
-typedef uint32_t v4l2_pix_fmt_t; // see linux/videodev2.h for details
+typedef uint32_t v4l2_pix_fmt_t;
 
-// LVGL canvas / NV3051F 预览缓冲为 B-G-R 字节序，拍照保存时用此格式告知编码器。
+#ifndef v4l2_fourcc
+#define v4l2_fourcc(a, b, c, d) \
+    ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
+#endif
+
+#ifndef V4L2_PIX_FMT_RGB565
+#define V4L2_PIX_FMT_RGB565 v4l2_fourcc('R', 'G', 'B', 'P')
+#endif
+#ifndef V4L2_PIX_FMT_RGB565X
+#define V4L2_PIX_FMT_RGB565X v4l2_fourcc('R', 'G', 'B', 'R')
+#endif
+#ifndef V4L2_PIX_FMT_RGB24
+#define V4L2_PIX_FMT_RGB24 v4l2_fourcc('R', 'G', 'B', '3')
+#endif
 #ifndef V4L2_PIX_FMT_BGR24
 #define V4L2_PIX_FMT_BGR24 v4l2_fourcc('B', 'G', 'R', '3')
+#endif
+#ifndef V4L2_PIX_FMT_GREY
+#define V4L2_PIX_FMT_GREY v4l2_fourcc('G', 'R', 'E', 'Y')
+#endif
+#ifndef V4L2_PIX_FMT_YUYV
+#define V4L2_PIX_FMT_YUYV v4l2_fourcc('Y', 'U', 'Y', 'V')
+#endif
+#ifndef V4L2_PIX_FMT_UYVY
+#define V4L2_PIX_FMT_UYVY v4l2_fourcc('U', 'Y', 'V', 'Y')
+#endif
+#ifndef V4L2_PIX_FMT_YUV422P
+#define V4L2_PIX_FMT_YUV422P v4l2_fourcc('4', '2', '2', 'P')
+#endif
+#ifndef V4L2_PIX_FMT_JPEG
+#define V4L2_PIX_FMT_JPEG v4l2_fourcc('J', 'P', 'E', 'G')
 #endif
 
 #ifdef __cplusplus

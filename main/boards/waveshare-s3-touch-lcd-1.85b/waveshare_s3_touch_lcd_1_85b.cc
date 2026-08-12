@@ -485,11 +485,15 @@ public:
             return;
         }
         InitializeLvAdapterDisplay();
+        // 等 LVGL 把首帧刷进 framebuffer，立刻开背光，避免开机黑屏等待联网。
         vTaskDelay(pdMS_TO_TICKS(80));
         if (panel_handle_ != nullptr) {
             esp_lcd_panel_disp_on_off(panel_handle_, true);
         }
-        ScheduleBacklightRestoreAfterUiSettle();
+        if (auto* backlight = static_cast<WavesharePwmBacklight*>(GetBacklight())) {
+            backlight->RestoreBrightnessImmediately();
+        }
+        ESP_LOGI(TAG, "LCD visible");
     }
 
     AudioCodec* GetAudioCodec() override {
@@ -528,10 +532,7 @@ private:
     esp_lcd_panel_handle_t panel_handle_ = nullptr;
     esp_lcd_panel_io_handle_t panel_io_handle_ = nullptr;
     esp_lcd_touch_handle_t touch_handle_ = nullptr;
-    esp_timer_handle_t backlight_restore_timer_ = nullptr;
     i2c_master_dev_handle_t qmi_dev_ = nullptr;
-
-    static constexpr uint32_t kBacklightUiSettleDelayMs = 1500;
 
     void InitializeBacklightOff() {
         gpio_config_t io_conf = {};
@@ -542,28 +543,6 @@ private:
         io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
         ESP_ERROR_CHECK(gpio_config(&io_conf));
         gpio_set_level(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT ? 1 : 0);
-    }
-
-    void ScheduleBacklightRestoreAfterUiSettle() {
-        if (backlight_restore_timer_ != nullptr) {
-            return;
-        }
-        const esp_timer_create_args_t timer_args = {
-            .callback =
-                [](void* arg) {
-                    auto* self = static_cast<WaveshareS3TouchLcd185B*>(arg);
-                    auto* backlight =
-                        static_cast<WavesharePwmBacklight*>(self->GetBacklight());
-                    backlight->RestoreBrightnessImmediately();
-                },
-            .arg = this,
-            .dispatch_method = ESP_TIMER_TASK,
-            .name = "ws185b_bl",
-            .skip_unhandled_events = true,
-        };
-        ESP_ERROR_CHECK(esp_timer_create(&timer_args, &backlight_restore_timer_));
-        ESP_ERROR_CHECK(esp_timer_start_once(backlight_restore_timer_,
-                                             kBacklightUiSettleDelayMs * 1000ULL));
     }
 
     void InitializeButtons() {

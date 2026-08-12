@@ -1,4 +1,4 @@
-# ESP-IDF Partition Table — ESP32-S31-Korvo-1 (16MB Flash)
+# ESP-IDF Partition Table — 16MB Flash（单槽 OTA）
 # 当前固件约 8.6MB+，16MB 放不下双 OTA；先单槽 ota_0（9MB）+ resources。
 # Name,         Type, SubType,      Offset,   Size, Flags
 nvsfactory,     data, nvs,                ,   120K,

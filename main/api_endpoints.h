@@ -4,7 +4,7 @@
 #include <cstring>
 #include <string>
 
-// 设为 1 时在 OpenClaw 等调用处打印 HTTP 请求 URL、请求体与响应体。
+// 设为 1 时在 HTTP 调用处打印请求 URL、请求体与响应体。
 #ifndef API_HTTP_DEBUG
 #define API_HTTP_DEBUG 0
 #endif
@@ -71,19 +71,6 @@ constexpr const char* kHost = "http://xxxxx.com";
 constexpr const char* kApiV1Prefix = "/api/v1";
 constexpr const char* kXiaozhiDevicePrefix = "/xiaozhi/device";
 
-// OpenClaw
-constexpr const char* kOpenClawDeviceStatus =
-    "/api/v1/devices/status";
-constexpr const char* kOpenClawConversationList =
-    "/api/v1/conversation?page=1&size=100";
-constexpr const char* kOpenClawUpload = "/api/v1/upload";
-constexpr const char* kOpenClawMessagesFmt =
-    "/api/v1/conversation/%s/messages?page=1&size=100";
-constexpr const char* kOpenClawRemoveAll =
-    "/api/v1/conversation/removeAll";
-constexpr const char* kOpenClawConversationDeleteFmt =
-    "/api/v1/conversation/delete/%s";
-
 // ASR
 constexpr const char* kAsrTranscribe = "/api/v1/asr/transcribe";
 constexpr const char* kAsrAudioRecords =
@@ -115,21 +102,6 @@ inline std::string Url(const char* path) {
 
 inline std::string WeatherDistrictUrl(const std::string& district_id) {
     return Url(kWeatherDistrictPath) + district_id;
-}
-
-inline std::string OpenClawMessagesUrl(const std::string& conversation_id) {
-    char path[192];
-    std::snprintf(path, sizeof(path), kOpenClawMessagesFmt,
-                  conversation_id.c_str());
-    return Url(path);
-}
-
-inline std::string OpenClawConversationDeleteUrl(
-    const std::string& conversation_id) {
-    char path[192];
-    std::snprintf(path, sizeof(path), kOpenClawConversationDeleteFmt,
-                  conversation_id.c_str());
-    return Url(path);
 }
 
 inline std::string AsrAudioRecordsUrl(const char* original_name) {

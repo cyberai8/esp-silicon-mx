@@ -1,7 +1,7 @@
 #pragma once
 
 // WiFi 模式下未连上时拦截联网能力；4G（蜂窝）模式不拦。
-// 入口级拦截（天气 / OpenClaw 等）与操作级拦截（录音→转写）共用。
+// 入口级拦截（天气等）与操作级拦截（录音→转写）共用。
 
 // 当前为 WiFi 模式且未连接时返回 true。
 bool WifiRequired_ShouldBlock();

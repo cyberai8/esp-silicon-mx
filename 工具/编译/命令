@@ -7,7 +7,6 @@
 # metalio-claw-4                    esp32p4     v5.5.4（文档主推）
 # esp-vocat                         esp32s3     v5.5.x
 # waveshare-s3-touch-lcd-1.85b      esp32s3     v5.5.x
-# esp32-s31-korvo-1                 esp32s31    **必须 IDF 6.2+**
 #
 # 原则：每块板用独立 -B build 目录 + 独立 SDKCONFIG，避免互相覆盖。
 # =============================================================================
@@ -19,8 +18,6 @@ cd /home/qmx/qmx-sd/esp-yun
 # -----------------------------------------------------------------------------
 # P4 / S3 圆屏：
 #   . ~/esp-idf-v5.5.4/export.sh
-# S31 Korvo：
-#   . ~/esp-idf-v6.2/export.sh
 #
 # idf.py --version   # 确认版本后再编译
 
@@ -89,34 +86,6 @@ idf.py -B build-waveshare-1.85b \
 idf.py -B build-waveshare-1.85b \
   -DSDKCONFIG=sdkconfig.waveshare-s3-touch-lcd-1.85b \
   -p /dev/ttyACM0 flash monitor
-
-
-# =============================================================================
-# 4) ESP32-S31-Korvo-1
-#    板级: main/boards/esp32-s31-korvo-1
-#    IDF:  **必须 6.2+**（esp32s31 target；5.5 编不了）
-#    配置: 可用根目录 sdkconfig（当前仓库活跃配置常为 S31）
-#          或 sdkconfig.defaults.esp32s31 + 独立文件
-# =============================================================================
-. ~/esp/esp-idf-s31-v6.2/export.sh     # 务必换到 6.2+，不要用 5.5
-
-idf.py --preview -B build-s31-korvo \
-  -DSDKCONFIG=sdkconfig.s31-korvo \
-  build
-
-# 若尚无 sdkconfig.s31-korvo：可复制当前已能编过的 S31 sdkconfig，或
-# set-target 后依赖 sdkconfig.defaults.esp32s31，再确认
-# CONFIG_BOARD_TYPE_ESP32_S31_KORVO_1=y
-
-idf.py -B build-s31-korvo -DSDKCONFIG=sdkconfig.s31-korvo build
-idf.py --preview -B build-s31-korvo \
-  -DSDKCONFIG=sdkconfig.s31-korvo \
-  -p /dev/ttyACM0 flash monitor
-
-# 直接用根目录 sdkconfig（仅当你确认它是 S31 配置时）：
-# . ~/esp-idf-v6.2/export.sh
-# idf.py set-target esp32s31
-# idf.py build
 
 
 # =============================================================================

@@ -39,11 +39,13 @@ public:
     virtual void SetPowerSaveMode(bool on) override;
     virtual void SetPreviewImage(const void* image);
 
-    // OTA/联网完成后再进首页（勿在 SetupUI 里用定时器提前创建）。
+    // 可在联网/OTA 前调用；重复调用不会重建首页。
     void ShowHomeScreen();
 
 private:
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
     void SetupUI();
+
+    bool home_shown_ = false;
 };
