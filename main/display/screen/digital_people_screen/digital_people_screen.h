@@ -20,11 +20,10 @@
 // 进入页面前检查设备是否已激活；未激活时弹出不可关闭的拦截弹窗（含返回
 // 按钮），背后页面内容保持可见但不可操作，并打印日志。
 //
-// 对话气泡：
-//   - ShowUserMessage(): 用户说的话 -> 屏幕底部气泡（gif 下方）。
-//   - ShowSystemMessage(): 系统 / assistant 反馈 -> gif 左上方气泡。
-//   两个气泡都是带白色边框的白色半透明聊天气泡，初始隐藏，调用时刷新内
-//   容并显示，会自动覆盖上一条同类型消息。屏幕未在前台时全部 no-op。
+// 对话字幕（底部单行气泡）：
+//   - 用户 / 设备话术共用底部一条气泡，强制单行；过长时横向滚动。
+//   - 若用户与设备话术同时存在，定时轮流切换显示。
+//   - 设备进入待机（idle）后自动隐藏并清空字幕。
 // ---------------------------------------------------------------------------
 class DigitalPeopleScreen {
 public:
@@ -35,6 +34,7 @@ public:
     static void ShowUserMessage(const char* text);
     static void ShowSystemMessage(const char* text);
     static void ClearMessages();
+    static void RefreshDeviceState();
 
     // 切换数字人屏正在播放的表情动画 / 静态图。
     // category 必须是 6 个大类之一：crying / happy / loving / neutral /

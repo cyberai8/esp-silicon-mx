@@ -30,6 +30,7 @@
 #include "ota_screen.h"
 #include "home_screen.h"
 #include "chat_screen/chat_screen.h"
+#include "digital_people_screen/digital_people_screen.h"
 #include "standby_screen/standby_screen.h"
 #include "idle_power_policy.h"
 #include "lv_adapter_display.h"
@@ -965,6 +966,7 @@ void Application::SetDeviceState(DeviceState state) {
 
 #ifdef HAVE_LVGL
     ChatScreen::RefreshDeviceState();
+    DigitalPeopleScreen::RefreshDeviceState();
 #endif
 }
 

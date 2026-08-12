@@ -74,13 +74,18 @@ struct UiState {
     lv_obj_t* screen        = nullptr;
     lv_obj_t* eaf           = nullptr;
     lv_obj_t* hint_label    = nullptr;
-    lv_obj_t* system_bubble = nullptr;
-    lv_obj_t* system_label  = nullptr;
-    lv_obj_t* user_bubble   = nullptr;
-    lv_obj_t* user_label    = nullptr;
+    lv_obj_t* speech_bubble = nullptr;
+    lv_obj_t* speech_label  = nullptr;
 };
 
 UiState s_ui;
+
+constexpr size_t kSpeechTextMax = 384;
+constexpr uint32_t kSpeechCarouselPeriodMs = 3500;
+char s_user_speech[kSpeechTextMax] = "";
+char s_system_speech[kSpeechTextMax] = "";
+bool s_speech_show_user = true;
+lv_timer_t* s_speech_carousel_timer = nullptr;
 
 // 切换表情读入 PSRAM + 首帧解码时短暂关唤醒词，避免瞬时 feed 堆积。
 struct WakeWordGuard {
@@ -210,49 +215,30 @@ lv_obj_t* CreateEmotionWidget(lv_obj_t* parent) {
 }
 
 // ---------------------------------------------------------------------------
-// 对话气泡视觉参数
+// 底部单行字幕气泡
 //
-//   ┌─────────────────────────────────────────┐ 0
-//   │ [back]                                  │ ← back btn 占 (16,16) 60x60
-//   │   ╭─ system bubble ─╮                   │ ← top-left，y 起点 kSysBubbleTop
-//   │   ╰────────────────╯                    │
-//   │                                         │
-//   │            (gif 动画)                    │
-//   │                                         │
-//   │        ╭─ user bubble ─╮                │ ← bottom-center
-//   │        ╰───────────────╯                │
-//   └─────────────────────────────────────────┘ 720
-//
-//   - 气泡背景：白色 30% 不透明，白色 2px 边框 +
-//     圆角。
-//   - 文本：深色 puhui_30。
-//   - 文本宽度：根据内容 + padding 计算，封顶 max_w 后换行（LV_LABEL_LONG_WRAP）。
-//   - 屏幕未在前台时静态指针都被清空，所有显示接口直接 no-op。
+//   ┌─────────────────────────────────────────┐
+//   │            (EAF 表情动画)                 │
+//   │        ╭─ speech bubble ─╮              │ ← bottom-center，单行
+//   │        ╰──────────────────╯              │   过长横向滚动；用户/设备轮流
+//   └─────────────────────────────────────────┘
 // ---------------------------------------------------------------------------
 #if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
-// 360 圆屏：顶部气泡改居中对齐，避免圆弧裁掉左上角；四周留足安全边距。
-constexpr int32_t  kBubbleRadius     = 14;
-constexpr int32_t  kBubblePadX       = 12;
-constexpr int32_t  kBubblePadY       = 8;
-constexpr int32_t  kBubbleBorder     = 2;
-constexpr int32_t  kSideMargin       = 40;   // 侧边安全区（≈280 宽）
-constexpr int32_t  kSysBubbleTop     = 32;   // 顶部安全区，避开圆弧
-constexpr int32_t  kUserBubbleBottom = 36;   // 底部安全区
-constexpr lv_align_t kSysBubbleAlign = LV_ALIGN_TOP_MID;
-constexpr int32_t  kSysBubbleXOfs    = 0;
+constexpr int32_t  kBubbleRadius       = 14;
+constexpr int32_t  kBubblePadX         = 12;
+constexpr int32_t  kBubblePadY         = 8;
+constexpr int32_t  kBubbleBorder       = 2;
+constexpr int32_t  kSideMargin         = 40;
+constexpr int32_t  kSpeechBubbleBottom = 36;
 #else
-constexpr int32_t  kBubbleRadius     = 18;
-constexpr int32_t  kBubblePadX       = 18;
-constexpr int32_t  kBubblePadY       = 14;
-constexpr int32_t  kBubbleBorder     = 2;
-constexpr int32_t  kSideMargin       = 16;
-constexpr int32_t  kSysBubbleTop     = 24;            // 顶部安全间距
-constexpr int32_t  kUserBubbleBottom = 24;
-constexpr lv_align_t kSysBubbleAlign = LV_ALIGN_TOP_LEFT;
-constexpr int32_t  kSysBubbleXOfs    = kSideMargin;
+constexpr int32_t  kBubbleRadius       = 18;
+constexpr int32_t  kBubblePadX         = 18;
+constexpr int32_t  kBubblePadY         = 14;
+constexpr int32_t  kBubbleBorder       = 2;
+constexpr int32_t  kSideMargin         = 16;
+constexpr int32_t  kSpeechBubbleBottom = 24;
 #endif
-constexpr int32_t  kSysBubbleMaxW    = kPanelSize - kSideMargin * 2;       // 688
-constexpr int32_t  kUserBubbleMaxW   = kPanelSize - kSideMargin * 2;       // 688
+constexpr int32_t kSpeechBubbleMaxW = kPanelSize - kSideMargin * 2;
 
 constexpr uint32_t kColorBubbleBg     = 0xFFFFFF;
 constexpr uint32_t kColorBubbleBorder = 0xFFFFFF;
@@ -342,50 +328,128 @@ void StyleBubble(lv_obj_t* bubble) {
     lv_obj_set_height(bubble, LV_SIZE_CONTENT);
 }
 
-// 创建带白边的聊天气泡，初始隐藏。dir 决定气泡在父容器内的对齐方式。
-struct BubbleHandles {
+// 创建底部单行字幕气泡，初始隐藏。
+struct SpeechBubbleHandles {
     lv_obj_t* bubble;
     lv_obj_t* label;
 };
 
-BubbleHandles BuildBubble(lv_obj_t* parent, lv_align_t align, int32_t x_ofs,
-                          int32_t y_ofs) {
+SpeechBubbleHandles BuildSpeechBubble(lv_obj_t* parent) {
+    const lv_font_t* font = bubble_font();
+    const int32_t line_h  = lv_font_get_line_height(font);
+    const int32_t inner_w =
+        kSpeechBubbleMaxW - kBubblePadX * 2 - kBubbleBorder * 2;
+    const int32_t bubble_h =
+        line_h + kBubblePadY * 2 + kBubbleBorder * 2;
+
     lv_obj_t* bubble = lv_obj_create(parent);
     StyleBubble(bubble);
-    lv_obj_set_width(bubble, 100);  // 占位，AddMessage 时会重算
-    lv_obj_align(bubble, align, x_ofs, y_ofs);
+    lv_obj_set_width(bubble, kSpeechBubbleMaxW);
+    lv_obj_set_height(bubble, bubble_h);
+    lv_obj_align(bubble, LV_ALIGN_BOTTOM_MID, 0, -kSpeechBubbleBottom);
     lv_obj_add_flag(bubble, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t* label = lv_label_create(bubble);
+    lv_obj_set_width(label, inner_w);
+    lv_obj_set_height(label, line_h);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(label, "");
-    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_font(label, bubble_font(), LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, font, LV_PART_MAIN);
     lv_obj_set_style_text_color(label, lv_color_hex(kColorBubbleText),
                                 LV_PART_MAIN);
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, 0, 0);
 
-    // 气泡不消费输入，让右滑返回手势能穿透。
     screen_make_input_passive(bubble);
     return {bubble, label};
 }
 
-void UpdateBubble(lv_obj_t* bubble, lv_obj_t* label, const char* text,
-                  int32_t max_w) {
-    if (bubble == nullptr || label == nullptr) return;
+void StopSpeechCarouselTimer() {
+    if (s_speech_carousel_timer != nullptr) {
+        lv_timer_delete(s_speech_carousel_timer);
+        s_speech_carousel_timer = nullptr;
+    }
+}
 
-    const lv_font_t* font = bubble_font();
-    int32_t text_w = lv_txt_get_width(text, std::strlen(text), font, 0);
-    if (text_w < 32) text_w = 32;
-    int32_t bubble_w = text_w + kBubblePadX * 2 + kBubbleBorder * 2;
-    if (bubble_w > max_w) bubble_w = max_w;
+void ClearSpeechStorage() {
+    s_user_speech[0]   = '\0';
+    s_system_speech[0] = '\0';
+    s_speech_show_user = true;
+}
 
-    lv_obj_set_width(bubble, bubble_w);
-    lv_obj_set_width(label, bubble_w - kBubblePadX * 2 - kBubbleBorder * 2);
-    lv_label_set_text(label, text);
-    lv_obj_update_layout(label);
-    lv_obj_set_height(bubble, LV_SIZE_CONTENT);
-    lv_obj_remove_flag(bubble, LV_OBJ_FLAG_HIDDEN);
-    // 重新对齐：内容变化后宽高会重算，需要再 align 一次保证锚点正确。
-    lv_obj_update_layout(bubble);
+void HideSpeechBubble() {
+    if (s_ui.speech_bubble == nullptr) {
+        return;
+    }
+    if (s_ui.speech_label != nullptr) {
+        lv_label_set_text(s_ui.speech_label, "");
+    }
+    lv_obj_add_flag(s_ui.speech_bubble, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ApplySpeechToLabel(const char* text) {
+    if (s_ui.speech_label == nullptr || text == nullptr) {
+        return;
+    }
+    lv_label_set_text(s_ui.speech_label, text);
+    // 切换文案时重启横向滚动动画。
+    lv_label_set_long_mode(s_ui.speech_label, LV_LABEL_LONG_CLIP);
+    lv_label_set_long_mode(s_ui.speech_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+}
+
+void OnSpeechCarouselTimer(lv_timer_t* /*t*/) {
+    if (s_user_speech[0] == '\0' || s_system_speech[0] == '\0') {
+        StopSpeechCarouselTimer();
+        return;
+    }
+    s_speech_show_user = !s_speech_show_user;
+    ApplySpeechToLabel(s_speech_show_user ? s_user_speech : s_system_speech);
+}
+
+void StartSpeechCarouselTimer() {
+    if (s_speech_carousel_timer != nullptr) {
+        return;
+    }
+    s_speech_carousel_timer = lv_timer_create(OnSpeechCarouselTimer,
+                                              kSpeechCarouselPeriodMs, nullptr);
+}
+
+void RefreshSpeechBar() {
+    if (s_ui.speech_bubble == nullptr) {
+        return;
+    }
+
+    if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
+        ClearSpeechStorage();
+        HideSpeechBubble();
+        StopSpeechCarouselTimer();
+        return;
+    }
+
+    const bool has_user = s_user_speech[0] != '\0';
+    const bool has_sys  = s_system_speech[0] != '\0';
+    if (!has_user && !has_sys) {
+        HideSpeechBubble();
+        StopSpeechCarouselTimer();
+        return;
+    }
+
+    const char* text = nullptr;
+    if (has_user && has_sys) {
+        text = s_speech_show_user ? s_user_speech : s_system_speech;
+        StartSpeechCarouselTimer();
+    } else {
+        text = has_user ? s_user_speech : s_system_speech;
+        StopSpeechCarouselTimer();
+    }
+
+    ApplySpeechToLabel(text);
+    lv_obj_remove_flag(s_ui.speech_bubble, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(s_ui.speech_bubble, LV_ALIGN_BOTTOM_MID, 0,
+                 -kSpeechBubbleBottom);
+}
+
+void on_refresh_device_state_async(void* /*param*/) {
+    RefreshSpeechBar();
 }
 
 void OnSwipeBack();
@@ -540,6 +604,8 @@ void OnScreenUnloaded(lv_event_t* /*e*/) {
         lv_timer_delete(s_activation_guard_timer);
         s_activation_guard_timer = nullptr;
     }
+    StopSpeechCarouselTimer();
+    ClearSpeechStorage();
     CancelPendingEmotionLoad();
     s_applied_emotion[0] = '\0';
     s_activation_dlg = ActivationBlockedDialogUi{};
@@ -547,10 +613,8 @@ void OnScreenUnloaded(lv_event_t* /*e*/) {
     s_ui.screen        = nullptr;
     s_ui.eaf           = nullptr;
     s_ui.hint_label    = nullptr;
-    s_ui.system_bubble = nullptr;
-    s_ui.system_label  = nullptr;
-    s_ui.user_bubble   = nullptr;
-    s_ui.user_label    = nullptr;
+    s_ui.speech_bubble = nullptr;
+    s_ui.speech_label  = nullptr;
 }
 
 }  // namespace
@@ -586,17 +650,10 @@ lv_obj_t* DigitalPeopleScreen::Create() {
         screen_make_input_passive(s_ui.eaf);
     }
 
-    // 两个气泡：system 锚到左上（让出 back 按钮位置），user 锚到底部居中。
     {
-        BubbleHandles sys = BuildBubble(scr, kSysBubbleAlign, kSysBubbleXOfs,
-                                        kSysBubbleTop);
-        s_ui.system_bubble = sys.bubble;
-        s_ui.system_label  = sys.label;
-
-        BubbleHandles usr = BuildBubble(scr, LV_ALIGN_BOTTOM_MID, 0,
-                                        -kUserBubbleBottom);
-        s_ui.user_bubble = usr.bubble;
-        s_ui.user_label  = usr.label;
+        SpeechBubbleHandles speech = BuildSpeechBubble(scr);
+        s_ui.speech_bubble = speech.bubble;
+        s_ui.speech_label  = speech.label;
     }
 
     screen_attach_swipe_back(scr, OnSwipeBack);
@@ -633,28 +690,32 @@ bool DigitalPeopleScreen::IsActive() {
 void DigitalPeopleScreen::ShowUserMessage(const char* text) {
     if (!IsActive() || text == nullptr || text[0] == '\0') return;
     if (s_activation_blocked) return;
-    UpdateBubble(s_ui.user_bubble, s_ui.user_label, text, kUserBubbleMaxW);
-    // 重新对齐到底部中点，让宽度变化后视觉居中。
-    lv_obj_align(s_ui.user_bubble, LV_ALIGN_BOTTOM_MID, 0, -kUserBubbleBottom);
+    std::strncpy(s_user_speech, text, sizeof(s_user_speech) - 1);
+    s_user_speech[sizeof(s_user_speech) - 1] = '\0';
+    s_speech_show_user = true;
+    RefreshSpeechBar();
 }
 
 void DigitalPeopleScreen::ShowSystemMessage(const char* text) {
     if (!IsActive() || text == nullptr || text[0] == '\0') return;
     if (s_activation_blocked) return;
-    UpdateBubble(s_ui.system_bubble, s_ui.system_label, text, kSysBubbleMaxW);
-    lv_obj_align(s_ui.system_bubble, kSysBubbleAlign, kSysBubbleXOfs,
-                 kSysBubbleTop);
+    std::strncpy(s_system_speech, text, sizeof(s_system_speech) - 1);
+    s_system_speech[sizeof(s_system_speech) - 1] = '\0';
+    s_speech_show_user = false;
+    RefreshSpeechBar();
 }
 
 void DigitalPeopleScreen::ClearMessages() {
-    if (s_ui.system_bubble != nullptr) {
-        lv_label_set_text(s_ui.system_label, "");
-        lv_obj_add_flag(s_ui.system_bubble, LV_OBJ_FLAG_HIDDEN);
+    ClearSpeechStorage();
+    HideSpeechBubble();
+    StopSpeechCarouselTimer();
+}
+
+void DigitalPeopleScreen::RefreshDeviceState() {
+    if (!IsActive()) {
+        return;
     }
-    if (s_ui.user_bubble != nullptr) {
-        lv_label_set_text(s_ui.user_label, "");
-        lv_obj_add_flag(s_ui.user_bubble, LV_OBJ_FLAG_HIDDEN);
-    }
+    lv_async_call(on_refresh_device_state_async, nullptr);
 }
 
 void DigitalPeopleScreen::LifecycleCallback(screen_lifecycle_event_t event) {
@@ -668,6 +729,7 @@ void DigitalPeopleScreen::LifecycleCallback(screen_lifecycle_event_t event) {
             ESP_LOGI(TAG, "load: digital_people_screen");
         }
         audio_service.EnableWakeWordDetection(true);
+        RefreshDeviceState();
     } else {
         ESP_LOGI(TAG, "unload: digital_people_screen");
         Application::GetInstance().ForceReturnToIdle();
