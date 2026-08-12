@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "cJSON.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_lv_adapter.h"
 #include "freertos/FreeRTOS.h"
@@ -145,6 +146,9 @@ lv_obj_t* s_trans_lbl = nullptr;
 lv_obj_t* s_action_btn = nullptr;
 lv_obj_t* s_action_lbl = nullptr;
 TaskHandle_t s_worker_task = nullptr;
+StackType_t* s_worker_stack = nullptr;
+StaticTask_t* s_worker_tcb = nullptr;
+constexpr uint32_t kWorkerStack = 16 * 1024;
 
 std::unique_ptr<WebSocket> s_ws;
 std::string s_source_text;
@@ -463,9 +467,22 @@ bool fetch_ws_url(int lanid, const char* fromlan, const char* tolan,
     std::string body(raw);
     cJSON_free(raw);
 
-    auto resp = http_post_json(api::Url(api::kSinicloudToken), std::move(body));
+    const std::string token_url = api::Url(api::kSinicloudToken);
+    ESP_LOGI(TAG, "request sinicloud token: %s", token_url.c_str());
+    auto resp = http_post_json(token_url, std::move(body));
     if (!resp.ok) {
-        err_out = resp.err.empty() ? "token request failed" : resp.err;
+        if (resp.status == 404) {
+            err_out = "sinicloud token API not found (404)";
+            ESP_LOGE(TAG, "token 404: %s (check server api_base_url / backend deploy)",
+                     token_url.c_str());
+        } else if (resp.status > 0) {
+            err_out = "HTTP " + std::to_string(resp.status);
+            ESP_LOGE(TAG, "token failed status=%d url=%s body=%.120s", resp.status,
+                     token_url.c_str(), resp.body.c_str());
+        } else {
+            err_out = resp.err.empty() ? "token request failed" : resp.err;
+            ESP_LOGE(TAG, "token failed: %s", err_out.c_str());
+        }
         return false;
     }
 
@@ -766,6 +783,48 @@ void worker_task(void* /*arg*/) {
     vTaskDelete(nullptr);
 }
 
+bool spawn_worker_task() {
+    if (xTaskCreatePinnedToCore(worker_task, "translate_ws", kWorkerStack, nullptr,
+                                5, &s_worker_task, 0) == pdPASS) {
+        return true;
+    }
+
+    const size_t internal_free =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const size_t largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    ESP_LOGW(TAG,
+             "translate_ws create failed stack=%u internal free=%u largest=%u",
+             static_cast<unsigned>(kWorkerStack),
+             static_cast<unsigned>(internal_free),
+             static_cast<unsigned>(largest));
+
+    if (s_worker_stack == nullptr) {
+        s_worker_stack = static_cast<StackType_t*>(heap_caps_malloc(
+            kWorkerStack, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+    if (s_worker_tcb == nullptr) {
+        s_worker_tcb = static_cast<StaticTask_t*>(heap_caps_malloc(
+            sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+    if (s_worker_stack == nullptr || s_worker_tcb == nullptr) {
+        ESP_LOGE(TAG, "translate_ws SPIRAM stack alloc failed");
+        s_worker_task = nullptr;
+        return false;
+    }
+
+    s_worker_task =
+        xTaskCreateStaticPinnedToCore(worker_task, "translate_ws", kWorkerStack,
+                                      nullptr, 5, s_worker_stack, s_worker_tcb, 0);
+    if (s_worker_task == nullptr) {
+        ESP_LOGE(TAG, "translate_ws static create failed");
+        return false;
+    }
+    ESP_LOGW(TAG, "translate_ws started with SPIRAM stack=%u",
+             static_cast<unsigned>(kWorkerStack));
+    return true;
+}
+
 void start_session() {
     if (s_worker_task != nullptr) {
         return;
@@ -778,10 +837,8 @@ void start_session() {
     s_can_send_audio.store(false, std::memory_order_release);
     post_state(State::Connecting, s_session.load(std::memory_order_acquire));
 
-    BaseType_t ok = xTaskCreatePinnedToCore(
-        worker_task, "translate_ws", 8192, nullptr, 5, &s_worker_task, 0);
-    if (ok != pdPASS) {
-        s_worker_task = nullptr;
+    if (!spawn_worker_task()) {
+        ESP_LOGE(TAG, "worker task create failed");
         post_status(I18n::T("启动失败"), s_session.load());
         post_state(State::Idle, s_session.load());
     }

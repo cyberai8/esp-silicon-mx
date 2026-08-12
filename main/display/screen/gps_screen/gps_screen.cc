@@ -1543,7 +1543,8 @@ std::string BuildStaticMapUrl(double lat_deg, double lon_deg,
     char url[512];
     std::snprintf(url, sizeof(url),
                   "%s%s?latitude=%.6f&longitude=%.6f&coordtype=gcj02&width=%d&height=%d&zoom=%d",
-                  api::kHost, api::kGpsStaticMap, lat_deg, lon_deg, view.width,
+                  api::GetApiBaseUrl().c_str(), api::kGpsStaticMap, lat_deg,
+                  lon_deg, view.width,
                   view.height, view.zoom);
     return url;
 }

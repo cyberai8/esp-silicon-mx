@@ -39,8 +39,9 @@ public:
     virtual void SetPowerSaveMode(bool on) override;
     virtual void SetPreviewImage(const void* image);
 
-    // 可在联网/OTA 前调用；重复调用不会重建首页。
+    // 可在联网/OTA 后调用；重复调用不会重建首页。开机动画未结束时将阻塞等待。
     void ShowHomeScreen();
+    void WaitForBootAnimation();
 
 private:
     virtual bool Lock(int timeout_ms = 0) override;

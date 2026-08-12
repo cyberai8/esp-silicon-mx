@@ -773,6 +773,7 @@ void LaunchWake(screen_lifecycle_cb_t /*lifecycle_cb*/) {
 constexpr AppEntry kApps[] = {
     {"chat",           "聊天",     LaunchChat,          chat_lifecycle_cb,          true},
     {"wifi",           "网络配置", LaunchWifi,          wifi_lifecycle_cb,          false},
+    {"digital_people", "数字人",   LaunchDigitalPeople, digital_people_lifecycle_cb, true},
 #if !defined(BOARD_ESP_VOCAT)
     {"call",           "电话",     LaunchCall,          call_lifecycle_cb,          false},
 #endif
@@ -835,7 +836,7 @@ const AppEntry* ResolveCloverApp(const char* preferred,
 
 // 首页优先顺序（上/右/下/左），其余按 kApps 原序接在后面。
 void BuildCloverAppOrder(int* out_indices, int* out_count) {
-    const char* prefer[] = {"chat", "recording", "music", "wifi"};
+    const char* prefer[] = {"chat", "recording", "digital_people", "wifi"};
     bool used[kTotalApps] = {};
     int n = 0;
 
@@ -1731,6 +1732,24 @@ constexpr uint32_t kCloverFadeMs = 120;
 const char* CloverDisplayName(const AppEntry* entry);
 bool PagerLoopEnabled(const PagerState* state);
 
+// 四叶瓣图标显示框：略大于资源尺寸，等比居中，避免固定 64×64 裁切两侧。
+constexpr int kCloverIconFrame = 72;
+
+void SetupCloverIcon(lv_obj_t* icon, lv_coord_t center_x, lv_coord_t center_y) {
+    if (icon == nullptr) {
+        return;
+    }
+    lv_obj_set_size(icon, kCloverIconFrame, kCloverIconFrame);
+    lv_obj_set_pos(icon, center_x - kCloverIconFrame / 2,
+                   center_y - kCloverIconFrame / 2);
+    lv_image_set_inner_align(icon, LV_IMAGE_ALIGN_CONTAIN);
+    lv_image_set_antialias(icon, true);
+    lv_obj_add_flag(icon, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_image_opa(icon, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+}
+
 void CloverApplyPage(PagerState* state, int page) {
     if (state == nullptr || !state->clover) {
         return;
@@ -1763,6 +1782,7 @@ void CloverApplyPage(PagerState* state, int page) {
         const AppEntry& app = kApps[idx];
         if (icon != nullptr) {
             lv_image_set_src(icon, s_clover_icon_paths[idx]);
+            lv_image_set_inner_align(icon, LV_IMAGE_ALIGN_CONTAIN);
             lv_obj_remove_flag(icon, LV_OBJ_FLAG_HIDDEN);
         }
         if (name != nullptr) {
@@ -2641,8 +2661,7 @@ void AddCloverPetalVisual(lv_obj_t* page, const AppEntry* entry, int app_idx,
     if (page == nullptr || entry == nullptr || slot < 0 || slot >= 4) {
         return;
     }
-    constexpr int kIcon = 64;
-    constexpr lv_coord_t kIconCx[4] = {180, 298, 180, 62};
+    constexpr int kIconCx[4] = {180, 298, 180, 62};
     constexpr lv_coord_t kIconCy[4] = {60, 178, 282, 178};
     constexpr lv_coord_t kTextCy[4] = {104, 222, 326, 222};
 
@@ -2650,11 +2669,7 @@ void AddCloverPetalVisual(lv_obj_t* page, const AppEntry* entry, int app_idx,
     if (app_idx >= 0 && app_idx < kTotalApps) {
         lv_image_set_src(icon, s_clover_icon_paths[app_idx]);
     }
-    lv_obj_set_size(icon, kIcon, kIcon);
-    lv_obj_set_pos(icon, kIconCx[slot] - kIcon / 2, kIconCy[slot] - kIcon / 2);
-    lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_image_opa(icon, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    SetupCloverIcon(icon, kIconCx[slot], kIconCy[slot]);
 
     lv_obj_t* name = lv_label_create(page);
     lv_label_set_text(name, I18n::T(CloverDisplayName(entry)));
@@ -2831,10 +2846,9 @@ lv_obj_t* CreateRoundCloverHome() {
     lv_obj_set_style_bg_opa(layer, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_remove_flag(layer, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(layer, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(layer, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     state->clover_layer = layer;
 
-    constexpr int kIcon = 64;
-    // 图标中心略往瓣内收，避开顶栏 / 底部分页点 / 左右瓣缘
     constexpr lv_coord_t kIconCx[4] = {180, 298, 180, 62};
     constexpr lv_coord_t kIconCy[4] = {60, 178, 282, 178};
     constexpr lv_coord_t kTextCy[4] = {104, 222, 326, 222};
@@ -2853,11 +2867,7 @@ lv_obj_t* CreateRoundCloverHome() {
 
     for (int s = 0; s < kCloverAppsPerPage; ++s) {
         lv_obj_t* icon = lv_image_create(layer);
-        lv_obj_set_size(icon, kIcon, kIcon);
-        lv_obj_set_pos(icon, kIconCx[s] - kIcon / 2, kIconCy[s] - kIcon / 2);
-        lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_set_style_image_opa(icon, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+        SetupCloverIcon(icon, kIconCx[s], kIconCy[s]);
         state->clover_icon[s] = icon;
 
         lv_obj_t* name = lv_label_create(layer);

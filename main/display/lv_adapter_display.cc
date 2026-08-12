@@ -223,6 +223,10 @@ void LVAdapterDisplay::SetupUI() {
     lv_screen_load(boot_scr);
 }
 
+void LVAdapterDisplay::WaitForBootAnimation() {
+    BootScreen::WaitUntilAnimationFinished();
+}
+
 void LVAdapterDisplay::ShowHomeScreen() {
     if (home_shown_) {
         return;

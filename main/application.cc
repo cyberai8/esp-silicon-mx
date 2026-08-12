@@ -543,13 +543,6 @@ void Application::Start() {
     IdlePower_WarmSettingsCache();
 #endif
 
-#if CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B
-    // 圆屏：先出首页，WiFi/OTA/MQTT 在后台继续，避免开机黑屏十几秒。
-    if (auto* lv_display = dynamic_cast<LVAdapterDisplay*>(display)) {
-        lv_display->ShowHomeScreen();
-    }
-#endif
-
     board.PrepareForNetworkOta();
     board.StartNetwork();
 
@@ -740,10 +733,17 @@ void Application::Start() {
         backlight->RestoreBrightness();
     }
 #endif
-    // VoCat：开机动画从板级构造起已播过网络/OTA/MQTT 全程，就绪后直接进首页。
+#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+    // 开机动画播完后再进四叶瓣菜单；联网/OTA/MQTT 期间继续播动画。
+    if (auto* lv_display = dynamic_cast<LVAdapterDisplay*>(display)) {
+        lv_display->WaitForBootAnimation();
+        lv_display->ShowHomeScreen();
+    }
+#else
     if (auto* lv_display = dynamic_cast<LVAdapterDisplay*>(display)) {
         lv_display->ShowHomeScreen();
     }
+#endif
 #endif
 
     esp_timer_start_periodic(clock_timer_handle_, 1000000);

@@ -1,9 +1,41 @@
 #include "boot_screen.h"
+
+#include <atomic>
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
 #include "lv_eaf.h"
 #include "i18n.h"
+
 LV_FONT_DECLARE(font_puhui_30_4);
 
+namespace {
+
+std::atomic<bool> s_boot_anim_done{false};
+SemaphoreHandle_t s_boot_anim_sem = nullptr;
+
+void OnBootAnimationReady(lv_event_t* /*e*/) {
+    if (s_boot_anim_done.exchange(true)) {
+        return;
+    }
+    if (s_boot_anim_sem != nullptr) {
+        xSemaphoreGive(s_boot_anim_sem);
+    }
+}
+
+void EnsureBootAnimSem() {
+    if (s_boot_anim_sem == nullptr) {
+        s_boot_anim_sem = xSemaphoreCreateBinary();
+    }
+}
+
+}  // namespace
+
 lv_obj_t* BootScreen::Create() {
+    EnsureBootAnimSem();
+    s_boot_anim_done = false;
+
     lv_obj_t* screen = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
@@ -11,10 +43,22 @@ lv_obj_t* BootScreen::Create() {
     lv_obj_set_style_border_width(screen, 0, LV_PART_MAIN);
     lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t * eaf_anim = lv_eaf_create(screen);
+    lv_obj_t* eaf_anim = lv_eaf_create(screen);
     lv_eaf_set_src(eaf_anim, "A:ic_boot_animation.eaf");
-    lv_eaf_set_frame_delay(eaf_anim,30); 
-    lv_eaf_set_loop_count(eaf_anim,0);
+    lv_eaf_set_frame_delay(eaf_anim, 30);
+    lv_eaf_set_loop_count(eaf_anim, 0);  // 播一遍
+    lv_obj_add_event_cb(eaf_anim, OnBootAnimationReady, LV_EVENT_READY, nullptr);
     lv_obj_center(eaf_anim);
     return screen;
+}
+
+void BootScreen::WaitUntilAnimationFinished() {
+    if (s_boot_anim_done.load()) {
+        return;
+    }
+    EnsureBootAnimSem();
+    constexpr TickType_t kMaxWait = pdMS_TO_TICKS(15000);
+    if (xSemaphoreTake(s_boot_anim_sem, kMaxWait) != pdTRUE) {
+        s_boot_anim_done = true;
+    }
 }

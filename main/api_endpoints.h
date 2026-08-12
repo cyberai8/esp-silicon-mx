@@ -66,7 +66,9 @@ inline void LogHttpResponse(const char*, int, const std::string&) {}
 
 #endif
 
-constexpr const char* kHost = "http://xxxxx.com";
+// 从 NVS api_base_url 读取；否则从 ota_url（或 CONFIG_OTA_URL）解析 scheme://host。
+// NVS 示例：wifi.api_base_url = https://your-server.com
+std::string GetApiBaseUrl();
 
 constexpr const char* kApiV1Prefix = "/api/v1";
 constexpr const char* kXiaozhiDevicePrefix = "/xiaozhi/device";
@@ -96,9 +98,7 @@ constexpr const char* kGpsLocationReport =
 constexpr const char* kGpsStaticMap =
     "/xiaozhi/device/gps/location/static-map";
 
-inline std::string Url(const char* path) {
-    return std::string(kHost) + path;
-}
+std::string Url(const char* path);
 
 inline std::string WeatherDistrictUrl(const std::string& district_id) {
     return Url(kWeatherDistrictPath) + district_id;
@@ -117,20 +117,7 @@ inline std::string Text2ImageTaskUrl(const std::string& task_id) {
     return Url(path);
 }
 
-// 日志脱敏：响应体等可能含 staticMapUrl 等完整地址，禁止输出 claw 域名 URL。
-inline std::string RedactClawUrlsForLog(const std::string& text) {
-    std::string out = text;
-    const size_t prefix_len = std::strlen(kHost);
-    size_t pos = 0;
-    while ((pos = out.find(kHost, pos)) != std::string::npos) {
-        size_t end = out.find_first_of("\"' \t\r\n,}", pos + prefix_len);
-        if (end == std::string::npos) {
-            end = out.size();
-        }
-        out.replace(pos, end - pos, "[redacted]");
-        pos += 10;
-    }
-    return out;
-}
+// 日志脱敏：响应体等可能含 staticMapUrl 等完整地址，禁止输出 API 域名 URL。
+std::string RedactClawUrlsForLog(const std::string& text);
 
 }  // namespace api

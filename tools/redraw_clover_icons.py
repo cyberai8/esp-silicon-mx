@@ -80,16 +80,27 @@ def circle(cr, cx, cy, r, do_stroke=True):
 
 
 def icon_chat(cr):
-    rounded_rect(cr, 52, 48, 152, 108, 28)
+  # 双气泡叠放：后景右上只露顶边+右边，前景左下完整气泡+尾巴+三点
+    back_x, back_y, back_w, back_h, back_r = 104, 34, 124, 86, 18
+    cr.move_to(back_x + back_r, back_y)
+    cr.line_to(back_x + back_w - back_r, back_y)
+    cr.arc(back_x + back_w - back_r, back_y + back_r, back_r, -math.pi / 2, 0)
+    cr.line_to(back_x + back_w, back_y + back_h - back_r * 0.35)
     stroke(cr)
-    # tail
-    cr.move_to(86, 150)
-    cr.line_to(62, 196)
-    cr.line_to(118, 156)
+
+    front_x, front_y, front_w, front_h, front_r = 38, 86, 154, 96, 22
+    rounded_rect(cr, front_x, front_y, front_w, front_h, front_r)
     stroke(cr)
-    for x in (92, 128, 164):
+    cr.move_to(front_x + 30, front_y + front_h)
+    cr.line_to(front_x + 10, front_y + front_h + 38)
+    cr.line_to(front_x + 56, front_y + front_h + 4)
+    stroke(cr)
+
+    cy = front_y + front_h // 2
+    cx = front_x + front_w // 2
+    for dx in (-34, 0, 34):
         cr.new_sub_path()
-        cr.arc(x, 102, 9.5, 0, 2 * math.pi)
+        cr.arc(cx + dx, cy, 8.5, 0, 2 * math.pi)
         fill(cr)
 
 
