@@ -93,8 +93,8 @@ LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
 #endif
 
     esp_lv_adapter_config_t adapter_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG();
-#if CONFIG_BOARD_TYPE_ESP_VOCAT || (defined(DISPLAY_WIDTH) && defined(DISPLAY_HEIGHT) && \
-                                      DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
+#if CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B || \
+    (defined(DISPLAY_WIDTH) && defined(DISPLAY_HEIGHT) && DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
     // LVGL 任务栈若在 PSRAM，任务内读 NVS/Flash 会触发
     // esp_task_stack_is_sane_cache_disabled assert（主屏状态栏/主题都会读 NVS）。
     // 360 小屏 LVGL 栈不大，改用内部 RAM。
@@ -102,7 +102,8 @@ LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
 #else
     adapter_cfg.stack_in_psram = true;
 #endif
-    adapter_cfg.task_priority = 1;
+    // 默认优先级 6 在 QSPI+WiFi 时刷屏过猛易堵 SPI；4 仍高于多数业务任务。
+    adapter_cfg.task_priority = 4;
     adapter_cfg.task_core_id = 1;
 
     ESP_ERROR_CHECK(esp_lv_adapter_init(&adapter_cfg));
@@ -121,9 +122,9 @@ LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
         // S31 无 PPA；关掉避免误开
         disp_cfg.profile.enable_ppa_accel = false;
     } else if (panel_if == ESP_LV_ADAPTER_PANEL_IF_OTHER) {
-        // SPI/QSPI（ESP-VoCat 360 QSPI 等）：OTHER 接口只允许 NONE / TE_SYNC。
-        // TE_SYNC 在本板 QSPI 上会出现 panel_io_spi_tx_color queue 失败导致黑屏，
-        // 默认走 NONE + PSRAM 缓冲；需要 TE 时由板级显式传入 spi_te。
+        // SPI/QSPI（ESP-VoCat / Waveshare 360 QSPI）：OTHER 接口只允许 NONE / TE_SYNC。
+        // TE_SYNC / 全高 FULL 刷在本板 QSPI 上会 spi transmit (queue) color failed，
+        // 随后 LVGL 卡在 wait_for_flushing 触发 task_wdt。必须用 PARTIAL 条带。
         const bool use_te = (spi_te != nullptr && spi_te->te_gpio >= 0);
         if (use_te) {
             disp_cfg = ESP_LV_ADAPTER_DISPLAY_SPI_WITH_PSRAM_TE_DEFAULT_CONFIG(
@@ -134,15 +135,21 @@ LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
             disp_cfg = ESP_LV_ADAPTER_DISPLAY_SPI_WITH_PSRAM_DEFAULT_CONFIG(
                 panel, panel_io, static_cast<uint16_t>(width),
                 static_cast<uint16_t>(height), ESP_LV_ADAPTER_ROTATE_0);
-            // 小屏用较短 strip，减轻单次 QSPI 传输压力（仍为 NONE tear 模式）
             if (height <= 400) {
+                // QSPI 360：必须用短条带 PARTIAL。全高/过大条带会 spi queue color failed，
+                // 随后 LVGL 卡在 wait_for_flushing。
+                // 画缓冲放内部 RAM：WiFi 抢 PSRAM 时 SPI DMA 从 PSRAM 取数易挂死无完成回调。
                 disp_cfg.profile.buffer_height = 40;
+                disp_cfg.profile.require_double_buffer = true;
+                disp_cfg.profile.use_psram = false;
             }
         }
         disp_cfg.profile.enable_ppa_accel = false;
-        ESP_LOGI(TAG, "SPI/QSPI display %dx%d te=%s buf_h=%u", width, height,
+        ESP_LOGI(TAG, "SPI/QSPI display %dx%d te=%s buf_h=%u dbl=%d psram=%d", width, height,
                  use_te ? "on" : "off",
-                 static_cast<unsigned>(disp_cfg.profile.buffer_height));
+                 static_cast<unsigned>(disp_cfg.profile.buffer_height),
+                 disp_cfg.profile.require_double_buffer ? 1 : 0,
+                 disp_cfg.profile.use_psram ? 1 : 0);
     } else {
         // 性能调优要点（720x720 MIPI-DSI RGB565 屏，Claw4）：
         //   - enable_ppa_accel: 开启 PPA
@@ -169,16 +176,19 @@ LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
         esp_lv_adapter_touch_config_t touch_cfg =
             ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(disp, touch_handle);
         lv_indev_t* touch_indev = esp_lv_adapter_register_touch(&touch_cfg);
-        touch_feed_init(touch_handle, 20);
+        // 16ms：跟手与负载折中；CST816S 仍由 INT 门控。
+        touch_feed_init(touch_handle, 16);
         touch_feed_attach_indev(touch_indev);
     }
 
     ESP_ERROR_CHECK(esp_lv_adapter_start());
 
     // 图标走 A:*.spng；缓存驻留解码结果，避免滑动重绘时反复解码。
-    // S31 / 360 小屏：512KB；大屏 Claw4：2MB。
-#if defined(CONFIG_IDF_TARGET_ESP32S31) || defined(CONFIG_BOARD_TYPE_ESP_VOCAT)
+    // 360 圆屏图标页多，给足 1MB；大屏 Claw4：2MB。
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
     lv_image_cache_resize(512 * 1024, true);
+#elif defined(CONFIG_BOARD_TYPE_ESP_VOCAT) || defined(CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+    lv_image_cache_resize(1024 * 1024, true);
 #else
     lv_image_cache_resize(2 * 1024 * 1024, true);
 #endif

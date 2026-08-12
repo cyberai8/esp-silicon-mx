@@ -3,6 +3,7 @@
 #include <esp_log.h>
 #include <lvgl.h>
 
+#include "application.h"
 #include "settings.h"
 #include "standby_screen/standby_screen.h"
 
@@ -59,6 +60,15 @@ void OnIdleTick(lv_timer_t* /*timer*/) {
 
     if (s.session == IdlePowerSession::Home && standby_ms > 0 &&
         idle_ms >= standby_ms) {
+        const DeviceState device_state =
+            Application::GetInstance().GetDeviceState();
+        // 语音会话中不盖待机屏，避免抢走聊天打断/触控。
+        if (device_state == kDeviceStateListening ||
+            device_state == kDeviceStateSpeaking ||
+            device_state == kDeviceStateConnecting) {
+            IdlePower_NotifyActivity();
+            return;
+        }
         if (!s.standby_triggered) {
             s.standby_triggered = true;
             ESP_LOGI(TAG, "idle enter standby: idle=%u s, limit=%u s",

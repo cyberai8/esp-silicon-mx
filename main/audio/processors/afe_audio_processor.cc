@@ -102,6 +102,14 @@ void AfeAudioProcessor::Feed(std::vector<int16_t>&& data) {
     if (afe_data_ == nullptr) {
         return;
     }
+    if ((xEventGroupGetBits(event_group_) & PROCESSOR_RUNNING) == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(afe_mutex_);
+    if (afe_data_ == nullptr ||
+        (xEventGroupGetBits(event_group_) & PROCESSOR_RUNNING) == 0) {
+        return;
+    }
     afe_iface_->feed(afe_data_, data.data());
 }
 
@@ -111,6 +119,7 @@ void AfeAudioProcessor::Start() {
 
 void AfeAudioProcessor::Stop() {
     xEventGroupClearBits(event_group_, PROCESSOR_RUNNING);
+    std::lock_guard<std::mutex> lock(afe_mutex_);
     if (afe_data_ != nullptr) {
         afe_iface_->reset_buffer(afe_data_);
     }

@@ -215,6 +215,7 @@ void AfeWakeWord::Start() {
 
 void AfeWakeWord::Stop() {
     xEventGroupClearBits(event_group_, DETECTION_RUNNING_EVENT);
+    std::lock_guard<std::mutex> lock(afe_mutex_);
     if (afe_data_ != nullptr) {
         afe_iface_->reset_buffer(afe_data_);
     }
@@ -226,6 +227,11 @@ void AfeWakeWord::Feed(const std::vector<int16_t>& data) {
     }
     // Stop() 清掉 DETECTION_RUNNING_EVENT 后禁止再 feed，避免与复位缓冲竞态。
     if ((xEventGroupGetBits(event_group_) & DETECTION_RUNNING_EVENT) == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(afe_mutex_);
+    if (afe_data_ == nullptr ||
+        (xEventGroupGetBits(event_group_) & DETECTION_RUNNING_EVENT) == 0) {
         return;
     }
     afe_iface_->feed(afe_data_, data.data());

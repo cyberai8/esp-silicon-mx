@@ -362,7 +362,21 @@ void BoxAudioCodec::DeleteCodecDevicesLocked() {
 #endif
 
 void BoxAudioCodec::SetOutputVolume(int volume) {
-    ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume));
+    if (volume < 0) {
+        volume = 0;
+    } else if (volume > 100) {
+        volume = 100;
+    }
+    if (volume == output_volume_) {
+        return;
+    }
+    if (output_dev_ != nullptr && output_enabled_) {
+        esp_err_t err = esp_codec_dev_set_out_vol(output_dev_, volume);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "set_out_vol failed: %s", esp_err_to_name(err));
+            return;
+        }
+    }
     AudioCodec::SetOutputVolume(volume);
 }
 
@@ -565,6 +579,10 @@ void BoxAudioCodec::EnableOutput(bool enable) {
             return;
         }
     } else {
+        if (input_enabled_) {
+            ESP_LOGD(TAG, "Skip closing output while input is active (duplex I2S)");
+            return;
+        }
         CloseOutputDeviceLocked();
         AudioCodec::EnableOutput(false);
     }

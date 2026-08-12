@@ -619,6 +619,7 @@ private:
     }
 
     void InitializeSpi() {
+        // 与 VoCat 一致：勿设 SPICOMMON_BUSFLAG_QUAD（quad 由 panel_io.flags.quad_mode 控制）
         const spi_bus_config_t bus_config = {
             .data0_io_num = QSPI_PIN_NUM_LCD_DATA0,
             .data1_io_num = QSPI_PIN_NUM_LCD_DATA1,
@@ -630,8 +631,8 @@ private:
             .data6_io_num = -1,
             .data7_io_num = -1,
             .data_io_default_level = false,
-            .max_transfer_sz = QSPI_LCD_H_RES * 80 * sizeof(uint16_t),
-            .flags = SPICOMMON_BUSFLAG_QUAD,
+            .max_transfer_sz = QSPI_LCD_H_RES * QSPI_LCD_V_RES * sizeof(uint16_t),
+            .flags = 0,
             .isr_cpu_id = ESP_INTR_CPU_AFFINITY_AUTO,
             .intr_flags = 0,
         };
@@ -645,7 +646,7 @@ private:
             .dc_gpio_num = -1,
             .spi_mode = 0,
             .pclk_hz = 3 * 1000 * 1000,
-            .trans_queue_depth = 10,
+            .trans_queue_depth = 16,
             .on_color_trans_done = nullptr,
             .user_ctx = nullptr,
             .lcd_cmd_bits = 32,
@@ -673,7 +674,8 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_io_del(panel_io_handle_));
         panel_io_handle_ = nullptr;
 
-        io_config.pclk_hz = 40 * 1000 * 1000;  // 与 VoCat 同量级，降低与 WiFi 叠载
+        // 40MHz：与 VoCat 同；80MHz + 大块 flush 易 queue color failed → LVGL 卡死
+        io_config.pclk_hz = 40 * 1000 * 1000;
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(
             static_cast<esp_lcd_spi_bus_handle_t>(QSPI_LCD_HOST), &io_config,
             &panel_io_handle_));

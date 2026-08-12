@@ -3,6 +3,7 @@
 
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <cctype>
 #include <ctime>
 #include <string>
@@ -808,6 +809,10 @@ void info_lifecycle_cb(screen_lifecycle_event_t event) {
     InfoScreen::LifecycleCallback(event);
 }
 
+void LaunchWake(screen_lifecycle_cb_t /*lifecycle_cb*/) {
+    Application::GetInstance().ToggleChatState();
+}
+
 // ??
 // app ??icon_suffix ?? ic_app_home_theme{N}_{suffix}.spng ??// ?? suffix ???name ????????????????????// ?? "??" ??suffix ??"gps"??????????"map"????" ??
 // ????????ic_app_home_themeN_magnet.spng ????????????// name ??zh-CN msgid??????????
@@ -851,6 +856,67 @@ constexpr AppEntry kApps[] = {
 
 constexpr int kTotalApps = static_cast<int>(sizeof(kApps) / sizeof(kApps[0]));
 
+// 圆屏四叶瓣：空瓣底图 + 每页 4 App 叠图标/文字；中心固定「唤醒」。
+constexpr AppEntry kWakeEntry = {
+    nullptr, "唤醒", LaunchWake, nullptr, false};
+
+constexpr int kCloverAppsPerPage = 4;
+
+const AppEntry* FindAppBySuffix(const char* suffix) {
+    if (suffix == nullptr) {
+        return nullptr;
+    }
+    for (int i = 0; i < kTotalApps; ++i) {
+        if (kApps[i].icon_suffix != nullptr &&
+            std::strcmp(kApps[i].icon_suffix, suffix) == 0) {
+            return &kApps[i];
+        }
+    }
+    return nullptr;
+}
+
+const AppEntry* ResolveCloverApp(const char* preferred,
+                                 const char* fallback) {
+    const AppEntry* app = FindAppBySuffix(preferred);
+    if (app != nullptr) {
+        return app;
+    }
+    return FindAppBySuffix(fallback);
+}
+
+// 首页优先顺序（上/右/下/左），其余按 kApps 原序接在后面。
+void BuildCloverAppOrder(int* out_indices, int* out_count) {
+    const char* prefer[] = {"chat", "recording", "camera", "wifi"};
+    bool used[kTotalApps] = {};
+    int n = 0;
+
+    auto push_suffix = [&](const char* suffix, const char* fallback) {
+        const AppEntry* app = ResolveCloverApp(suffix, fallback);
+        if (app == nullptr) {
+            return;
+        }
+        const int idx = static_cast<int>(app - kApps);
+        if (idx < 0 || idx >= kTotalApps || used[idx]) {
+            return;
+        }
+        used[idx] = true;
+        out_indices[n++] = idx;
+    };
+
+    push_suffix(prefer[0], nullptr);
+    push_suffix(prefer[1], nullptr);
+    push_suffix(prefer[2], "digital_people");
+    push_suffix(prefer[3], nullptr);
+
+    for (int i = 0; i < kTotalApps; ++i) {
+        if (used[i] || kApps[i].icon_suffix == nullptr) {
+            continue;
+        }
+        out_indices[n++] = i;
+    }
+    *out_count = n;
+}
+
 // ????????
 // app ????????LVGL ????
 // HomeScreen::Create()
@@ -861,6 +927,7 @@ constexpr int kTotalApps = static_cast<int>(sizeof(kApps) / sizeof(kApps[0]));
 // ????????namespace ?????????????
 constexpr int kIconPathBufSize = 56;
 char s_icon_paths[kTotalApps][kIconPathBufSize];
+char s_clover_icon_paths[kTotalApps][kIconPathBufSize];
 
 void EnsureIconPathsBuilt() {
     static bool built = false;
@@ -875,6 +942,8 @@ if (built && s_built_theme_id == tid) {
         std::snprintf(s_icon_paths[i], kIconPathBufSize,
                       "A:ic_app_home_theme%d_%s.spng",
                       tid, kApps[i].icon_suffix);
+        std::snprintf(s_clover_icon_paths[i], kIconPathBufSize,
+                      "A:ic_clover_%s.spng", kApps[i].icon_suffix);
     }
     s_built_theme_id = tid;
     built = true;
@@ -884,12 +953,12 @@ if (built && s_built_theme_id == tid) {
 // ---------------------------------------------------------------------------
 // ????????????????????screen ??????????// ???? cell ??LV_EVENT_CLICKED??// ---------------------------------------------------------------------------
 
-constexpr int kHomeMoveThreshold = 5;
-constexpr int kHomeAxisLockThreshold = 12;
+constexpr int kHomeMoveThreshold = 16;
+constexpr int kHomeAxisLockThreshold = 20;
 constexpr int kPageSnapThreshold = kPanelW / 5;
 constexpr int kHomeFlickThreshold = 24;
 constexpr uint32_t kHomeLongPressMs = 750;
-constexpr uint32_t kPageSlideAnimMs = 300;
+constexpr uint32_t kPageSlideAnimMs = kLayoutRoundSmall ? 200 : 300;
 
 constexpr lv_obj_flag_t kAppCellFlag = LV_OBJ_FLAG_USER_2;
 
@@ -1124,10 +1193,21 @@ lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
 struct PagerState {
     lv_obj_t* pager;
     lv_obj_t* indicator = nullptr;
-lv_obj_t* dots[kMaxPages];
+    lv_obj_t* dots[kMaxPages];
     int page_count;
     int current_page;
     bool skeleton_active = false;
+    bool clover = false;  // 圆屏四叶瓣：底图固定，翻页淡入淡出
+    lv_obj_t* clover_round = nullptr;
+    lv_obj_t* clover_chrome = nullptr;
+    lv_obj_t* clover_layer = nullptr;
+    lv_obj_t* clover_icon[kCloverAppsPerPage] = {};
+    lv_obj_t* clover_name[kCloverAppsPerPage] = {};
+    lv_obj_t* clover_hs[kCloverAppsPerPage] = {};
+    int clover_order[kTotalApps] = {};
+    int clover_order_count = 0;
+    int clover_pending_page = 0;
+    bool clover_busy = false;
 };
 
 // ????????????????????????????????// ??????HomeScreen::Create() ??????????????????// ???????GoToPage?????HighlightDot ??????
@@ -1161,6 +1241,9 @@ HomeStatusState* s_home_status = nullptr;
 void SetPagerSkeletonMode(PagerState* state, bool active) {
     if (state == nullptr || state->pager == nullptr ||
         state->skeleton_active == active) {
+        return;
+    }
+    if (state->clover) {
         return;
     }
     state->skeleton_active = active;
@@ -1567,7 +1650,12 @@ lv_obj_t* CreateStatusBar(lv_obj_t* screen, HomeStatusState* st) {
     lv_obj_set_size(bar, kPanelW, kStatusBarHeight);
     lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_set_style_bg_color(bar, lv_color_hex(kStatusBarBg), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_50, LV_PART_MAIN);
+    // 四叶瓣首页：状态栏浮在图上，背景接近透明，避免挡瓣区观感
+    lv_obj_set_style_bg_opa(bar, kLayoutRoundSmall ? LV_OPA_20 : LV_OPA_50,
+                            LV_PART_MAIN);
+    if (kLayoutRoundSmall) {
+        lv_obj_add_flag(bar, LV_OBJ_FLAG_FLOATING);
+    }
     lv_obj_set_style_pad_hor(bar, kStatusPadHor, LV_PART_MAIN);
     lv_obj_set_style_pad_ver(bar, kStatusPadVer, LV_PART_MAIN);
     lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
@@ -1690,6 +1778,169 @@ void HighlightDot(PagerState* state, int page) {
     }
 }
 
+constexpr uint32_t kCloverFadeMs = 120;
+const char* CloverDisplayName(const AppEntry* entry);
+bool PagerLoopEnabled(const PagerState* state);
+
+void CloverApplyPage(PagerState* state, int page) {
+    if (state == nullptr || !state->clover) {
+        return;
+    }
+    if (page < 0 || page >= state->page_count) {
+        return;
+    }
+    const bool home = (page == 0);
+    if (state->clover_round != nullptr) {
+        if (home) {
+            lv_obj_remove_flag(state->clover_round, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(state->clover_round, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    for (int s = 0; s < kCloverAppsPerPage; ++s) {
+        const int oi = page * kCloverAppsPerPage + s;
+        const int idx =
+            (oi < state->clover_order_count) ? state->clover_order[oi] : -1;
+        lv_obj_t* icon = state->clover_icon[s];
+        lv_obj_t* name = state->clover_name[s];
+        lv_obj_t* hs = state->clover_hs[s];
+        if (idx < 0 || idx >= kTotalApps) {
+            if (icon != nullptr) {
+                lv_obj_add_flag(icon, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (name != nullptr) {
+                lv_label_set_text(name, "");
+                lv_obj_add_flag(name, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (hs != nullptr) {
+                lv_obj_add_flag(hs, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_set_user_data(hs, nullptr);
+            }
+            continue;
+        }
+        const AppEntry& app = kApps[idx];
+        // 首页图标已烘焙进 round.png；其它页只画当前四个图标/文字。
+        if (icon != nullptr) {
+            if (home) {
+                lv_obj_add_flag(icon, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_image_set_src(icon, s_clover_icon_paths[idx]);
+                lv_obj_remove_flag(icon, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        if (name != nullptr) {
+            if (home) {
+                lv_label_set_text(name, "");
+                lv_obj_add_flag(name, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_label_set_text(name, I18n::T(CloverDisplayName(&app)));
+                lv_obj_remove_flag(name, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        if (hs != nullptr) {
+            lv_obj_set_user_data(hs, const_cast<AppEntry*>(&app));
+            lv_obj_remove_flag(hs, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    state->current_page = page;
+    s_last_home_page = page;
+}
+
+void CloverFadeExec(void* var, int32_t v) {
+    auto* state = static_cast<PagerState*>(var);
+    if (state == nullptr) {
+        return;
+    }
+    const lv_opa_t opa = static_cast<lv_opa_t>(v);
+    if (state->current_page == 0) {
+        if (state->clover_round != nullptr) {
+            lv_obj_set_style_opa(state->clover_round, opa, LV_PART_MAIN);
+        }
+    } else if (state->clover_layer != nullptr) {
+        lv_obj_set_style_opa(state->clover_layer, opa, LV_PART_MAIN);
+    }
+}
+
+void CloverFadeInFinished(lv_anim_t* a) {
+    auto* state = static_cast<PagerState*>(lv_anim_get_user_data(a));
+    if (state == nullptr) {
+        return;
+    }
+    if (state->clover_round != nullptr) {
+        lv_obj_set_style_opa(state->clover_round, LV_OPA_COVER, LV_PART_MAIN);
+        if (state->current_page != 0) {
+            lv_obj_add_flag(state->clover_round, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (state->clover_layer != nullptr) {
+        lv_obj_set_style_opa(state->clover_layer, LV_OPA_COVER, LV_PART_MAIN);
+    }
+    state->clover_busy = false;
+}
+
+void CloverFadeOutReady(lv_anim_t* a) {
+    auto* state = static_cast<PagerState*>(lv_anim_get_user_data(a));
+    if (state == nullptr) {
+        return;
+    }
+    const int pending = state->clover_pending_page;
+    if (pending == 0) {
+        if (state->clover_round != nullptr) {
+            lv_obj_set_style_opa(state->clover_round, LV_OPA_TRANSP, LV_PART_MAIN);
+        }
+    } else if (state->clover_layer != nullptr) {
+        lv_obj_set_style_opa(state->clover_layer, LV_OPA_TRANSP, LV_PART_MAIN);
+    }
+    CloverApplyPage(state, pending);
+    HighlightDot(state, pending);
+
+    lv_anim_t fade_in;
+    lv_anim_init(&fade_in);
+    lv_anim_set_var(&fade_in, state);
+    lv_anim_set_user_data(&fade_in, state);
+    lv_anim_set_exec_cb(&fade_in, CloverFadeExec);
+    lv_anim_set_values(&fade_in, 0, LV_OPA_COVER);
+    lv_anim_set_duration(&fade_in, kCloverFadeMs);
+    lv_anim_set_path_cb(&fade_in, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&fade_in, CloverFadeInFinished);
+    lv_anim_start(&fade_in);
+}
+
+void CloverGoToPage(PagerState* state, int target_page) {
+    if (state == nullptr || !state->clover || state->clover_busy) {
+        return;
+    }
+    if (state->page_count <= 0) {
+        return;
+    }
+    if (target_page < 0 || target_page >= state->page_count) {
+        if (!PagerLoopEnabled(state)) {
+            return;
+        }
+        target_page =
+            (target_page % state->page_count + state->page_count) %
+            state->page_count;
+    }
+    if (target_page == state->current_page) {
+        return;
+    }
+    state->clover_busy = true;
+    state->clover_pending_page = target_page;
+    ResetHomeIdleTimer();
+
+    lv_anim_t fade_out;
+    lv_anim_init(&fade_out);
+    lv_anim_set_var(&fade_out, state);
+    lv_anim_set_user_data(&fade_out, state);
+    lv_anim_set_exec_cb(&fade_out, CloverFadeExec);
+    lv_anim_set_values(&fade_out, LV_OPA_COVER, 0);
+    lv_anim_set_duration(&fade_out, kCloverFadeMs);
+    lv_anim_set_path_cb(&fade_out, lv_anim_path_ease_in);
+    lv_anim_set_completed_cb(&fade_out, CloverFadeOutReady);
+    lv_anim_start(&fade_out);
+}
+
 bool PagerLoopEnabled(const PagerState* state) {
     return state != nullptr && state->page_count > 1;
 }
@@ -1750,7 +2001,14 @@ if (s_home_touch.active && s_home_touch.paging) {
 
 // ????????????????????????????????
 void GoToPage(PagerState* state, int target_page) {
-    if (state == nullptr || state->pager == nullptr) {
+    if (state == nullptr) {
+        return;
+    }
+    if (state->clover) {
+        CloverGoToPage(state, target_page);
+        return;
+    }
+    if (state->pager == nullptr) {
         return;
     }
     if (target_page < 0 || target_page >= state->page_count) {
@@ -1975,8 +2233,12 @@ void OnHomePressing(lv_event_t* e) {
 
     HomeTouchUpdateAxisLock(dx, dy);
 
-    // ?????????????????????
-if (s_home_touch.axis != HomeGestureAxis::Horizontal) {
+    if (s_home_touch.axis != HomeGestureAxis::Horizontal) {
+        return;
+    }
+
+    // 圆屏四叶瓣不跟手拖页，避免两页图标叠在同一张底图上。
+    if (state != nullptr && state->clover) {
         return;
     }
 
@@ -2073,10 +2335,18 @@ void OnHomeScreenLoaded(lv_event_t* e) {
     lv_obj_t* scr = lv_event_get_current_target_obj(e);
     EnableHomeEventBubble(scr);
 
-    // ???????layout ??????????pager ????????????    // ????Create() ??
-// scroll_to_x ???? layout ??????????
-auto* state = static_cast<PagerState*>(lv_event_get_user_data(e));
-    if (state != nullptr && state->pager != nullptr) {
+    auto* state = static_cast<PagerState*>(lv_event_get_user_data(e));
+    if (state != nullptr && state->clover) {
+        int page = s_last_home_page;
+        if (page < 0 || page >= state->page_count) {
+            page = 0;
+        }
+        CloverApplyPage(state, page);
+        if (state->clover_layer != nullptr) {
+            lv_obj_set_style_opa(state->clover_layer, LV_OPA_COVER, LV_PART_MAIN);
+        }
+        HighlightDot(state, page);
+    } else if (state != nullptr && state->pager != nullptr) {
         lv_obj_update_layout(state->pager);
         int page = s_last_home_page;
         if (page < 0 || page >= state->page_count) {
@@ -2412,6 +2682,116 @@ lv_obj_t* mask = lv_obj_create(parent);
     lv_obj_remove_flag(hint, LV_OBJ_FLAG_CLICKABLE);
 }
 
+lv_obj_t* CreateCloverHotspot(lv_obj_t* parent, int x, int y, int w, int h,
+                              const AppEntry* entry) {
+    if (entry == nullptr || entry->launch == nullptr) {
+        return nullptr;
+    }
+    lv_obj_t* hs = lv_obj_create(parent);
+    lv_obj_remove_style_all(hs);
+    lv_obj_set_pos(hs, x, y);
+    lv_obj_set_size(hs, w, h);
+    lv_obj_set_style_bg_opa(hs, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(hs, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(hs, 0, LV_PART_MAIN);
+    lv_obj_set_style_outline_width(hs, 0, LV_PART_MAIN);
+    lv_obj_set_style_shadow_opa(hs, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_remove_flag(hs, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(hs, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(hs, kAppCellFlag);
+    lv_obj_set_user_data(hs, const_cast<AppEntry*>(entry));
+    lv_obj_set_style_transform_pivot_x(hs, w / 2, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_transform_pivot_y(hs, h / 2, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_transform_scale(hs, 250, LV_PART_MAIN | LV_STATE_PRESSED);
+    return hs;
+}
+
+const char* CloverDisplayName(const AppEntry* entry) {
+    if (entry == nullptr || entry->icon_suffix == nullptr) {
+        return "";
+    }
+    if (std::strcmp(entry->icon_suffix, "wifi") == 0) {
+        return "网络";
+    }
+    if (std::strcmp(entry->icon_suffix, "digital_people") == 0 &&
+        FindAppBySuffix("camera") == nullptr) {
+        return "相机";
+    }
+    if (std::strcmp(entry->icon_suffix, "pin") == 0) {
+        return "引脚";
+    }
+    return entry->name != nullptr ? entry->name : "";
+}
+
+void AddCloverPetalVisual(lv_obj_t* page, const AppEntry* entry, int app_idx,
+                          int slot) {
+    if (page == nullptr || entry == nullptr || slot < 0 || slot >= 4) {
+        return;
+    }
+    constexpr int kIcon = 52;
+    constexpr lv_coord_t kIconCx[4] = {180, 308, 180, 52};
+    constexpr lv_coord_t kIconCy[4] = {50, 176, 306, 176};
+    constexpr lv_coord_t kTextCy[4] = {96, 226, 334, 226};
+
+    lv_obj_t* icon = lv_image_create(page);
+    if (app_idx >= 0 && app_idx < kTotalApps) {
+        lv_image_set_src(icon, s_clover_icon_paths[app_idx]);
+    }
+    lv_obj_set_size(icon, kIcon, kIcon);
+    lv_obj_set_pos(icon, kIconCx[slot] - kIcon / 2, kIconCy[slot] - kIcon / 2);
+    lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_image_opa(icon, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t* name = lv_label_create(page);
+    lv_label_set_text(name, I18n::T(CloverDisplayName(entry)));
+    lv_obj_set_width(name, 120);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_font(name, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(name, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(name, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_pos(name, kIconCx[slot] - 60, kTextCy[slot] - 10);
+    lv_obj_remove_flag(name, LV_OBJ_FLAG_CLICKABLE);
+}
+
+// slots: 0上 1右 2下 3左；app_indices 可为 -1 表示空瓣
+lv_obj_t* CreateCloverPage(lv_obj_t* pager, const int* app_indices) {
+    lv_obj_t* page = lv_obj_create(pager);
+    lv_obj_remove_style_all(page);
+    lv_obj_set_size(page, kPanelW, kPanelH);
+    lv_obj_set_style_bg_opa(page, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_remove_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+
+    struct Slot {
+        int x;
+        int y;
+        int w;
+        int h;
+    };
+    constexpr Slot kSlots[kCloverAppsPerPage] = {
+        {110, 6, 140, 118},    // 上
+        {232, 110, 122, 140},  // 右
+        {110, 236, 140, 118},  // 下
+        {6, 110, 122, 140},    // 左
+    };
+
+    for (int s = 0; s < kCloverAppsPerPage; ++s) {
+        if (app_indices == nullptr) {
+            break;
+        }
+        const int idx = app_indices[s];
+        if (idx < 0 || idx >= kTotalApps) {
+            continue;
+        }
+        const AppEntry& app = kApps[idx];
+        AddCloverPetalVisual(page, &app, idx, s);
+        CreateCloverHotspot(page, kSlots[s].x, kSlots[s].y, kSlots[s].w,
+                            kSlots[s].h, &app);
+    }
+    return page;
+}
+
 lv_obj_t* CreatePage(lv_obj_t* pager, int page_index, int total_apps) {
     lv_obj_t* page = lv_obj_create(pager);
     lv_obj_remove_style_all(page);
@@ -2488,10 +2868,153 @@ void HomeScreen::WarmStatusCaches() { WarmStatusCachesImpl(); }
 
 void HomeScreen::ShowPowerOptionsDialog() { ShowPowerDialog(); }
 
+lv_obj_t* CreateRoundCloverHome() {
+    EnsureIconPathsBuilt();
+
+    int order[kTotalApps];
+    int order_count = 0;
+    BuildCloverAppOrder(order, &order_count);
+
+    int page_count =
+        order_count > 0
+            ? (order_count + kCloverAppsPerPage - 1) / kCloverAppsPerPage
+            : 1;
+    if (page_count > kMaxPages) {
+        page_count = kMaxPages;
+    }
+
+    lv_obj_t* screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(screen, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(screen, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+
+    auto* state = new PagerState{};
+    state->pager = nullptr;
+    state->page_count = page_count;
+    state->current_page = 0;
+    state->clover = true;
+    state->clover_order_count = order_count;
+    for (int i = 0; i < order_count; ++i) {
+        state->clover_order[i] = order[i];
+    }
+
+    lv_obj_t* chrome = lv_image_create(screen);
+    lv_image_set_src(chrome, "A:home_clover_chrome.spng");
+    lv_obj_set_size(chrome, kPanelW, kPanelH);
+    lv_obj_align(chrome, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_remove_flag(chrome, LV_OBJ_FLAG_CLICKABLE);
+    state->clover_chrome = chrome;
+
+    lv_obj_t* round = lv_image_create(screen);
+    lv_image_set_src(round, "A:home_clover_round.spng");
+    lv_obj_set_size(round, kPanelW, kPanelH);
+    lv_obj_align(round, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_remove_flag(round, LV_OBJ_FLAG_CLICKABLE);
+    state->clover_round = round;
+
+    auto* status = new HomeStatusState{};
+    CreateStatusBar(screen, status);
+
+    lv_obj_t* layer = lv_obj_create(screen);
+    lv_obj_remove_style_all(layer);
+    lv_obj_set_size(layer, kPanelW, kPanelH);
+    lv_obj_set_pos(layer, 0, 0);
+    lv_obj_set_style_bg_opa(layer, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_remove_flag(layer, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(layer, LV_OBJ_FLAG_CLICKABLE);
+    state->clover_layer = layer;
+
+    constexpr int kIcon = 52;
+    constexpr lv_coord_t kIconCx[4] = {195, 324, 197, 68};
+    constexpr lv_coord_t kIconCy[4] = {46, 173, 302, 172};
+    constexpr lv_coord_t kTextCy[4] = {84, 213, 324, 213};
+    struct Slot {
+        int x;
+        int y;
+        int w;
+        int h;
+    };
+    constexpr Slot kSlots[kCloverAppsPerPage] = {
+        {125, 6, 140, 118},
+        {250, 110, 122, 140},
+        {125, 236, 140, 118},
+        {20, 110, 122, 140},
+    };
+
+    for (int s = 0; s < kCloverAppsPerPage; ++s) {
+        lv_obj_t* icon = lv_image_create(layer);
+        lv_obj_set_size(icon, kIcon, kIcon);
+        lv_obj_set_pos(icon, kIconCx[s] - kIcon / 2, kIconCy[s] - kIcon / 2);
+        lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_image_opa(icon, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+        state->clover_icon[s] = icon;
+
+        lv_obj_t* name = lv_label_create(layer);
+        lv_label_set_text(name, "");
+        lv_obj_set_width(name, 128);
+        lv_label_set_long_mode(name, LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_text_font(name, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_set_style_text_color(name, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+        lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(name, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_pos(name, kIconCx[s] - 64, kTextCy[s] - 10);
+        lv_obj_remove_flag(name, LV_OBJ_FLAG_CLICKABLE);
+        state->clover_name[s] = name;
+
+        lv_obj_t* hs = CreateCloverHotspot(screen, kSlots[s].x, kSlots[s].y,
+                                          kSlots[s].w, kSlots[s].h, &kWakeEntry);
+        if (hs != nullptr) {
+            lv_obj_add_flag(hs, LV_OBJ_FLAG_FLOATING);
+        }
+        state->clover_hs[s] = hs;
+    }
+
+    CloverApplyPage(state, 0);
+    lv_obj_set_style_opa(layer, LV_OPA_COVER, LV_PART_MAIN);
+
+    lv_obj_t* wake = CreateCloverHotspot(screen, 125, 125, 110, 110, &kWakeEntry);
+    if (wake != nullptr) {
+        lv_obj_add_flag(wake, LV_OBJ_FLAG_FLOATING);
+        lv_obj_move_foreground(wake);
+    }
+
+    if (page_count > 1) {
+        CreateIndicator(screen, state);
+        if (state->indicator != nullptr) {
+            lv_obj_add_flag(state->indicator, LV_OBJ_FLAG_FLOATING);
+            lv_obj_set_style_bg_opa(state->indicator, LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_pad_ver(state->indicator, 2, LV_PART_MAIN);
+            lv_obj_align(state->indicator, LV_ALIGN_BOTTOM_MID, 0, -4);
+        }
+    }
+
+    lv_obj_add_flag(screen, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(screen, OnHomePressed, LV_EVENT_PRESSED, state);
+    lv_obj_add_event_cb(screen, OnHomePressing, LV_EVENT_PRESSING, state);
+    lv_obj_add_event_cb(screen, OnHomeReleased, LV_EVENT_RELEASED, state);
+    lv_obj_add_event_cb(screen, OnHomeScreenLoaded, LV_EVENT_SCREEN_LOADED,
+                        state);
+    lv_obj_add_event_cb(screen, OnHomeScreenUnloaded, LV_EVENT_SCREEN_UNLOADED,
+                        nullptr);
+    lv_obj_add_event_cb(screen, OnScreenDeleted, LV_EVENT_DELETE, state);
+
+    if (status->bar != nullptr) {
+        lv_obj_move_foreground(status->bar);
+    }
+    return screen;
+}
+
 lv_obj_t* HomeScreen::Create() {
     // ????????NVS ?????? id ??kApps ??icon_suffix ????
     // ??????s_icon_paths ??????CreateAppCell ??????????
 EnsureIconPathsBuilt();
+
+    if (kLayoutRoundSmall) {
+        return CreateRoundCloverHome();
+    }
 
     lv_obj_t* screen = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), LV_PART_MAIN);

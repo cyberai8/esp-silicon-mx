@@ -125,6 +125,8 @@ public:
     // 电台 / SD 音乐等绕过 AudioService 直接写 codec 时调用：刷新输出活跃时间，
     // 防止 audio_power_timer 把扬声器关掉。
     void NotifyExternalPlayback();
+    // 双工 I2S：先打开 TX，再启 AFE，避免 speaking 时重配控制器踩坏唤醒队列。
+    void EnsureOutputEnabled();
 
 private:
     AudioCodec* codec_ = nullptr;

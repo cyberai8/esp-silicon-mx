@@ -943,10 +943,13 @@ void Application::SetDeviceState(DeviceState state) {
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
-                // Only AFE wake word can be detected in speaking mode
+                audio_service_.ResetDecoder();
+                // 先把喇叭 TX 打开，再启 AFE 唤醒，避免 I2S 重配踩坏 feed 队列。
+                audio_service_.EnsureOutputEnabled();
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+            } else {
+                audio_service_.ResetDecoder();
             }
-            audio_service_.ResetDecoder();
             break;
         default:
             // Do nothing

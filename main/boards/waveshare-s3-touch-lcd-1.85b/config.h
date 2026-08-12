@@ -10,8 +10,9 @@
 
 #define AUDIO_INPUT_SAMPLE_RATE  24000
 #define AUDIO_OUTPUT_SAMPLE_RATE 24000
-// 板载双麦 + ES7210，开启参考通道做回声消除
-#define AUDIO_INPUT_REFERENCE    true
+// ES7210 TDM 双麦；本板未启用设备端 AFE 处理器，开参考通道会让唤醒词走 AEC，
+// 在当前内存/esp-sr 组合下会于 esp_aec3_dlfft_process 空指针崩溃，故关闭。
+#define AUDIO_INPUT_REFERENCE    false
 
 #define AUDIO_I2S_GPIO_MCLK GPIO_NUM_2
 #define AUDIO_I2S_GPIO_WS   GPIO_NUM_38

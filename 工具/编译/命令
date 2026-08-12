@@ -1,0 +1,130 @@
+# =============================================================================
+# esp-yun 各板级编译说明
+# 仓库: /home/qmx/qmx-sd/esp-yun
+#
+# 板级目录                          Target      IDF 要求
+# --------------------------------  ----------  ----------------------------
+# metalio-claw-4                    esp32p4     v5.5.4（文档主推）
+# esp-vocat                         esp32s3     v5.5.x
+# waveshare-s3-touch-lcd-1.85b      esp32s3     v5.5.x
+# esp32-s31-korvo-1                 esp32s31    **必须 IDF 6.2+**
+#
+# 原则：每块板用独立 -B build 目录 + 独立 SDKCONFIG，避免互相覆盖。
+# =============================================================================
+
+cd /home/qmx/qmx-sd/esp-yun
+
+# -----------------------------------------------------------------------------
+# 0) 先加载对应版本的 ESP-IDF（路径按本机修改）
+# -----------------------------------------------------------------------------
+# P4 / S3 圆屏：
+#   . ~/esp-idf-v5.5.4/export.sh
+# S31 Korvo：
+#   . ~/esp-idf-v6.2/export.sh
+#
+# idf.py --version   # 确认版本后再编译
+
+
+# =============================================================================
+# 1) Metalio Claw4（旗舰 P4）
+#    板级: main/boards/metalio-claw-4
+#    IDF:  v5.5.4
+# =============================================================================
+. ~/esp-idf-v5.5.4/export.sh
+
+idf.py -B build-claw4 \
+  -DSDKCONFIG=sdkconfig.claw4 \
+  set-target esp32p4
+
+# 若还没有 sdkconfig.claw4：可从一份已知可用的 P4 配置复制，或 set-target 后
+# 用 menuconfig 选 BOARD_TYPE_METALIO_CLAW_4，再保存为 sdkconfig.claw4。
+# 仓库默认文档路径是根目录 sdkconfig + build/；多板并行时建议用上面独立文件。
+
+idf.py -B build-claw4 -DSDKCONFIG=sdkconfig.claw4 build
+idf.py -B build-claw4 -DSDKCONFIG=sdkconfig.claw4 -p /dev/ttyACM0 flash monitor
+
+# 文档「单板默认」写法（会动根目录 sdkconfig / build）：
+# idf.py set-target esp32p4   # 仅首次
+# idf.py build
+# idf.py -p /dev/ttyACM0 flash monitor
+
+
+# =============================================================================
+# 2) ESP-VoCat（S3 圆屏 + ML307）
+#    板级: main/boards/esp-vocat
+#    IDF:  v5.5.x
+#    配置: sdkconfig.esp-vocat（仓库已有）
+# =============================================================================
+source /home/qmx/esp/esp-idf/export.sh
+
+idf.py -B build-esp-vocat \
+  -DSDKCONFIG=sdkconfig.esp-vocat \
+  set-target esp32s3
+
+idf.py -B build-esp-vocat \
+  -DSDKCONFIG=sdkconfig.esp-vocat \
+  build
+
+idf.py -B build-esp-vocat \
+  -DSDKCONFIG=sdkconfig.esp-vocat \
+  -p /dev/ttyUSB0 flash monitor
+
+
+# =============================================================================
+# 3) Waveshare ESP32-S3-Touch-LCD-1.85B（S3 圆屏，仅 WiFi）
+#    板级: main/boards/waveshare-s3-touch-lcd-1.85b
+#    IDF:  v5.5.x
+#    配置: sdkconfig.waveshare-s3-touch-lcd-1.85b（仓库已有）
+# =============================================================================
+source /home/qmx/esp/esp-idf/export.sh
+
+idf.py -B build-waveshare-1.85b \
+  -DSDKCONFIG=sdkconfig.waveshare-s3-touch-lcd-1.85b \
+  set-target esp32s3
+
+idf.py -B build-waveshare-1.85b \
+  -DSDKCONFIG=sdkconfig.waveshare-s3-touch-lcd-1.85b \
+  build
+
+idf.py -B build-waveshare-1.85b \
+  -DSDKCONFIG=sdkconfig.waveshare-s3-touch-lcd-1.85b \
+  -p /dev/ttyACM0 flash monitor
+
+
+# =============================================================================
+# 4) ESP32-S31-Korvo-1
+#    板级: main/boards/esp32-s31-korvo-1
+#    IDF:  **必须 6.2+**（esp32s31 target；5.5 编不了）
+#    配置: 可用根目录 sdkconfig（当前仓库活跃配置常为 S31）
+#          或 sdkconfig.defaults.esp32s31 + 独立文件
+# =============================================================================
+. ~/esp/esp-idf-s31-v6.2/export.sh     # 务必换到 6.2+，不要用 5.5
+
+idf.py --preview -B build-s31-korvo \
+  -DSDKCONFIG=sdkconfig.s31-korvo \
+  build
+
+# 若尚无 sdkconfig.s31-korvo：可复制当前已能编过的 S31 sdkconfig，或
+# set-target 后依赖 sdkconfig.defaults.esp32s31，再确认
+# CONFIG_BOARD_TYPE_ESP32_S31_KORVO_1=y
+
+idf.py -B build-s31-korvo -DSDKCONFIG=sdkconfig.s31-korvo build
+idf.py --preview -B build-s31-korvo \
+  -DSDKCONFIG=sdkconfig.s31-korvo \
+  -p /dev/ttyACM0 flash monitor
+
+# 直接用根目录 sdkconfig（仅当你确认它是 S31 配置时）：
+# . ~/esp-idf-v6.2/export.sh
+# idf.py set-target esp32s31
+# idf.py build
+
+
+# =============================================================================
+# 常用检查
+# =============================================================================
+# idf.py --version
+# grep CONFIG_IDF_TARGET= sdkconfig*
+# grep CONFIG_BOARD_TYPE_ sdkconfig*
+#
+# 换板后若 CMake 缓存混乱：删对应 build-* 再 set-target / build
+# rm -rf build-waveshare-1.85b

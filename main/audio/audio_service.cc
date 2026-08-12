@@ -282,7 +282,9 @@ void AudioService::AudioInputTask() {
             int samples = audio_processor_->GetFeedSize();
             if (samples > 0) {
                 if (ReadAudioData(data, 16000, samples)) {
-                    audio_processor_->Feed(std::move(data));
+                    if (IsAudioProcessorRunning()) {
+                        audio_processor_->Feed(std::move(data));
+                    }
                     continue;
                 }
             }
@@ -545,8 +547,8 @@ void AudioService::EnableWakeWordDetection(bool enable) {
         wake_word_->Start();
         xEventGroupSetBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
     } else {
-        wake_word_->Stop();
         xEventGroupClearBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
+        wake_word_->Stop();
     }
 }
 
@@ -584,8 +586,8 @@ void AudioService::EnableVoiceProcessing(bool enable) {
         audio_processor_->Start();
         xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
     } else {
-        audio_processor_->Stop();
         xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
+        audio_processor_->Stop();
     }
 }
 
@@ -740,6 +742,10 @@ void AudioService::ResetDecoder() {
 }
 
 void AudioService::NotifyExternalPlayback() {
+    EnsureOutputEnabled();
+}
+
+void AudioService::EnsureOutputEnabled() {
     if (codec_ == nullptr || audio_power_timer_ == nullptr) {
         return;
     }
@@ -768,8 +774,11 @@ void AudioService::CheckAndUpdateAudioPowerState() {
     } else if (input_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->input_enabled()) {
         codec_->EnableInput(false);
     }
+    // 双工板上 TX/RX 共用控制器：输入还在跑时关 TX 会打乱 AFE 队列。
     if (output_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->output_enabled()) {
-        codec_->EnableOutput(false);
+        if (!(input_active && codec_->duplex())) {
+            codec_->EnableOutput(false);
+        }
     }
     if (!codec_->input_enabled() && !codec_->output_enabled()) {
         esp_timer_stop(audio_power_timer_);

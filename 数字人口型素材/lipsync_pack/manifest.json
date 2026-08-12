@@ -1,0 +1,245 @@
+{
+  "source": "数字人口型素材/gif人物",
+  "character": "office_man_360",
+  "canvas": [
+    360,
+    360
+  ],
+  "visemes": {
+    "idle": {
+      "file": "viseme_png/idle.png",
+      "gif": "emotion_gif/neutral.gif",
+      "desc": "闭口"
+    },
+    "a": {
+      "file": "viseme_png/a.png",
+      "gif": "viseme_gif/viseme_a.gif",
+      "desc": "开口 a/ai/ao"
+    },
+    "e": {
+      "file": "viseme_png/e.png",
+      "gif": "viseme_gif/viseme_e.gif",
+      "desc": "扁嘴 e"
+    },
+    "i": {
+      "file": "viseme_png/i.png",
+      "gif": "viseme_gif/viseme_i.gif",
+      "desc": "嘴角拉开 i"
+    },
+    "o": {
+      "file": "viseme_png/o.png",
+      "gif": "viseme_gif/viseme_o.gif",
+      "desc": "圆唇 o/u"
+    },
+    "v": {
+      "file": "viseme_png/v.png",
+      "gif": "viseme_gif/viseme_v.gif",
+      "desc": "唇齿/扁圆过渡"
+    },
+    "er": {
+      "file": "viseme_png/er.png",
+      "gif": "viseme_gif/viseme_er.gif",
+      "desc": "儿化/卷舌近似"
+    }
+  },
+  "energy_mouth_levels": {
+    "0": {
+      "png": "mouth_levels/mouth_0.png",
+      "from": "idle#0",
+      "desc": "闭口"
+    },
+    "1": {
+      "png": "mouth_levels/mouth_1.png",
+      "from": "i#9",
+      "desc": "微张扁"
+    },
+    "2": {
+      "png": "mouth_levels/mouth_2.png",
+      "from": "a#2",
+      "desc": "开口 a"
+    },
+    "3": {
+      "png": "mouth_levels/mouth_3.png",
+      "from": "o#5",
+      "desc": "圆唇 o（已修正，原 o#14 错误）"
+    }
+  },
+  "emotion_map_to_digital_people": {
+    "neutral": "emotion_gif/neutral.gif (from idle)",
+    "happy": "emotion_gif/happy.gif",
+    "crying": "emotion_gif/crying.gif (from sad)",
+    "thinking": "emotion_gif/thinking.gif (from think)",
+    "surprised": "emotion_gif/surprised.gif (from angry, approx)",
+    "loving": "建议暂用 happy 或另补素材"
+  },
+  "phoneme_to_viseme_zh_approx": {
+    "silence": "idle",
+    "b p m": "idle",
+    "f": "v",
+    "a ai ao an ang": "a",
+    "e ei en eng": "e",
+    "i j q x ü": "i",
+    "o ou u ong": "o",
+    "er": "er",
+    "s z c zh ch sh r": "e"
+  },
+  "frame_summary": {
+    "a": {
+      "frames": 20,
+      "peak_frame": 6,
+      "peak_score": 27.18651428222656,
+      "scores_min_max": [
+        19.125686836242675,
+        27.18651428222656
+      ]
+    },
+    "angry": {
+      "frames": 26,
+      "peak_frame": 20,
+      "peak_score": 23.96224136352539,
+      "scores_min_max": [
+        18.383886337280273,
+        23.96224136352539
+      ]
+    },
+    "e": {
+      "frames": 22,
+      "peak_frame": 15,
+      "peak_score": 25.948426055908204,
+      "scores_min_max": [
+        18.618400955200194,
+        25.948426055908204
+      ]
+    },
+    "er": {
+      "frames": 17,
+      "peak_frame": 6,
+      "peak_score": 26.590569305419923,
+      "scores_min_max": [
+        18.804606628417968,
+        26.590569305419923
+      ]
+    },
+    "happy": {
+      "frames": 23,
+      "peak_frame": 15,
+      "peak_score": 31.512363815307616,
+      "scores_min_max": [
+        20.18666877746582,
+        31.512363815307616
+      ]
+    },
+    "i": {
+      "frames": 20,
+      "peak_frame": 6,
+      "peak_score": 26.935079193115236,
+      "scores_min_max": [
+        19.60831642150879,
+        26.935079193115236
+      ]
+    },
+    "idle": {
+      "frames": 14,
+      "peak_frame": 4,
+      "peak_score": 16.123087692260743,
+      "scores_min_max": [
+        15.981395530700684,
+        16.123087692260743
+      ]
+    },
+    "o": {
+      "frames": 21,
+      "peak_frame": 14,
+      "peak_score": 25.1501220703125,
+      "scores_min_max": [
+        18.727963638305663,
+        25.1501220703125
+      ]
+    },
+    "sad": {
+      "frames": 29,
+      "peak_frame": 15,
+      "peak_score": 25.678883361816407,
+      "scores_min_max": [
+        20.163867950439453,
+        25.678883361816407
+      ]
+    },
+    "think": {
+      "frames": 43,
+      "peak_frame": 38,
+      "peak_score": 20.64106674194336,
+      "scores_min_max": [
+        18.12953300476074,
+        20.64106674194336
+      ]
+    },
+    "v": {
+      "frames": 17,
+      "peak_frame": 2,
+      "peak_score": 26.22262954711914,
+      "scores_min_max": [
+        19.427824401855467,
+        26.22262954711914
+      ]
+    }
+  },
+  "device_deploy_hint": {
+    "round_360": "GIF 已是 360x360，与 Waveshare/VoCat 一致",
+    "format": "设备端 DigitalPeople 默认 .eaf；可用 https://esp32-gif.espressif.com/ 把 gif 转 eaf",
+    "sd_layout_suggested": [
+      "/sdcard/system/emotion/neutral.eaf",
+      "/sdcard/system/emotion/happy.eaf",
+      "/sdcard/system/emotion/crying.eaf",
+      "/sdcard/system/emotion/thinking.eaf",
+      "/sdcard/system/emotion/surprised.eaf",
+      "/sdcard/system/emotion/loving.eaf  # 待补",
+      "/sdcard/system/emotion/mouth/viseme_a.eaf ...",
+      "或无云端能量方案: mouth_0..3.png/.eaf 按播放能量切换整脸关键帧/短循环"
+    ],
+    "no_cloud_strategy": "播放 PCM 能量 -> mouth_0..3；有音素时再用 viseme_a/e/i/o/v/er"
+  },
+  "viseme_fixed": {
+    "idle": {
+      "gif": "idle",
+      "frame": 0,
+      "png": "viseme_png_fixed/idle.png"
+    },
+    "a": {
+      "gif": "a",
+      "frame": 2,
+      "png": "viseme_png_fixed/a.png"
+    },
+    "e": {
+      "gif": "e",
+      "frame": 4,
+      "png": "viseme_png_fixed/e.png"
+    },
+    "i": {
+      "gif": "i",
+      "frame": 9,
+      "png": "viseme_png_fixed/i.png"
+    },
+    "o": {
+      "gif": "o",
+      "frame": 5,
+      "png": "viseme_png_fixed/o.png"
+    },
+    "u": {
+      "gif": "o",
+      "frame": 6,
+      "png": "viseme_png_fixed/u.png"
+    },
+    "v": {
+      "gif": "v",
+      "frame": 1,
+      "png": "viseme_png_fixed/v.png"
+    },
+    "er": {
+      "gif": "er",
+      "frame": 0,
+      "png": "viseme_png_fixed/er.png"
+    }
+  },
+  "review": "review/MOUTH_REVIEW.md"
+}
