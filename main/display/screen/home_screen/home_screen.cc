@@ -37,6 +37,7 @@ extern "C" void board_release_power_hold_if_supported();
 #include "calendar_screen/calendar_screen.h"
 #include "call_screen/call_screen.h"
 #include "chat_screen/chat_screen.h"
+#include "clock_screen/clock_screen.h"
 #include "digital_people_screen/digital_people_screen.h"
 #include "game_2048_screen/game_2048_screen.h"
 #include "gps_screen/gps_screen.h"
@@ -121,6 +122,16 @@ void calendar_lifecycle_cb(screen_lifecycle_event_t event) {
     } else {
         ESP_LOGI(TAG_HOME, "unload: calendar_screen");
     }
+}
+
+void clock_lifecycle_cb(screen_lifecycle_event_t event) {
+    PwrKey_OnScreenLifecycle("alarm", event);
+    if (event == SCREEN_LIFECYCLE_LOAD) {
+        ESP_LOGI(TAG_HOME, "load: clock_screen");
+    } else {
+        ESP_LOGI(TAG_HOME, "unload: clock_screen");
+    }
+    ClockScreen::LifecycleCallback(event);
 }
 
 // ??????????????BT ????3????/ ??UART ????
@@ -397,6 +408,16 @@ void LaunchCall(screen_lifecycle_cb_t lifecycle_cb) {
 void LaunchCalendar(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* old_scr = lv_screen_active();
     lv_obj_t* app = CalendarScreen::Create();
+    screen_attach_lifecycle(app, lifecycle_cb);
+    lv_screen_load(app);
+    if (old_scr != nullptr && old_scr != app) {
+        lv_obj_delete_async(old_scr);
+    }
+}
+
+void LaunchClock(screen_lifecycle_cb_t lifecycle_cb) {
+    lv_obj_t* old_scr = lv_screen_active();
+    lv_obj_t* app = ClockScreen::Create();
     screen_attach_lifecycle(app, lifecycle_cb);
     lv_screen_load(app);
     if (old_scr != nullptr && old_scr != app) {
@@ -757,6 +778,7 @@ constexpr AppEntry kApps[] = {
 #endif
     {"music",          "音乐",     LaunchMusic,         music_lifecycle_cb,         false},
     {"calendar",       "日历",     LaunchCalendar,      calendar_lifecycle_cb,      false},
+    {"alarm",          "闹钟",     LaunchClock,         clock_lifecycle_cb,         false},
 #if !defined(BOARD_ESP_VOCAT)
     {"gps",            "地图",     LaunchGps,           gps_lifecycle_cb,           true},
     {"spirit_level",   "水平仪",   LaunchLevel,         level_lifecycle_cb,         false},
@@ -1706,8 +1728,9 @@ constexpr uint32_t kCloverFadeMs = 120;
 const char* CloverDisplayName(const AppEntry* entry);
 bool PagerLoopEnabled(const PagerState* state);
 
-// 四叶瓣图标显示框：略大于资源尺寸，等比居中，避免固定 64×64 裁切两侧。
-constexpr int kCloverIconFrame = 72;
+// 四叶瓣图标由 tools/redraw_clover_icons.py 按显示尺寸生成（圆屏 80×80，1:1 不缩放）。
+// 大屏若需原生清晰度：python3 tools/redraw_clover_icons.py --size 112
+constexpr int kCloverIconFrame = kLayoutRoundSmall ? 80 : 112;
 
 void SetupCloverIcon(lv_obj_t* icon, lv_coord_t center_x, lv_coord_t center_y) {
     if (icon == nullptr) {
@@ -1716,7 +1739,8 @@ void SetupCloverIcon(lv_obj_t* icon, lv_coord_t center_x, lv_coord_t center_y) {
     lv_obj_set_size(icon, kCloverIconFrame, kCloverIconFrame);
     lv_obj_set_pos(icon, center_x - kCloverIconFrame / 2,
                    center_y - kCloverIconFrame / 2);
-    lv_image_set_inner_align(icon, LV_IMAGE_ALIGN_CONTAIN);
+    // 资源边长与 kCloverIconFrame 一致时按原图像素绘制。
+    lv_image_set_inner_align(icon, LV_IMAGE_ALIGN_CENTER);
     lv_image_set_antialias(icon, true);
     lv_obj_add_flag(icon, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, LV_PART_MAIN);
@@ -1756,7 +1780,7 @@ void CloverApplyPage(PagerState* state, int page) {
         const AppEntry& app = kApps[idx];
         if (icon != nullptr) {
             lv_image_set_src(icon, s_clover_icon_paths[idx]);
-            lv_image_set_inner_align(icon, LV_IMAGE_ALIGN_CONTAIN);
+            lv_image_set_inner_align(icon, LV_IMAGE_ALIGN_CENTER);
             lv_obj_remove_flag(icon, LV_OBJ_FLAG_HIDDEN);
         }
         if (name != nullptr) {

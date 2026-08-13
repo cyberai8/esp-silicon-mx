@@ -9,9 +9,12 @@ import cairocffi as cairo
 from PIL import Image
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "main", "xingzhi-assets")
-OUT_SIZE = 64
+# 与 home_screen.cc 里 kCloverIconFrame（圆屏）一致：显示多大就导出多大，1:1 不缩放。
+OUT_SIZE = 80
 DRAW_SIZE = 256
-STROKE = 10.5  # on 256 canvas ≈ 2.6px at 64
+STROKE = 11.5  # on 256 canvas，缩到 OUT_SIZE 后线宽适中
+# 裁切后图案占画布比例（留边，避免贴边发糊）
+CONTENT_FILL = 0.88
 
 
 def new_ctx():
@@ -39,11 +42,11 @@ def save(surf, name: str):
     tmp = f"/tmp/_clover_{name}.png"
     surf.write_to_png(tmp)
     im = Image.open(tmp).convert("RGBA")
-    out = im.resize((OUT_SIZE, OUT_SIZE), Image.Resampling.LANCZOS)
-    # keep only near-white strokes, drop dark residuals
-    px = out.load()
-    for y in range(OUT_SIZE):
-        for x in range(OUT_SIZE):
+    # keep only near-white strokes, drop dark residuals (on high-res first)
+    px = im.load()
+    w, h = im.size
+    for y in range(h):
+        for x in range(w):
             r, g, b, a = px[x, y]
             if a < 18:
                 px[x, y] = (0, 0, 0, 0)
@@ -53,9 +56,26 @@ def save(surf, name: str):
                 px[x, y] = (0, 0, 0, 0)
             else:
                 px[x, y] = (255, 255, 255, a)
+
+    # Crop to ink, then scale so glyph fills CONTENT_FILL of OUT_SIZE.
+    alpha = im.split()[-1]
+    bbox = alpha.getbbox()
+    if bbox is None:
+        out = Image.new("RGBA", (OUT_SIZE, OUT_SIZE), (0, 0, 0, 0))
+    else:
+        crop = im.crop(bbox)
+        bw, bh = crop.size
+        max_side = int(OUT_SIZE * CONTENT_FILL)
+        scale = min(max_side / bw, max_side / bh)
+        nw = max(1, int(round(bw * scale)))
+        nh = max(1, int(round(bh * scale)))
+        fitted = crop.resize((nw, nh), Image.Resampling.LANCZOS)
+        out = Image.new("RGBA", (OUT_SIZE, OUT_SIZE), (0, 0, 0, 0))
+        out.paste(fitted, ((OUT_SIZE - nw) // 2, (OUT_SIZE - nh) // 2), fitted)
+
     path = os.path.abspath(os.path.join(ROOT, f"ic_clover_{name}.png"))
     out.save(path)
-    print("wrote", path)
+    print("wrote", path, f"{nw}x{nh}" if bbox else "empty")
 
 
 def rounded_rect(cr, x, y, w, h, r):
@@ -521,11 +541,30 @@ ICONS = {
 
 
 def main():
+    import argparse
+
+    global OUT_SIZE
+    ap = argparse.ArgumentParser(description="Redraw clover icons at exact display size")
+    ap.add_argument(
+        "--size",
+        type=int,
+        default=OUT_SIZE,
+        help=f"output PNG edge length (default {OUT_SIZE}, must match kCloverIconFrame)",
+    )
+    args = ap.parse_args()
+    OUT_SIZE = args.size
+
     os.makedirs(os.path.abspath(ROOT), exist_ok=True)
     for name, fn in ICONS.items():
         surf, cr = new_ctx()
         fn(cr)
         save(surf, name)
+    # chat1 与 chat 同图（历史资源名）
+    chat = os.path.abspath(os.path.join(ROOT, "ic_clover_chat.png"))
+    chat1 = os.path.abspath(os.path.join(ROOT, "ic_clover_chat1.png"))
+    if os.path.exists(chat):
+        Image.open(chat).save(chat1)
+        print("wrote", chat1, "(copy of chat)")
 
 
 if __name__ == "__main__":
