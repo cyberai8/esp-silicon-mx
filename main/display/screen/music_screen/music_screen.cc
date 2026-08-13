@@ -697,9 +697,14 @@ lv_obj_t* CreateRoundButton(lv_obj_t* parent, int32_t size, uint32_t bg_color,
     lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
     lv_obj_set_ext_click_area(btn, 12);
 
+    int32_t icon_box = (size * 11) / 20;
+    if (icon_box < 12) {
+        icon_box = 12;
+    }
     lv_obj_t* img = lv_image_create(btn);
+    lv_obj_set_size(img, icon_box, icon_box);
     lv_image_set_src(img, icon_path);
-    lv_image_set_inner_align(img, LV_IMAGE_ALIGN_CENTER);
+    lv_image_set_inner_align(img, LV_IMAGE_ALIGN_CONTAIN);
     lv_obj_center(img);
     lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
 

@@ -364,6 +364,8 @@ void Application::StopSystemAudioForStressTest() {
 }
 
 void Application::RestoreSystemAudioAfterStressTest() {
+    // 给电台 GMF/HLS 释放后的内部堆一点整理时间，再抢 I2S DMA。
+    vTaskDelay(pdMS_TO_TICKS(80));
     if (device_state_ == kDeviceStateIdle) {
         audio_service_.EnableWakeWordDetection(true);
     }

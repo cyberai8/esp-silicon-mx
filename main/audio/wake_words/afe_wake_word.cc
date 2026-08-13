@@ -156,7 +156,12 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
 
     audio_detection_task_stack_ = static_cast<StackType_t*>(
         heap_caps_aligned_alloc(16, kAudioDetectionTaskStackSize,
-                                MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
+                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (audio_detection_task_stack_ == nullptr) {
+        audio_detection_task_stack_ = static_cast<StackType_t*>(
+            heap_caps_aligned_alloc(16, kAudioDetectionTaskStackSize,
+                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
     audio_detection_task_buffer_ = static_cast<StaticTask_t*>(
         heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     if (audio_detection_task_stack_ == nullptr || audio_detection_task_buffer_ == nullptr) {

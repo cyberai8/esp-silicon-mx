@@ -530,18 +530,25 @@ void AudioService::EnableWakeWordDetection(bool enable) {
 
     ESP_LOGD(TAG, "%s wake word detection", enable ? "Enabling" : "Disabling");
     if (enable) {
+        // 先开 I2S 输入拿 DMA，再初始化 AFE。顺序反过来时 AFE 会先吃掉
+        // INTERNAL+DMA，电台退出后恢复唤醒词容易 i2s_alloc_dma_desc 失败，
+        // 且 esp_codec_dev 在失败路径会空指针写入导致崩溃。
+        if (!codec_->input_enabled()) {
+            esp_timer_stop(audio_power_timer_);
+            esp_timer_start_periodic(audio_power_timer_,
+                                     AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
+            codec_->EnableInput(true);
+        }
+        if (!codec_->input_enabled()) {
+            ESP_LOGE(TAG, "Skip wake word: input device open failed");
+            return;
+        }
         if (!wake_word_initialized_) {
             if (!wake_word_->Initialize(codec_, models_list_)) {
                 ESP_LOGE(TAG, "Failed to initialize wake word");
                 return;
             }
             wake_word_initialized_ = true;
-        }
-        if (!codec_->input_enabled()) {
-            esp_timer_stop(audio_power_timer_);
-            esp_timer_start_periodic(audio_power_timer_,
-                                     AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
-            codec_->EnableInput(true);
         }
         last_input_time_ = std::chrono::steady_clock::now();
         wake_word_->Start();
