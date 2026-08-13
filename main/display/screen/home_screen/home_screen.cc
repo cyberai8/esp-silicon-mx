@@ -56,9 +56,7 @@ extern "C" void board_release_power_hold_if_supported();
 #include "pin_test_screen/pin_test_screen.h"
 #include "test_screen/test_screen.h"
 #include "sd_card_screen/sd_card_screen.h"
-#include "theme_screen/theme_screen.h"
 #include "info_screen/info_screen.h"
-#include "theme_manager.h"
 #include "wifi_required_dialog.h"
 
 LV_FONT_DECLARE(font_puhui_20_4);
@@ -356,9 +354,9 @@ constexpr uint32_t kDotColor = 0xFFFFFF;
 typedef void (*LaunchFn)(screen_lifecycle_cb_t lifecycle_cb);
 
 struct AppEntry {
-    // ??????????"chat"??2048"????LVGL ????ThemeManager
-    // ??????id ???A:ic_app_home_theme{N}_{suffix}.spng??    // ????????????????????????AppEntry??
-const char* icon_suffix;
+    // icon_suffix 拼到固定主题前缀，得到 A:ic_app_home_theme{N}_{suffix}.spng
+    // 路径在 EnsureIconPathsBuilt() 里生成，cell 只持有指针。
+    const char* icon_suffix;
     const char* name;                    // display name shown under the icon
     LaunchFn launch;                     // tapped -> launch this app (nullptr = no action)
     screen_lifecycle_cb_t lifecycle_cb;  // load / unload observer
@@ -702,16 +700,6 @@ void LaunchEspClaw(screen_lifecycle_cb_t /*lifecycle_cb*/) {
     }
 }
 
-void LaunchTheme(screen_lifecycle_cb_t lifecycle_cb) {
-    lv_obj_t* old_scr = lv_screen_active();
-    lv_obj_t* app = ThemeScreen::Create();
-    screen_attach_lifecycle(app, lifecycle_cb);
-    lv_screen_load(app);
-    if (old_scr != nullptr && old_scr != app) {
-        lv_obj_delete_async(old_scr);
-    }
-}
-
 void LaunchSettings(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* old_scr = lv_screen_active();
     lv_obj_t* app = SettingsScreen::Create();
@@ -730,16 +718,6 @@ void LaunchInfo(screen_lifecycle_cb_t lifecycle_cb) {
     if (old_scr != nullptr && old_scr != app) {
         lv_obj_delete_async(old_scr);
     }
-}
-
-void theme_lifecycle_cb(screen_lifecycle_event_t event) {
-    PwrKey_OnScreenLifecycle("theme", event);
-    if (event == SCREEN_LIFECYCLE_LOAD) {
-        ESP_LOGI(TAG_HOME, "load: theme_screen");
-    } else {
-        ESP_LOGI(TAG_HOME, "unload: theme_screen");
-    }
-    ThemeScreen::LifecycleCallback(event);
 }
 
 void settings_lifecycle_cb(screen_lifecycle_event_t event) {
@@ -793,7 +771,6 @@ constexpr AppEntry kApps[] = {
 #endif
     {"2048",           "2048",     LaunchGame2048,      game_2048_lifecycle_cb,     false},
     {"info",           "信息",     LaunchInfo,          info_lifecycle_cb,          false},
-    {"theme",          "主题",     LaunchTheme,         theme_lifecycle_cb,         false},
 #if !defined(BOARD_ESP_VOCAT)
     {"test",           "测试",     LaunchTest,          test_lifecycle_cb,          false},
 #endif
@@ -879,25 +856,23 @@ constexpr int kIconPathBufSize = 56;
 char s_icon_paths[kTotalApps][kIconPathBufSize];
 char s_clover_icon_paths[kTotalApps][kIconPathBufSize];
 
+// 主题 App 已移除，主屏图标固定使用 theme2 资源前缀。
+constexpr int kHomeIconThemeId = 2;
+
 void EnsureIconPathsBuilt() {
     static bool built = false;
-    static int s_built_theme_id = 0;
-    const int tid = ThemeManager::GetCurrentThemeId();
-    // ??????/ ?? id ????????????
-// NVS ???????????
-if (built && s_built_theme_id == tid) {
+    if (built) {
         return;
     }
     for (int i = 0; i < kTotalApps; ++i) {
         std::snprintf(s_icon_paths[i], kIconPathBufSize,
                       "A:ic_app_home_theme%d_%s.spng",
-                      tid, kApps[i].icon_suffix);
+                      kHomeIconThemeId, kApps[i].icon_suffix);
         std::snprintf(s_clover_icon_paths[i], kIconPathBufSize,
                       "A:ic_clover_%s.spng", kApps[i].icon_suffix);
     }
-    s_built_theme_id = tid;
     built = true;
-    ESP_LOGI(TAG_HOME, "icon paths built for theme%d", tid);
+    ESP_LOGI(TAG_HOME, "icon paths built for theme%d", kHomeIconThemeId);
 }
 
 // ---------------------------------------------------------------------------
@@ -1279,7 +1254,6 @@ void WarmStatusCachesImpl() {
     Settings settings("network", false);
     int v = settings.GetInt("sim_slot", 0);
     s_cached_sim_slot = (v == 1) ? 1 : 0;
-    ThemeManager::GetCurrentThemeId();
     IdlePower_WarmSettingsCache();
 }
 

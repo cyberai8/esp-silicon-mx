@@ -10,7 +10,7 @@ public:
     // object (parent = NULL).
     static lv_obj_t* Create();
     static void RefreshStatusBar();
-    // 下次进入主屏时从第一页开始（用于主题切换等场景）。
+    // 下次进入主屏时从第一页开始。
     static void ResetToFirstPage();
 
     static void WarmStatusCaches();

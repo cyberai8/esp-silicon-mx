@@ -19,7 +19,6 @@ set(SOURCES "audio/audio_codec.cc"
             "display/touch_feed.cc"
             "display/font/font_puhui_number_50_4.c"
             "display/font/font_puhui_number_120_4.c"
-            "display/theme_manager.cc"
             "i18n/i18n.cc"
             "display/screen/screen_util.cc"
             "display/screen/wifi_required_dialog.cc"
@@ -29,7 +28,6 @@ set(SOURCES "audio/audio_codec.cc"
             "display/screen/ota_screen/ota_screen.cc"
             "display/screen/wifi_config_tip_screen/wifi_config_tip_screen.cc"
             "display/screen/home_screen/home_screen.cc"
-            "display/screen/theme_screen/theme_screen.cc"
             "display/screen/info_screen/info_screen.cc"
             "display/screen/standby_screen/standby_screen.cc"
             "display/screen/game_2048_screen/game_2048_screen.cc"
@@ -98,7 +96,7 @@ set(SOURCES "audio/audio_codec.cc"
             "main.cc"
             )
 
-set(INCLUDE_DIRS "." "i18n" "display" "display/font" "display/lvgl_display" "display/lvgl_display/jpg" "display/screen" "display/screen/boot_screen" "display/screen/ota_screen" "display/screen/wifi_config_tip_screen" "display/screen/home_screen" "display/screen/game_2048_screen" "display/screen/calculator_screen" "display/screen/calendar_screen" "display/screen/music_screen" "display/screen/radio_screen" "display/screen/recording_screen" "display/screen/weather_screen" "display/screen/gps_screen" "display/screen/vibrate_screen" "display/screen/backlight_screen" "display/screen/settings_screen" "display/screen/call_screen" "display/screen/bluetooth_screen" "display/screen/chat_screen" "display/screen/network_screen" "display/screen/digital_people_screen" "display/screen/level_screen" "display/screen/magnet_screen" "display/screen/sd_card_screen" "display/screen/pin_test_screen" "display/screen/test_screen" "display/screen/ai_image_gen_screen" "display/screen/translate_screen" "display/screen/theme_screen" "display/screen/info_screen" "display/screen/standby_screen" "audio" "protocols")
+set(INCLUDE_DIRS "." "i18n" "display" "display/font" "display/lvgl_display" "display/lvgl_display/jpg" "display/screen" "display/screen/boot_screen" "display/screen/ota_screen" "display/screen/wifi_config_tip_screen" "display/screen/home_screen" "display/screen/game_2048_screen" "display/screen/calculator_screen" "display/screen/calendar_screen" "display/screen/music_screen" "display/screen/radio_screen" "display/screen/recording_screen" "display/screen/weather_screen" "display/screen/gps_screen" "display/screen/vibrate_screen" "display/screen/backlight_screen" "display/screen/settings_screen" "display/screen/call_screen" "display/screen/bluetooth_screen" "display/screen/chat_screen" "display/screen/network_screen" "display/screen/digital_people_screen" "display/screen/level_screen" "display/screen/magnet_screen" "display/screen/sd_card_screen" "display/screen/pin_test_screen" "display/screen/test_screen" "display/screen/ai_image_gen_screen" "display/screen/translate_screen" "display/screen/info_screen" "display/screen/standby_screen" "audio" "protocols")
 
 # Add board common files
 file(GLOB BOARD_COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/boards/common/*.cc)
