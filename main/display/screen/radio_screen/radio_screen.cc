@@ -984,6 +984,7 @@ bool CreatePlayerWithHls() {
         .out = {.cb = RadioOutCallback, .user_ctx = s_codec},
         .task_prio = 5,
         .task_stack = 8 * 1024,
+        .task_stack_in_ext = true,
         .prev = RadioPrevCallback,
         .prev_ctx = s_codec,
     };

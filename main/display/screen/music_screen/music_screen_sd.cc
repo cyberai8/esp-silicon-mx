@@ -347,6 +347,7 @@ void SdPlayTask(void* /*arg*/) {
             },
         .task_prio = 5,
         .task_stack = 8 * 1024,
+        .task_stack_in_ext = true,
         .prev = SdMusicPrevCallback,
         .prev_ctx = s_codec,
     };
