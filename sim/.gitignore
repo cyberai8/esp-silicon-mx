@@ -1,0 +1,6 @@
+build/
+shots/
+.nvs/
+# 仿真 SD 卡里的测试素材不进仓库，只留目录结构
+sdcard/*
+!sdcard/.keep

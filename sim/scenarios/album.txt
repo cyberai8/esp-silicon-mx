@@ -1,0 +1,29 @@
+# 相册走一遍：网格 -> 看图 -> 下一张 -> 收起顶栏 -> 返回网格
+# 坐标是 360x360 屏上的绝对像素，格子中心 ≈ (107|180|252, 95|168)
+
+log 等扫描 + 缩略图
+wait 3000
+shot 01_grid.png
+
+log 点第一张进看图页
+tap 107 95
+wait 1500
+shot 02_view.png
+
+log 左滑：下一张
+swipe 300 180 60 180 250
+wait 1500
+shot 03_view_next.png
+
+log 单击：收起计数和信息
+tap 180 180
+wait 400
+shot 04_view_nochrome.png
+
+# 顶栏收起时返回键也一起藏了，得先点一下把它唤回来
+log 再点一下唤回顶栏，然后点返回键回到网格
+tap 180 180
+wait 400
+tap 54 46
+wait 600
+shot 05_grid_again.png
