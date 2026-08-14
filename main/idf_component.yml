@@ -96,6 +96,8 @@ dependencies:
   espressif/adc_battery_estimation: ^0.2.0
   espressif/esp_new_jpeg: ^1.0.1
   espressif/libpng: ^1.6.58
+  # baseline 仍用 esp_new_jpeg；progressive / 算术编码走这套软解。
+  espressif/libjpeg-turbo: "^3.1.1"
 
   wvirgil123/sscma_client:
     version: 1.0.2

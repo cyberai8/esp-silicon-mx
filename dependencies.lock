@@ -752,6 +752,16 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 3.0.3
+  espressif/libjpeg-turbo:
+    component_hash: c83f32040e4dab9f424fddd0efdeb47552eba38d3f8e83bb16253a2ebc9aa483
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 3.1.1~2
   espressif/libpng:
     component_hash: 30b1f2f8ddf13754b3e21d7ac134b3cc8f02957bb01d0c6deb5e9a68080d69d5
     dependencies:
@@ -921,6 +931,7 @@ direct_dependencies:
 - espressif/gmf_io
 - espressif/knob
 - espressif/led_strip
+- espressif/libjpeg-turbo
 - espressif/libpng
 - espressif/mqtt
 - espressif2022/image_player
@@ -931,6 +942,6 @@ direct_dependencies:
 - waveshare/esp_lcd_sh8601
 - waveshare/esp_lcd_touch_cst9217
 - wvirgil123/sscma_client
-manifest_hash: 6209a7414b3ffb53fc2a37fe0bbe25971972dccafccad37529915da1fc36fef9
+manifest_hash: fa0a1fbd80a08938c060be8e6424992cb56b28f083b22c39fde991513249eafa
 target: esp32s3
 version: 2.0.0

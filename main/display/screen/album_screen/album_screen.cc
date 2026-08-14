@@ -23,6 +23,7 @@
 #include "freertos/idf_additions.h"
 #include <png.h>
 #include <setjmp.h>
+#include <jpeglib.h>
 #endif
 
 #include "config.h"
@@ -53,6 +54,9 @@ constexpr size_t kExifProbeBytes = 72u * 1024;
 // PNG 先按整数倍抽行抽列降到这块预算以内，再盒式缩到目标尺寸。
 constexpr size_t kPngDecodeMaxBytes = 2u * 1024u * 1024u;
 constexpr int kPngMaxSide = 8192;
+// progressive 要把整图 DCT 系数摊在内存里，大约 3 字节/像素。超过这个上限
+// 让 libjpeg 自己失败，避免把 8MB PSRAM 吃光。
+constexpr size_t kJpegSoftMaxBytes = 6u * 1024u * 1024u;
 
 constexpr uint32_t kColorBg = 0x0B0D10;
 constexpr uint32_t kColorBgGrad = 0x14171C;
@@ -672,9 +676,9 @@ bool FindExifThumb(const uint8_t* buf, size_t len, size_t* off, size_t* size) {
     return false;
 }
 
-// esp_new_jpeg 只认 baseline（SOF0/SOF1）。progressive（SOF2）和算术编码都会在
-// jpeg_dec_parse_header 里打 JPEG_DEC: Not supported JPEG standard，而且相册会
-// 对同一张图 parse 两三次，日志会被刷爆。自己扫 SOF 就能拿尺寸、也能提前跳过。
+// esp_new_jpeg 只认 baseline（SOF0/SOF1）。progressive（SOF2）和算术编码走
+// libjpeg-turbo 软解；自己扫 SOF 是为了选解码器，避免把 progressive 喂给硬件
+// 解码器刷 JPEG_DEC: Not supported JPEG standard。
 enum class JpegStd : uint8_t { Invalid, Baseline, Progressive, Other };
 
 struct JpegSof {
@@ -749,6 +753,19 @@ bool JpegCanHwDecode(const JpegSof& sof) {
            (sof.nf == 1 || sof.nf == 3);
 }
 
+bool JpegCanSoftDecode(const JpegSof& sof) {
+    return (sof.std == JpegStd::Progressive || sof.std == JpegStd::Other) && sof.w > 0 &&
+           sof.h > 0 && sof.w <= kPngMaxSide && sof.h <= kPngMaxSide &&
+           (sof.nf == 1 || sof.nf == 3);
+}
+
+bool DecodeJpegSoftIo(const uint8_t* data, size_t len, FILE* fp, int min_w, int min_h,
+                      bool cover, uint8_t** out, int* out_w, int* out_h, int* out_stride_px,
+                      int* orig_w, int* orig_h);
+bool DecodeJpegSoftFromFile(const char* path, int min_w, int min_h, bool cover, uint8_t** out,
+                            int* out_w, int* out_h, int* out_stride_px, int* orig_w,
+                            int* orig_h);
+
 // 解出「不小于 min_w×min_h」的最小一档（1、1/2、1/4、1/8）。
 // cover=true 时按长边贴合，用于方形缩略图；false 按短边贴合，用于整图铺满。
 bool DecodeJpegScaled(const uint8_t* data, size_t len, int min_w, int min_h, bool cover,
@@ -756,6 +773,10 @@ bool DecodeJpegScaled(const uint8_t* data, size_t len, int min_w, int min_h, boo
                       int* orig_h) {
     *out = nullptr;
     const JpegSof sof = ParseJpegSof(data, len);
+    if (JpegCanSoftDecode(sof)) {
+        return DecodeJpegSoftIo(data, len, nullptr, min_w, min_h, cover, out, out_w, out_h,
+                                out_stride_px, orig_w, orig_h);
+    }
     if (!JpegCanHwDecode(sof)) {
         return false;
     }
@@ -847,6 +868,198 @@ bool DecodeJpegScaled(const uint8_t* data, size_t len, int min_w, int min_h, boo
 uint16_t PackRgb565(uint32_t r, uint32_t g, uint32_t b) {
     return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
 }
+
+#if defined(ESP_PLATFORM)
+
+struct JpegErr {
+    jpeg_error_mgr pub;
+    jmp_buf jmp;
+};
+
+extern "C" void JpegErrorExit(j_common_ptr cinfo) {
+    auto* err = reinterpret_cast<JpegErr*>(cinfo->err);
+    char msg[JMSG_LENGTH_MAX];
+    (*cinfo->err->format_message)(cinfo, msg);
+    ESP_LOGW(TAG, "libjpeg: %s", msg);
+    longjmp(err->jmp, 1);
+}
+
+extern "C" void JpegSilence(j_common_ptr) {}
+
+bool DecodeJpegSoftIo(const uint8_t* data, size_t len, FILE* fp, int min_w, int min_h,
+                      bool cover, uint8_t** out, int* out_w, int* out_h, int* out_stride_px,
+                      int* orig_w, int* orig_h) {
+    *out = nullptr;
+    if ((fp == nullptr && (data == nullptr || len < 4)) || min_w < 1 || min_h < 1) {
+        return false;
+    }
+
+    jpeg_decompress_struct cinfo;
+    JpegErr jerr;
+    memset(&cinfo, 0, sizeof(cinfo));
+    volatile uint8_t* buf_v = nullptr;
+    volatile uint8_t* row_v = nullptr;
+
+    cinfo.err = jpeg_std_error(&jerr.pub);
+    jerr.pub.error_exit = JpegErrorExit;
+    jerr.pub.output_message = JpegSilence;
+    if (setjmp(jerr.jmp)) {
+        heap_caps_free(const_cast<uint8_t*>(buf_v));
+        heap_caps_free(const_cast<uint8_t*>(row_v));
+        jpeg_destroy_decompress(&cinfo);
+        return false;
+    }
+
+    jpeg_create_decompress(&cinfo);
+    if (cinfo.mem != nullptr) {
+        cinfo.mem->max_memory_to_use = static_cast<long>(kJpegSoftMaxBytes);
+    }
+    if (fp != nullptr) {
+        jpeg_stdio_src(&cinfo, fp);
+    } else {
+        jpeg_mem_src(&cinfo, data, static_cast<unsigned long>(len));
+    }
+    if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
+        jpeg_destroy_decompress(&cinfo);
+        return false;
+    }
+
+    const int sw = static_cast<int>(cinfo.image_width);
+    const int sh = static_cast<int>(cinfo.image_height);
+    if (sw < 1 || sh < 1 || sw > kPngMaxSide || sh > kPngMaxSide) {
+        jpeg_destroy_decompress(&cinfo);
+        return false;
+    }
+    if (orig_w != nullptr) {
+        *orig_w = sw;
+    }
+    if (orig_h != nullptr) {
+        *orig_h = sh;
+    }
+
+    const float fx = static_cast<float>(min_w) / static_cast<float>(sw);
+    const float fy = static_cast<float>(min_h) / static_cast<float>(sh);
+    const float need = cover ? (fx > fy ? fx : fy) : (fx < fy ? fx : fy);
+    int div = 1;
+    if (need <= 0.125f) {
+        div = 8;
+    } else if (need <= 0.25f) {
+        div = 4;
+    } else if (need <= 0.5f) {
+        div = 2;
+    }
+
+    cinfo.scale_num = 1;
+    cinfo.scale_denom = div;
+    cinfo.out_color_space = JCS_RGB;
+    cinfo.dct_method = JDCT_IFAST;
+    cinfo.do_fancy_upsampling = FALSE;
+    cinfo.do_block_smoothing = FALSE;
+    jpeg_calc_output_dimensions(&cinfo);
+
+    const int dw = static_cast<int>(cinfo.output_width);
+    const int dh = static_cast<int>(cinfo.output_height);
+    int extra = 1;
+    while (extra < 64) {
+        const int nw = dw / extra;
+        const int nh = dh / extra;
+        if (nw < 1 || nh < 1) {
+            break;
+        }
+        if (static_cast<size_t>(nw) * static_cast<size_t>(nh) * 2u <= kPngDecodeMaxBytes) {
+            break;
+        }
+        extra *= 2;
+    }
+    const int ow = dw / extra;
+    const int oh = dh / extra;
+    if (ow < 1 || oh < 1) {
+        jpeg_destroy_decompress(&cinfo);
+        return false;
+    }
+
+    auto* buf = static_cast<uint8_t*>(AllocBig(static_cast<size_t>(ow) * oh * 2));
+    auto* row = static_cast<uint8_t*>(AllocBig(static_cast<size_t>(dw) * 3));
+    buf_v = buf;
+    row_v = row;
+    if (buf == nullptr || row == nullptr) {
+        heap_caps_free(buf);
+        heap_caps_free(row);
+        jpeg_destroy_decompress(&cinfo);
+        return false;
+    }
+
+    jpeg_start_decompress(&cinfo);
+    JSAMPROW rows[1] = {row};
+    int dy = 0;
+    while (cinfo.output_scanline < cinfo.output_height) {
+        jpeg_read_scanlines(&cinfo, rows, 1);
+        const int y = static_cast<int>(cinfo.output_scanline) - 1;
+        if ((y % extra) != 0 || dy >= oh) {
+            continue;
+        }
+        uint8_t* dst = buf + static_cast<size_t>(dy) * ow * 2;
+        for (int x = 0; x < ow; ++x) {
+            const uint8_t* p = row + static_cast<size_t>(x * extra) * 3;
+            const uint16_t v = PackRgb565(p[0], p[1], p[2]);
+            dst[x * 2] = static_cast<uint8_t>(v & 0xFF);
+            dst[x * 2 + 1] = static_cast<uint8_t>(v >> 8);
+        }
+        ++dy;
+    }
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+    heap_caps_free(row);
+
+    *out = buf;
+    *out_w = ow;
+    *out_h = oh;
+    *out_stride_px = ow;
+    return true;
+}
+
+bool DecodeJpegSoftFromFile(const char* path, int min_w, int min_h, bool cover, uint8_t** out,
+                            int* out_w, int* out_h, int* out_stride_px, int* orig_w,
+                            int* orig_h) {
+    FILE* fp = fopen(path, "rb");
+    if (fp == nullptr) {
+        return false;
+    }
+    const bool ok = DecodeJpegSoftIo(nullptr, 0, fp, min_w, min_h, cover, out, out_w, out_h,
+                                     out_stride_px, orig_w, orig_h);
+    fclose(fp);
+    return ok;
+}
+
+#else
+
+bool DecodeJpegSoftIo(const uint8_t* data, size_t len, FILE* fp, int min_w, int min_h,
+                      bool cover, uint8_t** out, int* out_w, int* out_h, int* out_stride_px,
+                      int* orig_w, int* orig_h) {
+    (void)data;
+    (void)len;
+    (void)fp;
+    (void)min_w;
+    (void)min_h;
+    (void)cover;
+    (void)orig_w;
+    (void)orig_h;
+    *out = nullptr;
+    *out_w = 0;
+    *out_h = 0;
+    *out_stride_px = 0;
+    return false;
+}
+
+bool DecodeJpegSoftFromFile(const char* path, int min_w, int min_h, bool cover, uint8_t** out,
+                            int* out_w, int* out_h, int* out_stride_px, int* orig_w,
+                            int* orig_h) {
+    (void)path;
+    return DecodeJpegSoftIo(nullptr, 0, nullptr, min_w, min_h, cover, out, out_w, out_h,
+                            out_stride_px, orig_w, orig_h);
+}
+
+#endif
 
 void RgbaPixelTo565(const uint8_t* p, uint8_t* dst) {
     const uint32_t a = p[3];
@@ -1234,14 +1447,30 @@ void GenerateThumb(const PhotoListPtr& list, int index, int gen) {
             size_t t_len = 0;
             if (FindExifThumb(head, head_len, &t_off, &t_len)) {
                 ok = MakeThumb(head + t_off, t_len, true, thumb, nullptr, nullptr);
-            } else if (head_len < kExifProbeBytes && JpegCanHwDecode(sof)) {
+            } else if (head_len < kExifProbeBytes &&
+                       (JpegCanHwDecode(sof) || JpegCanSoftDecode(sof))) {
                 ok = MakeThumb(head, head_len, true, thumb, &ow, &oh);
             }
             heap_caps_free(head);
         }
     }
-    if (!ok && p->jpeg && sof.std != JpegStd::Invalid && !JpegCanHwDecode(sof)) {
-        // progressive / CMYK / 算术编码：整文件再解一次也是同样的失败，别再喂给解码器。
+    if (!ok && p->jpeg && JpegCanSoftDecode(sof)) {
+        // progressive：从 SD 流式软解，避免整文件和 DCT 系数表同时占 PSRAM。
+        uint8_t* dec = nullptr;
+        int dw = 0;
+        int dh = 0;
+        int stride_px = 0;
+        if (DecodeJpegSoftFromFile(p->path.c_str(), kThumb, kThumb, true, &dec, &dw, &dh,
+                                   &stride_px, &ow, &oh)) {
+            const int side = dw < dh ? dw : dh;
+            BoxScaleRgb565(dec, stride_px * 2, (dw - side) / 2, (dh - side) / 2, side, side,
+                           thumb, kThumb, kThumb);
+            heap_caps_free(dec);
+            ok = true;
+        } else {
+            ESP_LOGW(TAG, "%s: progressive decode failed", p->name.c_str());
+        }
+    } else if (!ok && p->jpeg && sof.std != JpegStd::Invalid && !JpegCanHwDecode(sof)) {
         ESP_LOGW(TAG, "%s: %s JPEG nf=%d, skip decode", p->name.c_str(), JpegStdName(sof.std),
                  sof.nf);
     } else if (!ok) {
@@ -1255,7 +1484,8 @@ void GenerateThumb(const PhotoListPtr& list, int index, int gen) {
                     oh = sof.h;
                 }
             }
-            if (p->jpeg && !JpegCanHwDecode(sof) && sof.std != JpegStd::Invalid) {
+            if (p->jpeg && sof.std != JpegStd::Invalid && !JpegCanHwDecode(sof) &&
+                !JpegCanSoftDecode(sof)) {
                 ESP_LOGW(TAG, "%s: %s JPEG nf=%d, skip decode", p->name.c_str(),
                          JpegStdName(sof.std), sof.nf);
             } else {
@@ -1283,72 +1513,85 @@ void GenerateThumb(const PhotoListPtr& list, int index, int gen) {
     p->thumb_ready = true;
 }
 
+void CommitViewPixels(ViewImage* result, uint8_t* dec, int dw, int dh, int stride_px, int tw,
+                      int th) {
+    if (dec == nullptr || tw < 1 || th < 1) {
+        heap_caps_free(dec);
+        return;
+    }
+    if (dw == tw && dh == th && stride_px == dw) {
+        result->buf = dec;
+        result->w = dw;
+        result->h = dh;
+        return;
+    }
+    auto* fit = static_cast<uint8_t*>(AllocBig(static_cast<size_t>(tw) * th * 2));
+    if (fit != nullptr) {
+        BoxScaleRgb565(dec, stride_px * 2, 0, 0, dw, dh, fit, tw, th);
+        result->buf = fit;
+        result->w = tw;
+        result->h = th;
+    }
+    heap_caps_free(dec);
+}
+
 void DecodeForView(const PhotoListPtr& list, int index, int gen) {
     Photo* p = ItemAt(list, index);
     ViewImage result;
     result.index = index;
     if (p != nullptr) {
-        uint8_t* file = nullptr;
-        size_t file_len = 0;
-        if (LoadFile(p->path, &file, &file_len)) {
-            int sw = p->src_w;
-            int sh = p->src_h;
-            JpegSof sof;
-            bool skip_jpeg = false;
-            if (p->jpeg) {
-                sof = ParseJpegSof(file, file_len);
-                if (sof.w > 0) {
-                    sw = sof.w;
-                    sh = sof.h;
-                }
-                if (!JpegCanHwDecode(sof)) {
-                    ESP_LOGW(TAG, "%s: %s JPEG nf=%d, cannot preview", p->name.c_str(),
-                             JpegStdName(sof.std), sof.nf);
-                    skip_jpeg = true;
-                }
-            } else if (sw <= 0 || sh <= 0) {
-                ReadPngSize(p->path, &sw, &sh);
+        int sw = p->src_w;
+        int sh = p->src_h;
+        JpegSof sof;
+        if (p->jpeg) {
+            uint8_t* head = nullptr;
+            size_t head_len = 0;
+            if (LoadFilePrefix(p->path, kExifProbeBytes, &head, &head_len)) {
+                sof = ParseJpegSof(head, head_len);
+                heap_caps_free(head);
             }
-            if (sw > 0 && sh > 0) {
-                std::lock_guard<std::mutex> lock(s_thumb_mutex);
-                p->src_w = sw;
-                p->src_h = sh;
+            if (sof.w > 0) {
+                sw = sof.w;
+                sh = sof.h;
             }
-            int tw = 0;
-            int th = 0;
-            FitInCircle(sw, sh, &tw, &th);
-            uint8_t* dec = nullptr;
-            int dw = 0;
-            int dh = 0;
-            int stride_px = 0;
-            bool decoded = false;
-            if (!skip_jpeg) {
+        } else if (sw <= 0 || sh <= 0) {
+            ReadPngSize(p->path, &sw, &sh);
+        }
+        if (sw > 0 && sh > 0) {
+            std::lock_guard<std::mutex> lock(s_thumb_mutex);
+            p->src_w = sw;
+            p->src_h = sh;
+        }
+        int tw = 0;
+        int th = 0;
+        FitInCircle(sw, sh, &tw, &th);
+        uint8_t* dec = nullptr;
+        int dw = 0;
+        int dh = 0;
+        int stride_px = 0;
+        bool decoded = false;
+        if (p->jpeg && JpegCanSoftDecode(sof)) {
+            decoded = DecodeJpegSoftFromFile(p->path.c_str(), tw, th, false, &dec, &dw, &dh,
+                                            &stride_px, nullptr, nullptr);
+            if (!decoded) {
+                ESP_LOGW(TAG, "%s: progressive preview failed", p->name.c_str());
+            }
+        } else if (p->jpeg && !JpegCanHwDecode(sof) && sof.std != JpegStd::Invalid) {
+            ESP_LOGW(TAG, "%s: %s JPEG nf=%d, cannot preview", p->name.c_str(),
+                     JpegStdName(sof.std), sof.nf);
+        } else {
+            uint8_t* file = nullptr;
+            size_t file_len = 0;
+            if (LoadFile(p->path, &file, &file_len)) {
                 decoded = p->jpeg ? DecodeJpegScaled(file, file_len, tw, th, false, &dec, &dw,
                                                      &dh, &stride_px, nullptr, nullptr)
                                   : DecodePngScaled(file, file_len, tw, th, false, &dec, &dw, &dh,
                                                     &stride_px, nullptr, nullptr);
+                heap_caps_free(file);
             }
-            heap_caps_free(file);
-            if (decoded) {
-                if (dw == tw && dh == th && stride_px == dw) {
-                    result.buf = dec;
-                    result.w = dw;
-                    result.h = dh;
-                    dec = nullptr;
-                } else {
-                    auto* fit = static_cast<uint8_t*>(
-                        AllocBig(static_cast<size_t>(tw) * th * 2));
-                    if (fit != nullptr) {
-                        BoxScaleRgb565(dec, stride_px * 2, 0, 0, dw, dh, fit, tw, th);
-                        result.buf = fit;
-                        result.w = tw;
-                        result.h = th;
-                    }
-                }
-                if (dec != nullptr) {
-                    heap_caps_free(dec);
-                }
-            }
+        }
+        if (decoded) {
+            CommitViewPixels(&result, dec, dw, dh, stride_px, tw, th);
         }
     }
 
@@ -1398,8 +1641,8 @@ void WorkerTask(void* arg) {
 void StartWorker() {
     const int gen = s_worker_gen.fetch_add(1, std::memory_order_relaxed) + 1;
     s_view_req.store(-1, std::memory_order_relaxed);
-    // 解码钉在 core 0，LVGL 固定在 core 1，两边不抢核。JPEG/PNG 软解栈吃得多，给足 8K。
-    if (!SpawnAlbumTask(WorkerTask, "album_worker", 8192,
+    // 解码钉在 core 0，LVGL 固定在 core 1，两边不抢核。libjpeg progressive 栈吃得多。
+    if (!SpawnAlbumTask(WorkerTask, "album_worker", 10240,
                         reinterpret_cast<void*>(static_cast<intptr_t>(gen)), 3, 0)) {
         ESP_LOGE(TAG, "worker task create failed");
         s_need_worker.store(true, std::memory_order_relaxed);
