@@ -132,6 +132,10 @@ void EnsureAlarmPoller();
 void StopAlarmPoller();
 bool AnyAlarmEnabled();
 std::string AlarmHint(const AlarmData& a);
+void ShowAlarmLimitPopup();
+void CloseAlarmLimitPopup();
+
+lv_obj_t* s_limit_popup = nullptr;
 
 void GoHome() {
     lv_obj_t* old = lv_screen_active();
@@ -143,6 +147,10 @@ void GoHome() {
 }
 
 void OnSwipeBack() {
+    if (s_limit_popup != nullptr) {
+        CloseAlarmLimitPopup();
+        return;
+    }
     if (s_overlay != nullptr && !lv_obj_has_flag(s_overlay, LV_OBJ_FLAG_HIDDEN)) {
         HideOverlay();
         return;
@@ -190,6 +198,58 @@ lv_obj_t* MakeLabel(lv_obj_t* parent, const char* text, uint32_t color,
     lv_obj_set_style_text_font(lbl, font, LV_PART_MAIN);
     lv_obj_remove_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
     return lbl;
+}
+
+void CloseAlarmLimitPopup() {
+    if (s_limit_popup == nullptr) return;
+    lv_obj_delete(s_limit_popup);
+    s_limit_popup = nullptr;
+}
+
+void ShowAlarmLimitPopup() {
+    if (s_scr == nullptr) return;
+    CloseAlarmLimitPopup();
+
+    s_limit_popup = lv_obj_create(s_scr);
+    screen_strip_obj_chrome(s_limit_popup);
+    lv_obj_set_size(s_limit_popup, kPanel, kPanel);
+    lv_obj_set_style_bg_color(s_limit_popup, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_limit_popup, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_add_flag(s_limit_popup, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_move_foreground(s_limit_popup);
+
+    lv_obj_t* card = lv_obj_create(s_limit_popup);
+    screen_strip_obj_chrome(card);
+    lv_obj_set_size(card, kRound ? 240 : 360, kRound ? 150 : 200);
+    lv_obj_center(card);
+    lv_obj_set_style_radius(card, 18, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(card, lv_color_hex(kBtnDark), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(card, lv_color_hex(kAccent), LV_PART_MAIN);
+    lv_obj_set_scroll_dir(card, LV_DIR_NONE);
+
+    char msg[48];
+    snprintf(msg, sizeof(msg), I18n::T("最多添加 %d 个闹钟"), kMaxAlarms);
+    lv_obj_t* title = MakeLabel(card, msg, kText, FontSmall());
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(title, kRound ? 200 : 300);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, kRound ? 28 : 40);
+
+    lv_obj_t* ok = lv_btn_create(card);
+    lv_obj_set_size(ok, kRound ? 100 : 140, kRound ? 36 : 48);
+    lv_obj_align(ok, LV_ALIGN_BOTTOM_MID, 0, kRound ? -18 : -24);
+    lv_obj_set_style_radius(ok, 18, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(ok, lv_color_hex(kAccent), LV_PART_MAIN);
+    lv_obj_set_style_border_width(ok, 0, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(ok, 0, LV_PART_MAIN);
+    lv_obj_t* ol = lv_label_create(ok);
+    lv_label_set_text(ol, I18n::T("知道了"));
+    lv_obj_set_style_text_font(ol, FontSmall(), LV_PART_MAIN);
+    lv_obj_set_style_text_color(ol, lv_color_hex(kBg), LV_PART_MAIN);
+    lv_obj_center(ol);
+    lv_obj_add_event_cb(ok, [](lv_event_t*) { CloseAlarmLimitPopup(); },
+                        LV_EVENT_CLICKED, nullptr);
 }
 
 std::string AlarmHint(const AlarmData& a) {
@@ -940,7 +1000,7 @@ void SaveAlarmFromEdit() {
         s_alarms[s_edit_index] = a;
     } else {
         if (s_alarm_count >= kMaxAlarms) {
-            ESP_LOGW(TAG, "alarm list full (%d)", kMaxAlarms);
+            ShowAlarmLimitPopup();
             HideOverlay();
             return;
         }
@@ -1133,7 +1193,7 @@ void BuildAlarmPage(lv_obj_t* parent) {
         add,
         [](lv_event_t*) {
             if (s_alarm_count >= kMaxAlarms) {
-                ESP_LOGW(TAG, "max %d alarms", kMaxAlarms);
+                ShowAlarmLimitPopup();
                 return;
             }
             ShowAlarmEdit(-1);
@@ -1279,6 +1339,7 @@ void OnScrDeleted(lv_event_t* /*e*/) {
     }
     s_sw_running = false;
     s_cd_running = false;
+    s_limit_popup = nullptr;
     s_scr = nullptr;
     s_page_alarm = s_page_sw = s_page_cd = nullptr;
     s_overlay = nullptr;

@@ -7,6 +7,7 @@
 #include <cctype>
 #include <ctime>
 #include <string>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
@@ -37,6 +38,7 @@ extern "C" void board_release_power_hold_if_supported();
 #include "calendar_screen/calendar_screen.h"
 #include "call_screen/call_screen.h"
 #include "chat_screen/chat_screen.h"
+#include "album_screen/album_screen.h"
 #include "clock_screen/clock_screen.h"
 #include "digital_people_screen/digital_people_screen.h"
 #include "game_2048_screen/game_2048_screen.h"
@@ -132,6 +134,16 @@ void clock_lifecycle_cb(screen_lifecycle_event_t event) {
         ESP_LOGI(TAG_HOME, "unload: clock_screen");
     }
     ClockScreen::LifecycleCallback(event);
+}
+
+void album_lifecycle_cb(screen_lifecycle_event_t event) {
+    PwrKey_OnScreenLifecycle("album", event);
+    if (event == SCREEN_LIFECYCLE_LOAD) {
+        ESP_LOGI(TAG_HOME, "load: album_screen");
+    } else {
+        ESP_LOGI(TAG_HOME, "unload: album_screen");
+    }
+    AlbumScreen::LifecycleCallback(event);
 }
 
 // ??????????????BT ????3????/ ??UART ????
@@ -418,6 +430,16 @@ void LaunchCalendar(screen_lifecycle_cb_t lifecycle_cb) {
 void LaunchClock(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* old_scr = lv_screen_active();
     lv_obj_t* app = ClockScreen::Create();
+    screen_attach_lifecycle(app, lifecycle_cb);
+    lv_screen_load(app);
+    if (old_scr != nullptr && old_scr != app) {
+        lv_obj_delete_async(old_scr);
+    }
+}
+
+void LaunchAlbum(screen_lifecycle_cb_t lifecycle_cb) {
+    lv_obj_t* old_scr = lv_screen_active();
+    lv_obj_t* app = AlbumScreen::Create();
     screen_attach_lifecycle(app, lifecycle_cb);
     lv_screen_load(app);
     if (old_scr != nullptr && old_scr != app) {
@@ -779,6 +801,7 @@ constexpr AppEntry kApps[] = {
     {"music",          "音乐",     LaunchMusic,         music_lifecycle_cb,         false},
     {"calendar",       "日历",     LaunchCalendar,      calendar_lifecycle_cb,      false},
     {"alarm",          "闹钟",     LaunchClock,         clock_lifecycle_cb,         false},
+    {"album",          "相册",     LaunchAlbum,         album_lifecycle_cb,         false},
 #if !defined(BOARD_ESP_VOCAT)
     {"gps",            "地图",     LaunchGps,           gps_lifecycle_cb,           true},
     {"spirit_level",   "水平仪",   LaunchLevel,         level_lifecycle_cb,         false},
@@ -906,6 +929,8 @@ constexpr int kPageSnapThreshold = kPanelW / 5;
 constexpr int kHomeFlickThreshold = 24;
 constexpr uint32_t kHomeLongPressMs = 750;
 constexpr uint32_t kPageSlideAnimMs = kLayoutRoundSmall ? 200 : 300;
+// 圆屏四叶瓣：拖到这个距离就直接翻页，不等松手。
+constexpr int kCloverSwipeTriggerPx = 44;
 
 constexpr lv_obj_flag_t kAppCellFlag = LV_OBJ_FLAG_USER_2;
 
@@ -1154,6 +1179,8 @@ struct PagerState {
     int clover_order[kTotalApps] = {};
     int clover_order_count = 0;
     int clover_pending_page = 0;
+    int clover_step = 1;        // 本次翻页方向：+1 下一页，-1 上一页
+    int clover_queued_step = 0; // 动画中又来手势时排队一步，避免丢手势
     bool clover_busy = false;
 };
 
@@ -1724,13 +1751,163 @@ void HighlightDot(PagerState* state, int page) {
     }
 }
 
-constexpr uint32_t kCloverFadeMs = 120;
+// 翻页动效只动 4 个图标 + 4 条文字（image_opa / text_opa / translate_x）。
+// 不能给 clover_layer 整体设 opa：容器带子对象且 opa < COVER 时 LVGL 会渲染到
+// intermediate layer，而 LV_DRAW_LAYER_SIMPLE_BUF_SIZE 只有 24KB，360×360 要切
+// 二十多刀重绘，一帧都刷不完，手感就是"顿"。
+// 时长按 LV_DEF_REFR_PERIOD=33ms 取整数帧数，避免最后一帧被截断。
+// 图标/底图已常驻 PSRAM，翻页每帧只是 blit，淡入淡出不会再一块一块冒出来。
+constexpr uint32_t kCloverFadeOutMs = 165;  // 5 帧
+constexpr uint32_t kCloverFadeInMs = 198;   // 6 帧
+constexpr int32_t kCloverSlidePx = 36;      // 位移量，给出方向感又不至于扩太多重绘区
+
 const char* CloverDisplayName(const AppEntry* entry);
 bool PagerLoopEnabled(const PagerState* state);
+void CloverGoToPage(PagerState* state, int target_page);
 
 // 四叶瓣图标由 tools/redraw_clover_icons.py 按显示尺寸生成（圆屏 80×80，1:1 不缩放）。
 // 大屏若需原生清晰度：python3 tools/redraw_clover_icons.py --size 112
 constexpr int kCloverIconFrame = kLayoutRoundSmall ? 80 : 112;
+
+// xingzhi-assets 打包用 MMAP_SPLIT_HEIGHT=16，.spng 是切片格式，esp_lv_decoder 对切片图
+// 强制 no_cache：每次重绘都要按 16 行重新 inflate（80×80 图标 5 片，360×360 底图 23 片）。
+// 翻页有 8 个失效区，每个区都会把压在下面的底图切片和自己的图标重解一遍，解码穿插在各块
+// flush 之间，看着就是图标一个接一个冒出来。这里各解一次常驻 PSRAM，翻页只剩 blit。
+// 底图按黑底压平成不透明 RGB565（屏幕底色就是黑），省一半内存，也省掉逐像素 alpha 混合。
+constexpr const char* kCloverChromePath = "A:home_clover_chrome.spng";
+constexpr size_t kCloverRamBudget = 1200u * 1024u;
+size_t s_clover_ram_used = 0;
+
+lv_image_dsc_t s_clover_icon_dsc[kTotalApps];
+bool s_clover_icon_ready[kTotalApps];
+bool s_clover_icon_tried[kTotalApps];
+lv_image_dsc_t s_clover_chrome_dsc;
+bool s_clover_chrome_ready = false;
+
+// 把 A: 盘一张图整幅画到常驻 PSRAM。切片图没法一次拿到整幅缓冲，借个离屏 canvas 走正常
+// 绘制流程最省事。opaque_on_black：直接铺在黑底上存成不透明 RGB565（底图用，省一半内存、
+// 画的时候也不用混合）；否则存 ARGB8888（图标要透明地压在底图上）。
+bool DecodeAssetToRam(const char* path, bool opaque_on_black, lv_image_dsc_t* out) {
+    if (path == nullptr || out == nullptr) {
+        return false;
+    }
+    lv_image_header_t header;
+    if (lv_image_decoder_get_info(path, &header) != LV_RESULT_OK) {
+        return false;
+    }
+    const int32_t w = static_cast<int32_t>(header.w);
+    const int32_t h = static_cast<int32_t>(header.h);
+    const lv_color_format_t cf =
+        opaque_on_black ? LV_COLOR_FORMAT_RGB565 : LV_COLOR_FORMAT_ARGB8888;
+    const size_t px = opaque_on_black ? 2u : 4u;
+    const size_t bytes = static_cast<size_t>(w) * h * px;
+    if (w <= 0 || h <= 0 || s_clover_ram_used + bytes > kCloverRamBudget) {
+        return false;
+    }
+    auto* buf = static_cast<uint8_t*>(heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM));
+    if (buf == nullptr) {
+        return false;
+    }
+    // 全 0 起手：RGB565 就是黑底，ARGB8888 就是全透明。
+    std::memset(buf, 0, bytes);
+
+    lv_obj_t* holder = lv_obj_create(nullptr);
+    lv_obj_t* canvas = (holder != nullptr) ? lv_canvas_create(holder) : nullptr;
+    if (canvas == nullptr) {
+        if (holder != nullptr) {
+            lv_obj_delete(holder);
+        }
+        heap_caps_free(buf);
+        return false;
+    }
+    lv_canvas_set_buffer(canvas, buf, w, h, cf);
+
+    lv_layer_t layer;
+    lv_canvas_init_layer(canvas, &layer);
+    lv_draw_image_dsc_t img;
+    lv_draw_image_dsc_init(&img);
+    img.src = path;
+    lv_area_t area = {0, 0, w - 1, h - 1};
+    lv_draw_image(&layer, &img, &area);
+    lv_canvas_finish_layer(canvas, &layer);
+    // canvas 只是借用这块内存，销毁时不会释放。
+    lv_obj_delete(holder);
+
+    std::memset(out, 0, sizeof(*out));
+    out->header.magic = LV_IMAGE_HEADER_MAGIC;
+    out->header.cf = cf;
+    out->header.w = static_cast<uint32_t>(w);
+    out->header.h = static_cast<uint32_t>(h);
+    out->header.stride = static_cast<uint32_t>(w) * px;
+    out->data_size = static_cast<uint32_t>(bytes);
+    out->data = buf;
+    s_clover_ram_used += bytes;
+    return true;
+}
+
+// 解不出来就退回文件路径，最差也只是回到原来的表现。
+const void* CloverIconSrc(int idx) {
+    if (idx < 0 || idx >= kTotalApps) {
+        return nullptr;
+    }
+    if (!s_clover_icon_tried[idx]) {
+        s_clover_icon_tried[idx] = true;
+        s_clover_icon_ready[idx] = DecodeAssetToRam(
+            s_clover_icon_paths[idx], false, &s_clover_icon_dsc[idx]);
+    }
+    if (s_clover_icon_ready[idx]) {
+        return &s_clover_icon_dsc[idx];
+    }
+    return s_clover_icon_paths[idx];
+}
+
+const void* CloverChromeSrc() {
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        s_clover_chrome_ready =
+            DecodeAssetToRam(kCloverChromePath, true, &s_clover_chrome_dsc);
+        ESP_LOGI(TAG_HOME, "clover chrome ram=%d used=%uKB",
+                 s_clover_chrome_ready ? 1 : 0,
+                 static_cast<unsigned>(s_clover_ram_used / 1024));
+    }
+    if (s_clover_chrome_ready) {
+        return &s_clover_chrome_dsc;
+    }
+    return kCloverChromePath;
+}
+
+// 后面几页的图标在空闲时预解，一次 tick 只解一张，别把 LVGL 堵住。
+int s_clover_prefetch[kTotalApps];
+int s_clover_prefetch_count = 0;
+int s_clover_prefetch_pos = 0;
+lv_timer_t* s_clover_prefetch_timer = nullptr;
+
+void CloverPrefetchCb(lv_timer_t* timer) {
+    while (s_clover_prefetch_pos < s_clover_prefetch_count) {
+        const int idx = s_clover_prefetch[s_clover_prefetch_pos++];
+        if (idx >= 0 && idx < kTotalApps && !s_clover_icon_tried[idx]) {
+            CloverIconSrc(idx);
+            return;
+        }
+    }
+    ESP_LOGI(TAG_HOME, "clover icons cached, ram=%uKB",
+             static_cast<unsigned>(s_clover_ram_used / 1024));
+    lv_timer_delete(timer);
+    s_clover_prefetch_timer = nullptr;
+}
+
+void StartCloverPrefetch(const int* order, int count) {
+    if (s_clover_prefetch_timer != nullptr || order == nullptr || count <= 0) {
+        return;
+    }
+    s_clover_prefetch_count = (count > kTotalApps) ? kTotalApps : count;
+    for (int i = 0; i < s_clover_prefetch_count; ++i) {
+        s_clover_prefetch[i] = order[i];
+    }
+    s_clover_prefetch_pos = 0;
+    s_clover_prefetch_timer = lv_timer_create(CloverPrefetchCb, 40, nullptr);
+}
 
 void SetupCloverIcon(lv_obj_t* icon, lv_coord_t center_x, lv_coord_t center_y) {
     if (icon == nullptr) {
@@ -1779,7 +1956,7 @@ void CloverApplyPage(PagerState* state, int page) {
         }
         const AppEntry& app = kApps[idx];
         if (icon != nullptr) {
-            lv_image_set_src(icon, s_clover_icon_paths[idx]);
+            lv_image_set_src(icon, CloverIconSrc(idx));
             lv_image_set_inner_align(icon, LV_IMAGE_ALIGN_CENTER);
             lv_obj_remove_flag(icon, LV_OBJ_FLAG_HIDDEN);
         }
@@ -1796,26 +1973,83 @@ void CloverApplyPage(PagerState* state, int page) {
     s_last_home_page = page;
 }
 
-void CloverFadeExec(void* var, int32_t v) {
+// opa/位移一起改：一次遍历只碰 8 个对象，重绘区就是图标 + 文字那几块。
+void CloverSetTransition(PagerState* state, lv_opa_t opa, int32_t shift) {
+    if (state == nullptr) {
+        return;
+    }
+    for (int s = 0; s < kCloverAppsPerPage; ++s) {
+        lv_obj_t* icon = state->clover_icon[s];
+        if (icon != nullptr) {
+            lv_obj_set_style_image_opa(icon, opa, LV_PART_MAIN);
+            lv_obj_set_style_translate_x(icon, shift, LV_PART_MAIN);
+        }
+        lv_obj_t* name = state->clover_name[s];
+        if (name != nullptr) {
+            lv_obj_set_style_text_opa(name, opa, LV_PART_MAIN);
+            lv_obj_set_style_translate_x(name, shift, LV_PART_MAIN);
+        }
+    }
+}
+
+void CloverResetTransition(PagerState* state) {
+    CloverSetTransition(state, LV_OPA_COVER, 0);
+}
+
+// 动画进度统一用 0..256，避免除法丢精度。
+constexpr int32_t kCloverAnimSpan = 256;
+
+void CloverAnimOutExec(void* var, int32_t v) {
     auto* state = static_cast<PagerState*>(var);
     if (state == nullptr) {
         return;
     }
-    if (state->clover_layer != nullptr) {
-        lv_obj_set_style_opa(state->clover_layer, static_cast<lv_opa_t>(v),
-                             LV_PART_MAIN);
-    }
+    const int32_t opa = LV_OPA_COVER - LV_OPA_COVER * v / kCloverAnimSpan;
+    const int32_t shift =
+        -state->clover_step * kCloverSlidePx * v / kCloverAnimSpan;
+    CloverSetTransition(state, static_cast<lv_opa_t>(opa), shift);
 }
 
-void CloverFadeInFinished(lv_anim_t* a) {
+void CloverAnimInExec(void* var, int32_t v) {
+    auto* state = static_cast<PagerState*>(var);
+    if (state == nullptr) {
+        return;
+    }
+    const int32_t opa = LV_OPA_COVER * v / kCloverAnimSpan;
+    const int32_t shift = state->clover_step * kCloverSlidePx *
+                          (kCloverAnimSpan - v) / kCloverAnimSpan;
+    CloverSetTransition(state, static_cast<lv_opa_t>(opa), shift);
+}
+
+void CloverFadeInReady(lv_anim_t* a) {
     auto* state = static_cast<PagerState*>(lv_anim_get_user_data(a));
     if (state == nullptr) {
         return;
     }
-    if (state->clover_layer != nullptr) {
-        lv_obj_set_style_opa(state->clover_layer, LV_OPA_COVER, LV_PART_MAIN);
-    }
+    CloverResetTransition(state);
     state->clover_busy = false;
+
+    const int queued = state->clover_queued_step;
+    state->clover_queued_step = 0;
+    if (queued != 0) {
+        CloverGoToPage(state, state->current_page + queued);
+    }
+}
+
+void CloverStartFadeIn(PagerState* state) {
+    if (state == nullptr) {
+        return;
+    }
+    lv_anim_t fade_in;
+    lv_anim_init(&fade_in);
+    lv_anim_set_var(&fade_in, state);
+    lv_anim_set_user_data(&fade_in, state);
+    lv_anim_set_exec_cb(&fade_in, CloverAnimInExec);
+    lv_anim_set_values(&fade_in, 0, kCloverAnimSpan);
+    lv_anim_set_duration(&fade_in, kCloverFadeInMs);
+    lv_anim_set_path_cb(&fade_in, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&fade_in, CloverFadeInReady);
+    lv_anim_start(&fade_in);
 }
 
 void CloverFadeOutReady(lv_anim_t* a) {
@@ -1823,54 +2057,52 @@ void CloverFadeOutReady(lv_anim_t* a) {
     if (state == nullptr) {
         return;
     }
-    const int pending = state->clover_pending_page;
-    if (state->clover_layer != nullptr) {
-        lv_obj_set_style_opa(state->clover_layer, LV_OPA_TRANSP, LV_PART_MAIN);
-    }
-    CloverApplyPage(state, pending);
-    HighlightDot(state, pending);
-
-    lv_anim_t fade_in;
-    lv_anim_init(&fade_in);
-    lv_anim_set_var(&fade_in, state);
-    lv_anim_set_user_data(&fade_in, state);
-    lv_anim_set_exec_cb(&fade_in, CloverFadeExec);
-    lv_anim_set_values(&fade_in, 0, LV_OPA_COVER);
-    lv_anim_set_duration(&fade_in, kCloverFadeMs);
-    lv_anim_set_path_cb(&fade_in, lv_anim_path_ease_out);
-    lv_anim_set_completed_cb(&fade_in, CloverFadeInFinished);
-    lv_anim_start(&fade_in);
+    // 旧页已淡到全透明，换图后再从对侧滑入。
+    CloverApplyPage(state, state->clover_pending_page);
+    HighlightDot(state, state->clover_pending_page);
+    CloverSetTransition(state, LV_OPA_TRANSP,
+                        state->clover_step * kCloverSlidePx);
+    CloverStartFadeIn(state);
 }
 
 void CloverGoToPage(PagerState* state, int target_page) {
-    if (state == nullptr || !state->clover || state->clover_busy) {
+    if (state == nullptr || !state->clover || state->page_count <= 1) {
         return;
     }
-    if (state->page_count <= 0) {
+    // 调用方只会传 current_page ± 1，方向比绝对页号更好用（要处理首尾环绕）。
+    const int delta = target_page - state->current_page;
+    if (delta == 0) {
         return;
     }
-    if (target_page < 0 || target_page >= state->page_count) {
+    const int step = delta > 0 ? 1 : -1;
+
+    if (state->clover_busy) {
+        state->clover_queued_step = step;
+        ResetHomeIdleTimer();
+        return;
+    }
+
+    int next = state->current_page + step;
+    if (next < 0 || next >= state->page_count) {
         if (!PagerLoopEnabled(state)) {
             return;
         }
-        target_page =
-            (target_page % state->page_count + state->page_count) %
-            state->page_count;
+        next = (next % state->page_count + state->page_count) %
+               state->page_count;
     }
-    if (target_page == state->current_page) {
-        return;
-    }
+
     state->clover_busy = true;
-    state->clover_pending_page = target_page;
+    state->clover_step = step;
+    state->clover_pending_page = next;
     ResetHomeIdleTimer();
 
     lv_anim_t fade_out;
     lv_anim_init(&fade_out);
     lv_anim_set_var(&fade_out, state);
     lv_anim_set_user_data(&fade_out, state);
-    lv_anim_set_exec_cb(&fade_out, CloverFadeExec);
-    lv_anim_set_values(&fade_out, LV_OPA_COVER, 0);
-    lv_anim_set_duration(&fade_out, kCloverFadeMs);
+    lv_anim_set_exec_cb(&fade_out, CloverAnimOutExec);
+    lv_anim_set_values(&fade_out, 0, kCloverAnimSpan);
+    lv_anim_set_duration(&fade_out, kCloverFadeOutMs);
     lv_anim_set_path_cb(&fade_out, lv_anim_path_ease_in);
     lv_anim_set_completed_cb(&fade_out, CloverFadeOutReady);
     lv_anim_start(&fade_out);
@@ -2172,8 +2404,18 @@ void OnHomePressing(lv_event_t* e) {
         return;
     }
 
-    // 圆屏四叶瓣不跟手拖页，避免两页图标叠在同一张底图上。
+    // 圆屏四叶瓣不跟手拖页（两页图标会叠在同一张底图上），但也不必等松手：
+    // 横移够 kCloverSwipeTriggerPx 就立刻翻，手上有即时反馈才不显得"迟钝"。
+    // last_x 当锚点，一次长拖可以连翻多页。
     if (state != nullptr && state->clover) {
+        const int anchor_dx = p.x - s_home_touch.last_x;
+        if (std::abs(anchor_dx) >= kCloverSwipeTriggerPx) {
+            s_home_touch.consumed = true;
+            s_home_touch.paging = true;  // 让 RELEASED 不再重复触发
+            s_home_touch.last_x = static_cast<int16_t>(p.x);
+            HomeTouchHandleSwipe(state, anchor_dx < 0 ? HomeTouchKind::SwipeLeft
+                                                     : HomeTouchKind::SwipeRight);
+        }
         return;
     }
 
@@ -2276,10 +2518,14 @@ void OnHomeScreenLoaded(lv_event_t* e) {
         if (page < 0 || page >= state->page_count) {
             page = 0;
         }
+        lv_anim_delete(state, nullptr);
+        state->clover_busy = false;
+        state->clover_queued_step = 0;
         CloverApplyPage(state, page);
         if (state->clover_layer != nullptr) {
             lv_obj_set_style_opa(state->clover_layer, LV_OPA_COVER, LV_PART_MAIN);
         }
+        CloverResetTransition(state);
         HighlightDot(state, page);
     } else if (state != nullptr && state->pager != nullptr) {
         lv_obj_update_layout(state->pager);
@@ -2304,7 +2550,10 @@ PwrKey_OnScreenLifecycle("home", SCREEN_LIFECYCLE_UNLOAD);
 void OnScreenDeleted(lv_event_t* e) {
     CancelCellScaleTimer();
     StopHomeIdleTimer();
-    delete static_cast<PagerState*>(lv_event_get_user_data(e));
+    auto* state = static_cast<PagerState*>(lv_event_get_user_data(e));
+    // 翻页动画的 var 是 state，先撤动画再释放，否则回调会踩野指针。
+    lv_anim_delete(state, nullptr);
+    delete state;
 }
 
 // ---------------------------------------------------------------------------
@@ -2665,7 +2914,7 @@ void AddCloverPetalVisual(lv_obj_t* page, const AppEntry* entry, int app_idx,
 
     lv_obj_t* icon = lv_image_create(page);
     if (app_idx >= 0 && app_idx < kTotalApps) {
-        lv_image_set_src(icon, s_clover_icon_paths[app_idx]);
+        lv_image_set_src(icon, CloverIconSrc(app_idx));
     }
     SetupCloverIcon(icon, kIconCx[slot], kIconCy[slot]);
 
@@ -2827,7 +3076,7 @@ lv_obj_t* CreateRoundCloverHome() {
     }
 
     lv_obj_t* chrome = lv_image_create(screen);
-    lv_image_set_src(chrome, "A:home_clover_chrome.spng");
+    lv_image_set_src(chrome, CloverChromeSrc());
     lv_obj_set_size(chrome, kPanelW, kPanelH);
     lv_obj_align(chrome, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_remove_flag(chrome, LV_OBJ_FLAG_CLICKABLE);
@@ -2890,6 +3139,7 @@ lv_obj_t* CreateRoundCloverHome() {
 
     CloverApplyPage(state, 0);
     lv_obj_set_style_opa(layer, LV_OPA_COVER, LV_PART_MAIN);
+    StartCloverPrefetch(order, order_count);
 
     lv_obj_t* wake = CreateCloverHotspot(screen, 125, 125, 110, 110, &kWakeEntry);
     if (wake != nullptr) {
