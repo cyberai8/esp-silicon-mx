@@ -19,6 +19,11 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#if defined(ESP_PLATFORM)
+#include "freertos/idf_additions.h"
+#include <png.h>
+#include <setjmp.h>
+#endif
 
 #include "config.h"
 #include "home_screen/home_screen.h"
@@ -27,6 +32,11 @@
 #include "SdCardManager.hpp"
 
 LV_FONT_DECLARE(font_puhui_20_4);
+
+#if !defined(ESP_PLATFORM)
+extern "C" unsigned lodepng_decode32(unsigned char** out, unsigned* w, unsigned* h,
+                                     const unsigned char* in, size_t insize);
+#endif
 
 namespace {
 
@@ -37,12 +47,12 @@ constexpr size_t kMaxPhotos = 300;
 // 缩略图常驻上限：68*68*2 ≈ 9KB 一张，48 张不到 0.5MB，超了按“离视口最远”淘汰。
 constexpr size_t kMaxThumbs = 48;
 // 单张图片读进内存的上限。再大的图解码期间峰值内存不可控，直接标记为不可预览。
-constexpr size_t kMaxFileBytes = 6u * 1024 * 1024;
+constexpr size_t kMaxFileBytes = 6u * 1024u * 1024u;
 // EXIF 的 APP1 段长度字段是 16 位的，内嵌缩略图必然落在文件头这一段里。
 constexpr size_t kExifProbeBytes = 72u * 1024;
-// 非 JPEG（PNG/SJPG）交给 LVGL 自己解，只放过小文件，避免它一次性吃掉几 MB。
-constexpr uint32_t kLvglDecodeMaxKb = 400;
-constexpr uint32_t kPngMaxPixels = 1200u * 1000u;
+// PNG 先按整数倍抽行抽列降到这块预算以内，再盒式缩到目标尺寸。
+constexpr size_t kPngDecodeMaxBytes = 2u * 1024u * 1024u;
+constexpr int kPngMaxSide = 8192;
 
 constexpr uint32_t kColorBg = 0x0B0D10;
 constexpr uint32_t kColorBgGrad = 0x14171C;
@@ -88,6 +98,7 @@ struct Photo {
     uint32_t size_kb = 0;
     uint32_t cache_key = 0;  // 路径+大小+修改时间的散列，用来找落盘的缩略图
     bool jpeg = false;
+    bool png = false;
     int src_w = 0;  // 0 = 还不知道原始尺寸
     int src_h = 0;
 
@@ -95,7 +106,7 @@ struct Photo {
     uint8_t* thumb = nullptr;
     lv_image_dsc_t thumb_dsc = {};
     bool thumb_ready = false;   // 数据好了，还没挂到 cell
-    bool thumb_skip = false;    // 不做缩略图（非 JPEG / 解码失败 / 太大）
+    bool thumb_skip = false;    // 不做缩略图（解码失败 / 太大）
     bool generating = false;    // worker 正在处理
 };
 
@@ -150,6 +161,10 @@ bool s_chrome_visible = true;
 bool s_state_shown = false;
 int32_t s_press_x = 0;
 int32_t s_press_y = 0;
+uint32_t s_press_tick = 0;
+int32_t s_view_drag = 0;
+bool s_view_sliding = false;
+std::atomic<bool> s_grid_scrolling{false};
 
 std::mutex s_photos_mutex;
 PhotoListPtr s_photos;  // 扫描线程发布，worker 取快照；只有这个指针受锁保护
@@ -163,6 +178,7 @@ std::atomic<bool> s_scan_done{false};
 std::atomic<bool> s_scan_abort{false};
 std::atomic<int> s_scan_found{0};
 std::atomic<bool> s_sd_ready{false};
+std::atomic<bool> s_need_worker{false};
 
 // worker 的生命周期用「代号」管：换一代就等于让老 worker 自己退，调用方不用阻塞等
 // 待，老 worker 手里的照片列表由 shared_ptr 兜着，不会被提前释放。
@@ -202,9 +218,12 @@ bool IsJpegName(const char* name) {
     return ExtEquals(name, "jpg") || ExtEquals(name, "jpeg");
 }
 
+bool IsPngName(const char* name) {
+    return ExtEquals(name, "png");
+}
+
 bool IsImageName(const char* name) {
-    return IsJpegName(name) || ExtEquals(name, "png") || ExtEquals(name, "sjpg") ||
-           ExtEquals(name, "spng");
+    return IsJpegName(name) || IsPngName(name);
 }
 
 const char* ExtLabel(const std::string& name) {
@@ -369,11 +388,11 @@ void ScanDir(const std::string& dir, int depth, std::vector<Photo*>* out) {
             p->cache_key = ThumbCacheKey(path, static_cast<uint32_t>(st.st_size),
                                          static_cast<uint32_t>(st.st_mtime));
             p->jpeg = IsJpegName(ent->d_name);
-            if (!p->jpeg) {
-                // 非 JPEG 没法降采样解码，缩略图交给 LVGL 或直接占位。
-                p->thumb_skip = true;
+            p->png = IsPngName(ent->d_name);
+            if (p->png) {
                 ReadPngSize(path, &p->src_w, &p->src_h);
-            } else if (st.st_size > static_cast<off_t>(kMaxFileBytes)) {
+            }
+            if (st.st_size > static_cast<off_t>(kMaxFileBytes)) {
                 p->thumb_skip = true;
             }
             out->push_back(p);
@@ -406,7 +425,11 @@ void ScanTask(void* /*arg*/) {
 
     s_scan_done.store(true, std::memory_order_relaxed);
     s_scanning.store(false, std::memory_order_relaxed);
+#if defined(ESP_PLATFORM)
+    vTaskDeleteWithCaps(nullptr);
+#else
     vTaskDelete(nullptr);
+#endif
 }
 
 // UI 线程：先摘掉 LVGL 对旧缩略图的引用，再放弃自己那份快照。
@@ -421,6 +444,31 @@ void ReleaseUiList() {
         }
     }
     s_ui_list.reset();
+}
+
+bool SpawnAlbumTask(TaskFunction_t fn, const char* name, uint32_t stack_words, void* arg,
+                    UBaseType_t prio, BaseType_t core) {
+    for (int i = 0; i < 8; ++i) {
+#if defined(ESP_PLATFORM)
+        const uint32_t stack_bytes = stack_words * sizeof(StackType_t);
+        const BaseType_t ok =
+            (core >= 0)
+                ? xTaskCreatePinnedToCoreWithCaps(fn, name, stack_bytes, arg, prio, nullptr,
+                                                  core, MALLOC_CAP_SPIRAM)
+                : xTaskCreateWithCaps(fn, name, stack_bytes, arg, prio, nullptr,
+                                      MALLOC_CAP_SPIRAM);
+#else
+        const BaseType_t ok =
+            (core >= 0) ? xTaskCreatePinnedToCore(fn, name, stack_words, arg, prio, nullptr,
+                                                  core)
+                        : xTaskCreate(fn, name, stack_words, arg, prio, nullptr);
+#endif
+        if (ok == pdPASS) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    return false;
 }
 
 void StartScan() {
@@ -441,7 +489,7 @@ void StartScan() {
     s_scan_done.store(false, std::memory_order_relaxed);
     s_scan_abort.store(false, std::memory_order_relaxed);
     s_scanning.store(true, std::memory_order_relaxed);
-    if (xTaskCreate(ScanTask, "album_scan", 6144, nullptr, 4, nullptr) != pdPASS) {
+    if (!SpawnAlbumTask(ScanTask, "album_scan", 6144, nullptr, 4, -1)) {
         // 建不出任务就别把界面永久卡在「正在扫描」，让它落到空态去。
         ESP_LOGE(TAG, "scan task create failed");
         s_scanning.store(false, std::memory_order_relaxed);
@@ -624,25 +672,81 @@ bool FindExifThumb(const uint8_t* buf, size_t len, size_t* off, size_t* size) {
     return false;
 }
 
-bool ParseJpegSize(const uint8_t* data, size_t len, int* w, int* h) {
-    jpeg_dec_config_t cfg = DEFAULT_JPEG_DEC_CONFIG();
-    cfg.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
-    jpeg_dec_handle_t dec = nullptr;
-    if (jpeg_dec_open(&cfg, &dec) != JPEG_ERR_OK) {
-        return false;
+// esp_new_jpeg 只认 baseline（SOF0/SOF1）。progressive（SOF2）和算术编码都会在
+// jpeg_dec_parse_header 里打 JPEG_DEC: Not supported JPEG standard，而且相册会
+// 对同一张图 parse 两三次，日志会被刷爆。自己扫 SOF 就能拿尺寸、也能提前跳过。
+enum class JpegStd : uint8_t { Invalid, Baseline, Progressive, Other };
+
+struct JpegSof {
+    JpegStd std = JpegStd::Invalid;
+    int w = 0;
+    int h = 0;
+    int nf = 0;  // 1=灰度 3=YCbCr 4=CMYK，解码器只吃 1/3
+};
+
+const char* JpegStdName(JpegStd s) {
+    switch (s) {
+        case JpegStd::Baseline:
+            return "baseline";
+        case JpegStd::Progressive:
+            return "progressive";
+        case JpegStd::Other:
+            return "unsupported";
+        default:
+            return "not-jpeg";
     }
-    jpeg_dec_io_t io = {};
-    io.inbuf = const_cast<uint8_t*>(data);
-    io.inbuf_len = static_cast<int>(len);
-    jpeg_dec_header_info_t info = {};
-    const jpeg_error_t err = jpeg_dec_parse_header(dec, &io, &info);
-    jpeg_dec_close(dec);
-    if (err != JPEG_ERR_OK || info.width == 0 || info.height == 0) {
-        return false;
+}
+
+JpegSof ParseJpegSof(const uint8_t* data, size_t len) {
+    JpegSof out;
+    if (data == nullptr || len < 4 || data[0] != 0xFF || data[1] != 0xD8) {
+        return out;
     }
-    *w = info.width;
-    *h = info.height;
-    return true;
+    size_t p = 2;
+    while (p + 4 <= len) {
+        if (data[p] != 0xFF) {
+            ++p;
+            continue;
+        }
+        const uint8_t marker = data[p + 1];
+        if (marker == 0xFF) {
+            ++p;
+            continue;
+        }
+        if (marker == 0xD8 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
+            p += 2;
+            continue;
+        }
+        if (marker == 0xD9 || marker == 0xDA) {
+            break;
+        }
+        const size_t seg_len = Rd16(data + p + 2, false);
+        if (seg_len < 2 || p + 2 + seg_len > len) {
+            break;
+        }
+        const bool is_sof = (marker >= 0xC0 && marker <= 0xCF) && marker != 0xC4 &&
+                            marker != 0xC8 && marker != 0xCC;
+        if (is_sof && seg_len >= 8) {
+            out.h = static_cast<int>(Rd16(data + p + 5, false));
+            out.w = static_cast<int>(Rd16(data + p + 7, false));
+            out.nf = data[p + 9];
+            if (marker == 0xC0 || marker == 0xC1) {
+                out.std = JpegStd::Baseline;
+            } else if (marker == 0xC2) {
+                out.std = JpegStd::Progressive;
+            } else {
+                out.std = JpegStd::Other;
+            }
+            return out;
+        }
+        p += 2 + seg_len;
+    }
+    return out;
+}
+
+bool JpegCanHwDecode(const JpegSof& sof) {
+    return sof.std == JpegStd::Baseline && sof.w > 0 && sof.h > 0 &&
+           (sof.nf == 1 || sof.nf == 3);
 }
 
 // 解出「不小于 min_w×min_h」的最小一档（1、1/2、1/4、1/8）。
@@ -651,11 +755,12 @@ bool DecodeJpegScaled(const uint8_t* data, size_t len, int min_w, int min_h, boo
                       uint8_t** out, int* out_w, int* out_h, int* out_stride_px, int* orig_w,
                       int* orig_h) {
     *out = nullptr;
-    int sw = 0;
-    int sh = 0;
-    if (!ParseJpegSize(data, len, &sw, &sh)) {
+    const JpegSof sof = ParseJpegSof(data, len);
+    if (!JpegCanHwDecode(sof)) {
         return false;
     }
+    const int sw = sof.w;
+    const int sh = sof.h;
     if (orig_w != nullptr) {
         *orig_w = sw;
     }
@@ -737,6 +842,217 @@ bool DecodeJpegScaled(const uint8_t* data, size_t len, int min_w, int min_h, boo
     *out_h = dh;
     *out_stride_px = stride_px;
     return true;
+}
+
+uint16_t PackRgb565(uint32_t r, uint32_t g, uint32_t b) {
+    return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+}
+
+void RgbaPixelTo565(const uint8_t* p, uint8_t* dst) {
+    const uint32_t a = p[3];
+    const uint32_t r = p[0] * a / 255;
+    const uint32_t g = p[1] * a / 255;
+    const uint32_t b = p[2] * a / 255;
+    const uint16_t v = PackRgb565(r, g, b);
+    dst[0] = static_cast<uint8_t>(v & 0xFF);
+    dst[1] = static_cast<uint8_t>(v >> 8);
+}
+
+int PngDownsampleDiv(int sw, int sh, int min_w, int min_h, bool cover) {
+    int div = 1;
+    for (;;) {
+        const int nd = div * 2;
+        const int nw = sw / nd;
+        const int nh = sh / nd;
+        if (nw < 1 || nh < 1) {
+            break;
+        }
+        const size_t bytes = static_cast<size_t>(nw) * static_cast<size_t>(nh) * 2u;
+        if (bytes > kPngDecodeMaxBytes) {
+            div = nd;
+            continue;
+        }
+        if (cover) {
+            if (nw < min_w || nh < min_h) {
+                break;
+            }
+        } else if (nw < min_w && nh < min_h) {
+            break;
+        }
+        div = nd;
+        if (div >= 64) {
+            break;
+        }
+    }
+    return div < 1 ? 1 : div;
+}
+
+#if defined(ESP_PLATFORM)
+struct PngMemSrc {
+    const uint8_t* p;
+    size_t left;
+};
+
+void PngReadFn(png_structp png, png_bytep out, png_size_t n) {
+    auto* s = static_cast<PngMemSrc*>(png_get_io_ptr(png));
+    if (s == nullptr || n > s->left) {
+        png_error(png, "truncated");
+    }
+    memcpy(out, s->p, n);
+    s->p += n;
+    s->left -= n;
+}
+
+bool DecodePngScaledLibpng(const uint8_t* data, size_t len, int min_w, int min_h, bool cover,
+                           uint8_t** out, int* out_w, int* out_h, int* out_stride_px, int* orig_w,
+                           int* orig_h) {
+    png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+    png_infop info = png != nullptr ? png_create_info_struct(png) : nullptr;
+    if (png == nullptr || info == nullptr) {
+        png_destroy_read_struct(png ? &png : nullptr, info ? &info : nullptr, nullptr);
+        return false;
+    }
+
+    volatile uint8_t* buf_v = nullptr;
+    volatile uint8_t* row_v = nullptr;
+    if (setjmp(png_jmpbuf(png))) {
+        heap_caps_free(const_cast<uint8_t*>(buf_v));
+        heap_caps_free(const_cast<uint8_t*>(row_v));
+        png_destroy_read_struct(&png, &info, nullptr);
+        return false;
+    }
+
+    PngMemSrc src = {data, len};
+    png_set_read_fn(png, &src, PngReadFn);
+    png_read_info(png, info);
+
+    const png_uint_32 sw = png_get_image_width(png, info);
+    const png_uint_32 sh = png_get_image_height(png, info);
+    if (sw < 1 || sh < 1 || sw > static_cast<png_uint_32>(kPngMaxSide) ||
+        sh > static_cast<png_uint_32>(kPngMaxSide)) {
+        png_destroy_read_struct(&png, &info, nullptr);
+        return false;
+    }
+    if (orig_w != nullptr) {
+        *orig_w = static_cast<int>(sw);
+    }
+    if (orig_h != nullptr) {
+        *orig_h = static_cast<int>(sh);
+    }
+
+    if (png_get_interlace_type(png, info) != PNG_INTERLACE_NONE) {
+        png_destroy_read_struct(&png, &info, nullptr);
+        return false;
+    }
+
+    png_set_expand(png);
+    png_set_gray_to_rgb(png);
+    png_set_strip_16(png);
+    png_set_packing(png);
+    png_set_filler(png, 0xFF, PNG_FILLER_AFTER);
+    png_read_update_info(png, info);
+    if (png_get_channels(png, info) != 4) {
+        png_destroy_read_struct(&png, &info, nullptr);
+        return false;
+    }
+
+    const int div = PngDownsampleDiv(static_cast<int>(sw), static_cast<int>(sh), min_w, min_h,
+                                     cover);
+    const int dw = static_cast<int>(sw) / div;
+    const int dh = static_cast<int>(sh) / div;
+    if (dw < 1 || dh < 1) {
+        png_destroy_read_struct(&png, &info, nullptr);
+        return false;
+    }
+
+    auto* buf = static_cast<uint8_t*>(AllocBig(static_cast<size_t>(dw) * dh * 2));
+    auto* row = static_cast<uint8_t*>(AllocBig(static_cast<size_t>(sw) * 4));
+    buf_v = buf;
+    row_v = row;
+    if (buf == nullptr || row == nullptr) {
+        png_destroy_read_struct(&png, &info, nullptr);
+        heap_caps_free(buf);
+        heap_caps_free(row);
+        return false;
+    }
+
+    for (png_uint_32 y = 0; y < sh; ++y) {
+        png_read_row(png, row, nullptr);
+        if ((y % static_cast<png_uint_32>(div)) != 0) {
+            continue;
+        }
+        const int dy = static_cast<int>(y / static_cast<png_uint_32>(div));
+        if (dy >= dh) {
+            continue;
+        }
+        uint8_t* dst = buf + static_cast<size_t>(dy) * dw * 2;
+        for (int x = 0; x < dw; ++x) {
+            RgbaPixelTo565(row + static_cast<size_t>(x * div) * 4, dst + x * 2);
+        }
+    }
+    png_read_end(png, nullptr);
+    png_destroy_read_struct(&png, &info, nullptr);
+    heap_caps_free(row);
+
+    *out = buf;
+    *out_w = dw;
+    *out_h = dh;
+    *out_stride_px = dw;
+    return true;
+}
+#else
+bool DecodePngScaledLibpng(const uint8_t* data, size_t len, int min_w, int min_h, bool cover,
+                           uint8_t** out, int* out_w, int* out_h, int* out_stride_px, int* orig_w,
+                           int* orig_h) {
+    unsigned char* rgba = nullptr;
+    unsigned sw = 0;
+    unsigned sh = 0;
+    if (lodepng_decode32(&rgba, &sw, &sh, data, len) != 0 || rgba == nullptr || sw < 1 ||
+        sh < 1) {
+        lv_free(rgba);
+        return false;
+    }
+    if (orig_w != nullptr) {
+        *orig_w = static_cast<int>(sw);
+    }
+    if (orig_h != nullptr) {
+        *orig_h = static_cast<int>(sh);
+    }
+    const int div =
+        PngDownsampleDiv(static_cast<int>(sw), static_cast<int>(sh), min_w, min_h, cover);
+    const int dw = static_cast<int>(sw) / div;
+    const int dh = static_cast<int>(sh) / div;
+    auto* buf = static_cast<uint8_t*>(AllocBig(static_cast<size_t>(dw) * dh * 2));
+    if (buf == nullptr) {
+        lv_free(rgba);
+        return false;
+    }
+    for (int y = 0; y < dh; ++y) {
+        const unsigned char* src =
+            rgba + static_cast<size_t>(y * div) * sw * 4;
+        uint8_t* dst = buf + static_cast<size_t>(y) * dw * 2;
+        for (int x = 0; x < dw; ++x) {
+            RgbaPixelTo565(src + static_cast<size_t>(x * div) * 4, dst + x * 2);
+        }
+    }
+    lv_free(rgba);
+    *out = buf;
+    *out_w = dw;
+    *out_h = dh;
+    *out_stride_px = dw;
+    return true;
+}
+#endif
+
+bool DecodePngScaled(const uint8_t* data, size_t len, int min_w, int min_h, bool cover,
+                     uint8_t** out, int* out_w, int* out_h, int* out_stride_px, int* orig_w,
+                     int* orig_h) {
+    *out = nullptr;
+    if (data == nullptr || len < 24 || memcmp(data, "\x89PNG", 4) != 0) {
+        return false;
+    }
+    return DecodePngScaledLibpng(data, len, min_w, min_h, cover, out, out_w, out_h,
+                                 out_stride_px, orig_w, orig_h);
 }
 
 // RGB565 盒式降采样：把 src 的 (sx,sy,cw,ch) 区域压成 dw×dh。
@@ -837,6 +1153,9 @@ PhotoListPtr PublishedPhotos() {
 
 // 挑离视口最近、还没缩略图的一张。
 int PickThumbTarget(const PhotoListPtr& list) {
+    if (s_grid_scrolling.load(std::memory_order_relaxed)) {
+        return -1;
+    }
     std::lock_guard<std::mutex> tlock(s_thumb_mutex);
     const int center = s_view_center.load(std::memory_order_relaxed);
     const int count = static_cast<int>(list->items.size());
@@ -860,13 +1179,18 @@ int PickThumbTarget(const PhotoListPtr& list) {
 }
 
 // 解码 → 居中裁成正方形 → 压到 kThumb。dst 要有 kThumbBytes。
-bool MakeThumb(const uint8_t* data, size_t len, uint8_t* dst) {
+bool MakeThumb(const uint8_t* data, size_t len, bool jpeg, uint8_t* dst, int* orig_w,
+               int* orig_h) {
     uint8_t* dec = nullptr;
     int dw = 0;
     int dh = 0;
     int stride_px = 0;
-    if (!DecodeJpegScaled(data, len, kThumb, kThumb, true, &dec, &dw, &dh, &stride_px, nullptr,
-                          nullptr)) {
+    const bool ok =
+        jpeg ? DecodeJpegScaled(data, len, kThumb, kThumb, true, &dec, &dw, &dh, &stride_px,
+                                orig_w, orig_h)
+             : DecodePngScaled(data, len, kThumb, kThumb, true, &dec, &dw, &dh, &stride_px,
+                               orig_w, orig_h);
+    if (!ok) {
         return false;
     }
     const int side = dw < dh ? dw : dh;
@@ -896,30 +1220,47 @@ void GenerateThumb(const PhotoListPtr& list, int index, int gen) {
     int oh = 0;
     bool ok = ThumbCacheRead(p->cache_key, thumb, &ow, &oh);
     const bool from_cache = ok;
-    if (!ok) {
+    JpegSof sof;
+    if (!ok && p->jpeg) {
         uint8_t* head = nullptr;
         size_t head_len = 0;
         if (LoadFilePrefix(p->path, kExifProbeBytes, &head, &head_len)) {
-            ParseJpegSize(head, head_len, &ow, &oh);  // 头部就有 SOF，顺手拿原始尺寸
+            sof = ParseJpegSof(head, head_len);
+            if (sof.w > 0) {
+                ow = sof.w;
+                oh = sof.h;
+            }
             size_t t_off = 0;
             size_t t_len = 0;
             if (FindExifThumb(head, head_len, &t_off, &t_len)) {
-                ok = MakeThumb(head + t_off, t_len, thumb);
-            } else if (head_len < kExifProbeBytes) {
-                ok = MakeThumb(head, head_len, thumb);  // 整张图本来就没超过这一段
+                ok = MakeThumb(head + t_off, t_len, true, thumb, nullptr, nullptr);
+            } else if (head_len < kExifProbeBytes && JpegCanHwDecode(sof)) {
+                ok = MakeThumb(head, head_len, true, thumb, &ow, &oh);
             }
             heap_caps_free(head);
         }
     }
-    if (!ok) {
-        // 没有内嵌小图，只能把整张读进来降采样解。
+    if (!ok && p->jpeg && sof.std != JpegStd::Invalid && !JpegCanHwDecode(sof)) {
+        // progressive / CMYK / 算术编码：整文件再解一次也是同样的失败，别再喂给解码器。
+        ESP_LOGW(TAG, "%s: %s JPEG nf=%d, skip decode", p->name.c_str(), JpegStdName(sof.std),
+                 sof.nf);
+    } else if (!ok) {
         uint8_t* file = nullptr;
         size_t file_len = 0;
         if (LoadFile(p->path, &file, &file_len)) {
-            if (ow <= 0) {
-                ParseJpegSize(file, file_len, &ow, &oh);
+            if (p->jpeg && sof.std == JpegStd::Invalid) {
+                sof = ParseJpegSof(file, file_len);
+                if (sof.w > 0) {
+                    ow = sof.w;
+                    oh = sof.h;
+                }
             }
-            ok = MakeThumb(file, file_len, thumb);
+            if (p->jpeg && !JpegCanHwDecode(sof) && sof.std != JpegStd::Invalid) {
+                ESP_LOGW(TAG, "%s: %s JPEG nf=%d, skip decode", p->name.c_str(),
+                         JpegStdName(sof.std), sof.nf);
+            } else {
+                ok = MakeThumb(file, file_len, p->jpeg, thumb, &ow, &oh);
+            }
             heap_caps_free(file);
         }
     }
@@ -950,45 +1291,64 @@ void DecodeForView(const PhotoListPtr& list, int index, int gen) {
         uint8_t* file = nullptr;
         size_t file_len = 0;
         if (LoadFile(p->path, &file, &file_len)) {
-            int sw = 0;
-            int sh = 0;
-            if (ParseJpegSize(file, file_len, &sw, &sh)) {
-                {
-                    std::lock_guard<std::mutex> lock(s_thumb_mutex);
-                    p->src_w = sw;
-                    p->src_h = sh;
+            int sw = p->src_w;
+            int sh = p->src_h;
+            JpegSof sof;
+            bool skip_jpeg = false;
+            if (p->jpeg) {
+                sof = ParseJpegSof(file, file_len);
+                if (sof.w > 0) {
+                    sw = sof.w;
+                    sh = sof.h;
                 }
-                int tw = 0;
-                int th = 0;
-                FitInCircle(sw, sh, &tw, &th);
-                uint8_t* dec = nullptr;
-                int dw = 0;
-                int dh = 0;
-                int stride_px = 0;
-                if (DecodeJpegScaled(file, file_len, tw, th, false, &dec, &dw, &dh, &stride_px,
-                                     nullptr, nullptr)) {
-                    if (dw == tw && dh == th && stride_px == dw) {
-                        result.buf = dec;
-                        result.w = dw;
-                        result.h = dh;
-                        dec = nullptr;
-                    } else {
-                        // 降采样只有 1/2 这样的整档，剩下的零头用盒式缩放贴到目标尺寸。
-                        auto* fit = static_cast<uint8_t*>(
-                            AllocBig(static_cast<size_t>(tw) * th * 2));
-                        if (fit != nullptr) {
-                            BoxScaleRgb565(dec, stride_px * 2, 0, 0, dw, dh, fit, tw, th);
-                            result.buf = fit;
-                            result.w = tw;
-                            result.h = th;
-                        }
-                    }
-                    if (dec != nullptr) {
-                        heap_caps_free(dec);
-                    }
+                if (!JpegCanHwDecode(sof)) {
+                    ESP_LOGW(TAG, "%s: %s JPEG nf=%d, cannot preview", p->name.c_str(),
+                             JpegStdName(sof.std), sof.nf);
+                    skip_jpeg = true;
                 }
+            } else if (sw <= 0 || sh <= 0) {
+                ReadPngSize(p->path, &sw, &sh);
+            }
+            if (sw > 0 && sh > 0) {
+                std::lock_guard<std::mutex> lock(s_thumb_mutex);
+                p->src_w = sw;
+                p->src_h = sh;
+            }
+            int tw = 0;
+            int th = 0;
+            FitInCircle(sw, sh, &tw, &th);
+            uint8_t* dec = nullptr;
+            int dw = 0;
+            int dh = 0;
+            int stride_px = 0;
+            bool decoded = false;
+            if (!skip_jpeg) {
+                decoded = p->jpeg ? DecodeJpegScaled(file, file_len, tw, th, false, &dec, &dw,
+                                                     &dh, &stride_px, nullptr, nullptr)
+                                  : DecodePngScaled(file, file_len, tw, th, false, &dec, &dw, &dh,
+                                                    &stride_px, nullptr, nullptr);
             }
             heap_caps_free(file);
+            if (decoded) {
+                if (dw == tw && dh == th && stride_px == dw) {
+                    result.buf = dec;
+                    result.w = dw;
+                    result.h = dh;
+                    dec = nullptr;
+                } else {
+                    auto* fit = static_cast<uint8_t*>(
+                        AllocBig(static_cast<size_t>(tw) * th * 2));
+                    if (fit != nullptr) {
+                        BoxScaleRgb565(dec, stride_px * 2, 0, 0, dw, dh, fit, tw, th);
+                        result.buf = fit;
+                        result.w = tw;
+                        result.h = th;
+                    }
+                }
+                if (dec != nullptr) {
+                    heap_caps_free(dec);
+                }
+            }
         }
     }
 
@@ -1028,22 +1388,29 @@ void WorkerTask(void* arg) {
         // 让出一点时间给 LVGL，缩略图慢点出来也比界面卡住好。
         vTaskDelay(pdMS_TO_TICKS(5));
     }
+#if defined(ESP_PLATFORM)
+    vTaskDeleteWithCaps(nullptr);
+#else
     vTaskDelete(nullptr);
+#endif
 }
 
 void StartWorker() {
     const int gen = s_worker_gen.fetch_add(1, std::memory_order_relaxed) + 1;
     s_view_req.store(-1, std::memory_order_relaxed);
-    // 解码钉在 core 0，LVGL 固定在 core 1，两边不抢核。JPEG 软解栈吃得多，给足 8K。
-    if (xTaskCreatePinnedToCore(WorkerTask, "album_worker", 8192,
-                                reinterpret_cast<void*>(static_cast<intptr_t>(gen)), 3, nullptr,
-                                0) != pdPASS) {
+    // 解码钉在 core 0，LVGL 固定在 core 1，两边不抢核。JPEG/PNG 软解栈吃得多，给足 8K。
+    if (!SpawnAlbumTask(WorkerTask, "album_worker", 8192,
+                        reinterpret_cast<void*>(static_cast<intptr_t>(gen)), 3, 0)) {
         ESP_LOGE(TAG, "worker task create failed");
+        s_need_worker.store(true, std::memory_order_relaxed);
+    } else {
+        s_need_worker.store(false, std::memory_order_relaxed);
     }
 }
 
 // 只是换代号，不等它退出：老 worker 手里的照片快照会保着它用到的内存。
 void StopWorker() {
+    s_need_worker.store(false, std::memory_order_relaxed);
     s_worker_gen.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(s_view_mutex);
     if (s_view_pending.buf != nullptr) {
@@ -1180,6 +1547,54 @@ void SetViewHint(const char* text) {
     lv_obj_remove_flag(s_ui.view_hint, LV_OBJ_FLAG_HIDDEN);
 }
 
+void ViewSetDrag(int32_t x) {
+    s_view_drag = x;
+    if (s_ui.view_img != nullptr) {
+        lv_obj_set_style_translate_x(s_ui.view_img, x, LV_PART_MAIN);
+    }
+}
+
+void ViewAnimExec(void* /*obj*/, int32_t v) {
+    ViewSetDrag(v);
+}
+
+void ViewCancelSlide() {
+    if (s_ui.view_img != nullptr) {
+        lv_anim_delete(s_ui.view_img, ViewAnimExec);
+    }
+    s_view_sliding = false;
+    ViewSetDrag(0);
+}
+
+void ShowPhoto(int index);
+
+void OnViewSlideDone(lv_anim_t* a) {
+    const int next = static_cast<int>(reinterpret_cast<intptr_t>(lv_anim_get_user_data(a)));
+    s_view_sliding = false;
+    ViewSetDrag(0);
+    if (next >= 0) {
+        ShowPhoto(next);
+    }
+}
+
+void ViewAnimateTo(int32_t from, int32_t to, int next_index, uint32_t ms) {
+    if (s_ui.view_img == nullptr) {
+        return;
+    }
+    lv_anim_delete(s_ui.view_img, ViewAnimExec);
+    s_view_sliding = true;
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_ui.view_img);
+    lv_anim_set_exec_cb(&a, ViewAnimExec);
+    lv_anim_set_values(&a, from, to);
+    lv_anim_set_duration(&a, ms);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_set_user_data(&a, reinterpret_cast<void*>(static_cast<intptr_t>(next_index)));
+    lv_anim_set_completed_cb(&a, OnViewSlideDone);
+    lv_anim_start(&a);
+}
+
 void ShowPhoto(int index) {
     const int count = PhotoCount();
     if (count == 0) {
@@ -1196,38 +1611,18 @@ void ShowPhoto(int index) {
     }
     s_view_index = index;
     s_view_center.store(index, std::memory_order_relaxed);
+    ViewSetDrag(0);
     ReleaseViewCurrent();
     UpdateViewTexts();
-
-    if (p->jpeg) {
-        SetViewHint(I18n::T("解码中…"));
-        s_view_req.store(index, std::memory_order_relaxed);
-        return;
-    }
-
-    const bool too_big = p->size_kb > kLvglDecodeMaxKb ||
-                         (p->src_w > 0 && static_cast<uint32_t>(p->src_w) *
-                                              static_cast<uint32_t>(p->src_h) >
-                                              kPngMaxPixels);
-    if (too_big || p->path.size() + 3 > sizeof(s_view_lv_path)) {
-        SetViewHint(I18n::T("图片过大，无法预览"));
-        return;
-    }
-    snprintf(s_view_lv_path, sizeof(s_view_lv_path), "S:%s", p->path.c_str());
-    // PNG 由 LVGL 自己解，我们只能给它一个「不会被圆屏切到」的框，让它按比例缩进去。
-    int box_w = 0;
-    int box_h = 0;
-    FitInCircle(p->src_w, p->src_h, &box_w, &box_h);
-    lv_obj_set_size(s_ui.view_img, box_w, box_h);
-    lv_obj_center(s_ui.view_img);
-    SetViewHint(nullptr);
-    lv_image_set_src(s_ui.view_img, s_view_lv_path);
+    SetViewHint(I18n::T("解码中…"));
+    s_view_req.store(index, std::memory_order_relaxed);
 }
 
 void CloseViewer() {
     if (s_ui.view_layer == nullptr) {
         return;
     }
+    ViewCancelSlide();
     s_view_req.store(-1, std::memory_order_relaxed);
     ReleaseViewCurrent();
     lv_obj_add_flag(s_ui.view_layer, LV_OBJ_FLAG_HIDDEN);
@@ -1240,6 +1635,7 @@ void OpenViewer(int index) {
     }
     s_chrome_visible = true;
     ApplyChromeVisibility();
+    ViewCancelSlide();
     lv_obj_remove_flag(s_ui.view_layer, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_ui.view_layer);
     ShowPhoto(index);
@@ -1252,7 +1648,7 @@ bool EventFromSelf(lv_event_t* e) {
 }
 
 void OnViewPressed(lv_event_t* e) {
-    if (!EventFromSelf(e)) {
+    if (!EventFromSelf(e) || s_view_sliding) {
         return;
     }
     lv_indev_t* indev = lv_indev_active();
@@ -1263,10 +1659,25 @@ void OnViewPressed(lv_event_t* e) {
     lv_indev_get_point(indev, &pt);
     s_press_x = pt.x;
     s_press_y = pt.y;
+    s_press_tick = lv_tick_get();
+    lv_anim_delete(s_ui.view_img, ViewAnimExec);
+}
+
+void OnViewPressing(lv_event_t* e) {
+    if (!EventFromSelf(e) || s_view_sliding) {
+        return;
+    }
+    lv_indev_t* indev = lv_indev_active();
+    if (indev == nullptr) {
+        return;
+    }
+    lv_point_t pt;
+    lv_indev_get_point(indev, &pt);
+    ViewSetDrag(pt.x - s_press_x);
 }
 
 void OnViewReleased(lv_event_t* e) {
-    if (!EventFromSelf(e)) {
+    if (!EventFromSelf(e) || s_view_sliding) {
         return;
     }
     lv_indev_t* indev = lv_indev_active();
@@ -1279,9 +1690,27 @@ void OnViewReleased(lv_event_t* e) {
     const int32_t dy = pt.y - s_press_y;
     const int32_t adx = dx < 0 ? -dx : dx;
     const int32_t ady = dy < 0 ? -dy : dy;
+    const uint32_t dt = lv_tick_elaps(s_press_tick);
 
-    if (adx >= kSwipeMinPx && ady <= kSwipeMaxDy) {
-        ShowPhoto(dx > 0 ? s_view_index - 1 : s_view_index + 1);
+    bool swipe = adx >= kSwipeMinPx && ady <= kSwipeMaxDy;
+    if (!swipe && adx >= 28 && adx > ady * 2 && dt < 240) {
+        swipe = true;
+    }
+
+    if (swipe && PhotoCount() > 1) {
+        int next = dx > 0 ? s_view_index - 1 : s_view_index + 1;
+        if (next < 0) {
+            next = PhotoCount() - 1;
+        } else if (next >= PhotoCount()) {
+            next = 0;
+        }
+        const int32_t out = dx > 0 ? kPanel : -kPanel;
+        s_view_req.store(next, std::memory_order_relaxed);
+        ViewAnimateTo(s_view_drag, out, next, 150);
+        return;
+    }
+    if (s_view_drag != 0) {
+        ViewAnimateTo(s_view_drag, 0, -1, 140);
         return;
     }
     if (adx <= kTapMaxPx && ady <= kTapMaxPx) {
@@ -1304,6 +1733,7 @@ void BuildViewLayer(lv_obj_t* parent) {
     // 看图页自己吃左右滑动（上下张），所以屏级右滑返回在这层要关掉，退出走返回键。
     screen_swipe_back_ignore(layer, true);
     lv_obj_add_event_cb(layer, OnViewPressed, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(layer, OnViewPressing, LV_EVENT_PRESSING, nullptr);
     lv_obj_add_event_cb(layer, OnViewReleased, LV_EVENT_RELEASED, nullptr);
     s_ui.view_layer = layer;
 
@@ -1312,7 +1742,7 @@ void BuildViewLayer(lv_obj_t* parent) {
     lv_obj_set_size(s_ui.view_img, kViewSafeBox, kViewSafeBox);
     lv_obj_center(s_ui.view_img);
     lv_image_set_inner_align(s_ui.view_img, LV_IMAGE_ALIGN_CONTAIN);
-    lv_image_set_antialias(s_ui.view_img, true);
+    lv_image_set_antialias(s_ui.view_img, false);
     lv_obj_remove_flag(s_ui.view_img, LV_OBJ_FLAG_CLICKABLE);
 
     s_ui.view_hint = MakeLabel(layer, "", kColorMuted, kViewTextW);
@@ -1368,13 +1798,13 @@ void RebuildGrid() {
         }
         lv_obj_t* cell = lv_image_create(s_ui.grid);
         lv_obj_set_size(cell, kThumb, kThumb);
-        lv_obj_set_style_radius(cell, 10, LV_PART_MAIN);
-        lv_obj_set_style_clip_corner(cell, true, LV_PART_MAIN);
+        // 不要 clip_corner：圆角裁切会走 intermediate layer，QSPI 短条带下一滑就卡。
         lv_obj_set_style_bg_color(cell, lv_color_hex(kColorCell), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(cell, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_bg_color(cell, lv_color_hex(kColorCellPressed),
                                   Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-        lv_image_set_inner_align(cell, LV_IMAGE_ALIGN_CONTAIN);
+        lv_image_set_inner_align(cell, LV_IMAGE_ALIGN_CENTER);
+        lv_image_set_antialias(cell, false);
         lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
         // 格子是扫描完才建的，错过了屏幕加载时那次统一打标，自己补上，
         // 否则在格子上右滑回不了主界面。
@@ -1388,23 +1818,8 @@ void RebuildGrid() {
         if (p->thumb != nullptr) {
             BindThumbToCell(static_cast<size_t>(i), p);
             p->thumb_ready = false;
-        } else if (!p->jpeg) {
-            // PNG/SJPG 没法降采样，小文件让 LVGL 自己缩，大文件只留角标。
-            const bool ok = p->size_kb <= kLvglDecodeMaxKb &&
-                            !(p->src_w > 0 && static_cast<uint32_t>(p->src_w) *
-                                                      static_cast<uint32_t>(p->src_h) >
-                                                  kPngMaxPixels);
-            if (ok) {
-                // lv_image_set_src 会自己 strdup 路径，这里用临时缓冲就够。
-                char lv_path[280];
-                snprintf(lv_path, sizeof(lv_path), "S:%s", p->path.c_str());
-                lv_image_set_src(cell, lv_path);
-            } else {
-                lv_obj_t* tag = MakeLabel(cell, ExtLabel(p->name), kColorMuted, 0);
-                lv_obj_center(tag);
-            }
         } else if (p->thumb_skip) {
-            // 大到不敢解的 JPEG：格子里摆个角标，别只留一块空砖。
+            // 大到不敢解的图：格子里摆个角标，别只留一块空砖。
             lv_obj_t* tag = MakeLabel(cell, ExtLabel(p->name), kColorMuted, 0);
             lv_obj_center(tag);
         }
@@ -1439,6 +1854,14 @@ void BuildGrid(lv_obj_t* parent) {
                           LV_FLEX_ALIGN_START);
     lv_obj_set_scroll_dir(grid, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(grid, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_flag(grid, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    lv_obj_add_flag(grid, LV_OBJ_FLAG_SCROLL_ELASTIC);
+    lv_obj_add_event_cb(grid, [](lv_event_t*) { s_grid_scrolling.store(true); },
+                        LV_EVENT_SCROLL_BEGIN, nullptr);
+    lv_obj_add_event_cb(grid, [](lv_event_t*) { s_grid_scrolling.store(true); },
+                        LV_EVENT_SCROLL_THROW_BEGIN, nullptr);
+    lv_obj_add_event_cb(grid, [](lv_event_t*) { s_grid_scrolling.store(false); },
+                        LV_EVENT_SCROLL_END, nullptr);
     s_ui.grid = grid;
 }
 
@@ -1655,17 +2078,23 @@ void OnTick(lv_timer_t* /*t*/) {
         if (!s_sd_ready.load(std::memory_order_relaxed)) {
             ShowStateLayer(I18n::T("没有读到 SD 卡"), I18n::T("插好卡后重新扫描"), true);
         } else if (PhotoCount() == 0) {
-            ShowStateLayer(I18n::T("SD 卡里没有图片"),
-                           I18n::T("支持 JPG / PNG / SJPG"), true);
+            ShowStateLayer(I18n::T("SD 卡里没有图片"), I18n::T("支持 JPG / PNG"), true);
         } else {
             HideStateLayer();
         }
     }
 
     SyncViewCenterFromScroll();
-    ApplyReadyThumbs();
-    EvictFarThumbs();
+    if (!s_grid_scrolling.load(std::memory_order_relaxed)) {
+        ApplyReadyThumbs();
+        EvictFarThumbs();
+    }
     ApplyPendingView();
+
+    if (s_need_worker.load(std::memory_order_relaxed) &&
+        !s_scanning.load(std::memory_order_relaxed) && PhotoCount() > 0) {
+        StartWorker();
+    }
 }
 
 void OnSwipeBack() {
@@ -1677,7 +2106,16 @@ void OnScreenUnloaded(lv_event_t* /*e*/) {
         lv_timer_delete(s_ui.tick);
     }
     s_screen_active = false;
+    s_grid_scrolling.store(false);
+    s_view_sliding = false;
     s_view_index = -1;
+    for (lv_indev_t* indev = lv_indev_get_next(nullptr); indev != nullptr;
+         indev = lv_indev_get_next(indev)) {
+        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
+            lv_indev_set_scroll_throw(indev, 10);
+            lv_indev_set_scroll_limit(indev, 10);
+        }
+    }
     s_cells.clear();
     s_ui = AlbumUi{};
 }
@@ -1701,6 +2139,15 @@ lv_obj_t* AlbumScreen::Create() {
     lv_obj_set_style_bg_grad_dir(scr, LV_GRAD_DIR_VER, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
     s_ui.scr = scr;
+
+    for (lv_indev_t* indev = lv_indev_get_next(nullptr); indev != nullptr;
+         indev = lv_indev_get_next(indev)) {
+        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
+            // throw 越小惯性越长；limit 越小越容易跟手。离开相册时还原。
+            lv_indev_set_scroll_throw(indev, 6);
+            lv_indev_set_scroll_limit(indev, 6);
+        }
+    }
 
     s_ui.lbl_top = MakeLabel(scr, I18n::T("相册"), kColorMuted, 240);
     lv_obj_align(s_ui.lbl_top, LV_ALIGN_TOP_MID, 0, kTopLabelY);

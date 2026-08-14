@@ -671,7 +671,7 @@ dependencies:
     - esp32h4
     version: 1.0.2
   espressif/freetype:
-    component_hash: a4169cdd22b3572342b2d640d7082405b8895e3214539283601c03412589b65d
+    component_hash: 381eab0d52cbfadbdde4e7a80c1196a0a22b1a0bde4830b1201b1ae6e0fd8c90
     dependencies:
     - name: idf
       require: private
@@ -679,7 +679,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 2.14.2
+    version: 2.14.3
   espressif/gmf_audio:
     component_hash: dc88b927adc66bd617aacb39fee28ff61a339f1ab603ff21dc9d0d226eea4947
     dependencies:
@@ -763,7 +763,7 @@ dependencies:
       require: private
       version: ^1.2.13
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     version: 1.6.58
   espressif/media_lib_sal:
@@ -921,6 +921,7 @@ direct_dependencies:
 - espressif/gmf_io
 - espressif/knob
 - espressif/led_strip
+- espressif/libpng
 - espressif/mqtt
 - espressif2022/image_player
 - idf
@@ -930,6 +931,6 @@ direct_dependencies:
 - waveshare/esp_lcd_sh8601
 - waveshare/esp_lcd_touch_cst9217
 - wvirgil123/sscma_client
-manifest_hash: a4ddb9a35cbf83c770dc925c0cb48253431037421f62759a9ac79222ba4aafa8
+manifest_hash: 6209a7414b3ffb53fc2a37fe0bbe25971972dccafccad37529915da1fc36fef9
 target: esp32s3
 version: 2.0.0
