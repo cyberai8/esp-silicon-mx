@@ -57,6 +57,11 @@ NAME_ALIASES: dict[str, str] = {
     # 电话
     "call": "call",
     "电话": "call",
+    # 相册
+    "album": "album",
+    "相册": "album",
+    "照片": "album",
+    "图库": "album",
     # 音乐
     "music": "music",
     "音乐": "music",

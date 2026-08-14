@@ -511,7 +511,28 @@ def icon_espclaw(cr):
     stroke(cr)
 
 
+def icon_album(cr):
+    # 后景相框只画顶边+右边，透出「一叠照片」的层次
+    back_x, back_y, back_w, back_r = 72, 52, 140, 18
+    cr.move_to(back_x + back_r, back_y)
+    cr.line_to(back_x + back_w - back_r, back_y)
+    cr.arc(back_x + back_w - back_r, back_y + back_r, back_r, -math.pi / 2, 0)
+    cr.line_to(back_x + back_w, back_y + 50)
+    stroke(cr)
+
+    rounded_rect(cr, 44, 84, 160, 124, 20)
+    stroke(cr)
+    circle(cr, 84, 120, 12)
+    cr.move_to(56, 190)
+    cr.line_to(100, 142)
+    cr.line_to(126, 170)
+    cr.line_to(150, 148)
+    cr.line_to(196, 190)
+    stroke(cr)
+
+
 ICONS = {
+    "album": icon_album,
     "chat": icon_chat,
     "wifi": icon_wifi,
     "recording": icon_recording,
@@ -551,20 +572,33 @@ def main():
         default=OUT_SIZE,
         help=f"output PNG edge length (default {OUT_SIZE}, must match kCloverIconFrame)",
     )
+    ap.add_argument(
+        "--only",
+        default="",
+        help="comma separated icon names; default redraws every icon "
+        "(手工替换过的图标会被覆盖，只想补一个就用 --only)",
+    )
     args = ap.parse_args()
     OUT_SIZE = args.size
 
+    wanted = [n.strip() for n in args.only.split(",") if n.strip()]
+    for name in wanted:
+        if name not in ICONS:
+            raise SystemExit(f"unknown icon: {name} (have: {', '.join(sorted(ICONS))})")
+    targets = wanted or list(ICONS)
+
     os.makedirs(os.path.abspath(ROOT), exist_ok=True)
-    for name, fn in ICONS.items():
+    for name in targets:
         surf, cr = new_ctx()
-        fn(cr)
+        ICONS[name](cr)
         save(surf, name)
     # chat1 与 chat 同图（历史资源名）
-    chat = os.path.abspath(os.path.join(ROOT, "ic_clover_chat.png"))
-    chat1 = os.path.abspath(os.path.join(ROOT, "ic_clover_chat1.png"))
-    if os.path.exists(chat):
-        Image.open(chat).save(chat1)
-        print("wrote", chat1, "(copy of chat)")
+    if "chat" in targets:
+        chat = os.path.abspath(os.path.join(ROOT, "ic_clover_chat.png"))
+        chat1 = os.path.abspath(os.path.join(ROOT, "ic_clover_chat1.png"))
+        if os.path.exists(chat):
+            Image.open(chat).save(chat1)
+            print("wrote", chat1, "(copy of chat)")
 
 
 if __name__ == "__main__":
