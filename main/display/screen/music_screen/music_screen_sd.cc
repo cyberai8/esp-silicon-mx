@@ -163,6 +163,7 @@ std::atomic<bool> s_in_run{false};       // 播放 task 正阻塞在 run_to_end 
 std::atomic<bool> s_shutdown{false};
 std::atomic<uint32_t> s_play_gen{0};     // 用户切歌时自增，用来废弃旧的 run_to_end
 std::atomic<uint32_t> s_track_seq{0};    // 每次开新曲自增，UI 用它归零计时
+std::atomic<int> s_pcm_channels{2};      // 解码器上报的声道数，输出前转单声道
 std::atomic<uint32_t> s_cur_bytes{0};    // 当前文件大小，配合码率估总时长
 std::atomic<uint32_t> s_total_sec{0};
 std::atomic<int> s_repeat_mode{static_cast<int>(RepeatMode::kList)};
@@ -470,13 +471,30 @@ extern "C" int SdMusicOutCallback(uint8_t* data, int data_size, void* ctx) {
     if (codec == nullptr || data == nullptr || data_size <= 0) {
         return 0;
     }
-    const int samples = data_size / static_cast<int>(sizeof(int16_t));
-    if (samples <= 0) {
+    const int frames = data_size / static_cast<int>(sizeof(int16_t));
+    if (frames <= 0) {
         return 0;
     }
     const auto* pcm = reinterpret_cast<const int16_t*>(data);
-    s_pcm_buf.resize(static_cast<size_t>(samples));
-    std::memcpy(s_pcm_buf.data(), pcm, static_cast<size_t>(data_size));
+    const int ch = s_pcm_channels.load(std::memory_order_relaxed);
+
+    if (ch >= 2) {
+        const int mono = frames / ch;
+        if (mono <= 0) {
+            return 0;
+        }
+        s_pcm_buf.resize(static_cast<size_t>(mono));
+        for (int i = 0; i < mono; ++i) {
+            int sum = 0;
+            for (int c = 0; c < ch; ++c) {
+                sum += pcm[i * ch + c];
+            }
+            s_pcm_buf[static_cast<size_t>(i)] =
+                static_cast<int16_t>(sum / ch);
+        }
+    } else {
+        s_pcm_buf.assign(pcm, pcm + frames);
+    }
     Application::GetInstance().GetAudioService().NotifyExternalPlayback();
     codec->OutputData(s_pcm_buf);
     return 0;
@@ -489,6 +507,9 @@ extern "C" int SdMusicEventCallback(esp_asp_event_pkt_t* event, void* /*ctx*/) {
     if (event->type == ESP_ASP_EVENT_TYPE_MUSIC_INFO &&
         event->payload_size >= static_cast<int>(sizeof(esp_asp_music_info_t))) {
         const auto* info = static_cast<const esp_asp_music_info_t*>(event->payload);
+        if (info->channels > 0) {
+            s_pcm_channels.store(info->channels, std::memory_order_relaxed);
+        }
         const uint32_t bytes = s_cur_bytes.load(std::memory_order_relaxed);
         // 解码器报的码率最靠谱，拿它换算总时长；扫描时的估算只是兜底。
         if (info->bitrate > 0 && bytes > 0) {
@@ -628,6 +649,7 @@ void SdPlayTask(void* /*arg*/) {
         s_cur_bytes.store(track.size_kb * 1024, std::memory_order_relaxed);
         s_total_sec.store(track.dur_sec, std::memory_order_relaxed);
         s_paused.store(false, std::memory_order_relaxed);
+        s_pcm_channels.store(2, std::memory_order_relaxed);
         s_track_seq.fetch_add(1, std::memory_order_relaxed);
         RememberTrack(track.path);
         ESP_LOGI(TAG, "play: %s", track.path.c_str());
@@ -1535,11 +1557,12 @@ void MusicScreenSd::LifecycleCallback(screen_lifecycle_event_t event) {
         auto& as = Application::GetInstance().GetAudioService();
         s_wake_disabled_by_us = false;
         if (as.IsWakeWordRunning()) {
-            as.EnableWakeWordDetection(false);
+            as.ReleaseWakeWordDetection();
             s_wake_disabled_by_us = true;
             vTaskDelay(pdMS_TO_TICKS(150));
         }
         if (s_codec != nullptr) {
+            s_codec->EnableInput(false);
             s_codec->EnableOutput(true);
         }
 
