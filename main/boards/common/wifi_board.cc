@@ -102,16 +102,24 @@ void WifiBoard::StartNetwork() {
         return;
     }
 
-    // If no WiFi SSID is configured, enter WiFi configuration mode
     auto& ssid_manager = SsidManager::GetInstance();
     auto ssid_list = ssid_manager.GetSsidList();
+#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+    // 圆屏/VoCat：无 SSID 时不要卡在配网热点，直接进菜单，稍后在网络页配置。
+    if (ssid_list.empty()) {
+        ESP_LOGW(TAG, "No WiFi SSID configured, skip AP mode and continue offline");
+        return;
+    }
+#else
     if (ssid_list.empty()) {
         wifi_config_mode_ = true;
         EnterWifiConfigMode();
         return;
     }
+#endif
 
     auto& wifi_station = WifiStation::GetInstance();
+#if !(CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
     wifi_station.OnScanBegin([this]() {
         auto display = Board::GetInstance().GetDisplay();
         display->ShowNotification(Lang::Strings::SCANNING_WIFI, 30000);
@@ -129,15 +137,20 @@ void WifiBoard::StartNetwork() {
         notification += ssid;
         display->ShowNotification(notification.c_str(), 30000);
     });
+#endif
     wifi_station.Start();
 
-    // Try to connect to WiFi, if failed, launch the WiFi configuration AP
+#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+    // 不阻塞等待联网；失败也不进配网 AP。菜单已经（或即将）显示。
+    ESP_LOGI(TAG, "WiFi station started (non-blocking)");
+#else
     if (!wifi_station.WaitForConnected(60 * 1000)) {
         wifi_station.Stop();
         wifi_config_mode_ = true;
         EnterWifiConfigMode();
         return;
     }
+#endif
 }
 
 NetworkInterface* WifiBoard::GetNetwork() {

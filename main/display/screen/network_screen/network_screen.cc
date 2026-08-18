@@ -29,6 +29,7 @@
 #include "settings.h"
 
 #include "home_screen/home_screen.h"
+#include "round_keyboard.h"
 #include "screen_util.h"
 
 #include <cJSON.h>
@@ -59,26 +60,26 @@ constexpr int  kHeaderH          = kHeaderTopInset + kHeaderContentH;  // 64
 constexpr int  kHeaderSideInset  = 36;
 // 圆屏无返回箭头，仅右滑退出。
 constexpr int  kBackBtnSize      = 0;
-// 通用弹窗卡片（连接中 / 失败 / 重启倒计时 / 切网 / SIM 切换提示）
+// 通用弹窗卡片（连接中 / 失败 / 重启倒计时 / SIM 切换提示）
 constexpr int  kDialogW          = 280;
 constexpr int  kDialogH          = 240;   // 原 520x360 一类
 constexpr int  kDialogHSmall     = 220;   // 原 520x320 一类
 constexpr int  kDialogPad        = 16;
 constexpr int  kDialogSpinBig    = 90;
 constexpr int  kDialogSpinSmall  = 70;
-// 密码输入卡片：不再用 pos(30,30)，改用更大的顶部安全边距 + 收紧的内容
-constexpr int  kPwdCardTopInset  = 34;
-constexpr int  kPwdCardW         = 280;
-constexpr int  kPwdCardH         = 152;
-constexpr int  kPwdCardPad       = 14;
-constexpr int  kPwdCloseBtnSize  = 28;
-constexpr int  kPwdKeyboardGap   = 6;
+// 密码输入卡片：上半圆；键盘从屏幕中线起，卡片底边不得压到键盘。
+constexpr int  kPwdCardTopInset  = 32;
+constexpr int  kPwdCardW         = 208;
+constexpr int  kPwdCardH         = 128;
+constexpr int  kPwdCardPad       = 8;
+constexpr int  kPwdCloseBtnSize  = 24;
+constexpr int  kPwdKeyboardGap   = 8;
 // 列表行右侧按钮（附近 WiFi 项没有按钮，仅「已保存」行需要收紧）
 constexpr int  kSavedDefBtnW     = 84;
 constexpr int  kSavedDefBtnH     = 40;
 constexpr int  kSavedDelBtnW     = 68;
 constexpr int  kSavedBtnGap      = 6;
-// 上网方式 / SIM 卡切换两按钮：圆屏并排放不下 280 宽的大按钮，收紧到能并排放下
+// SIM 卡切换两按钮：圆屏并排放不下 280 宽的大按钮，收紧到能并排放下
 constexpr int  kNetBtnW          = 150;
 constexpr int  kNetBtnH          = 64;
 #else
@@ -153,18 +154,11 @@ struct UiState {
     lv_obj_t* tabview       = nullptr;
     lv_obj_t* nearby_tab    = nullptr;  // tabview 的 tab 容器
     lv_obj_t* saved_tab     = nullptr;
-    lv_obj_t* network_tab   = nullptr;
     lv_obj_t* sim_tab       = nullptr;
     lv_obj_t* nearby_list   = nullptr;  // 实际放 item 的 flex 容器
     lv_obj_t* nearby_spinner = nullptr; // 扫描中悬浮在列表中央的圆环 spinner
     lv_obj_t* saved_list    = nullptr;
     lv_obj_t* clear_btn     = nullptr;
-    // 上网方式切换（WiFi / 4G）：和 SIM 卡切换一致的两按钮选择器
-    lv_obj_t* network_wifi_btn    = nullptr;
-    lv_obj_t* network_wifi_lbl    = nullptr;
-    lv_obj_t* network_cell_btn    = nullptr;
-    lv_obj_t* network_cell_lbl    = nullptr;
-    lv_obj_t* network_current_lbl = nullptr;
     // SIM 卡切换（仅 4G 模式）
     lv_obj_t* sim_external_btn    = nullptr;
     lv_obj_t* sim_external_lbl    = nullptr;
@@ -209,11 +203,9 @@ std::string          s_restart_headline;
 // 用来决定离开时是否恢复 WifiStation::Start()。ML307 模式下 WifiStation
 // 根本没起过，恢复时跳过即可，避免空跑一份 wifi 栈。
 bool                 s_wifi_station_was_active = false;
-bool                 s_network_switch_pending = false;
 
 // 上网方式（network/type NVS key）：与 DualNetworkBoard::LoadNetworkTypeFromSettings
-// 一致。0 = WiFi，1 = 4G（蜂窝模组）。切换由 DualNetworkBoard::SwitchNetworkType()
-// 主导，并触发设备重启。
+// 一致。0 = WiFi，1 = 4G（蜂窝模组）。用来决定本页展示 WiFi 列表还是蜂窝 Tab。
 constexpr int        kNetTypeWifi     = 0;
 constexpr int        kNetTypeCellular = 1;
 
@@ -243,9 +235,6 @@ void show_failure_in_status_popup(const std::string& title,
                                   const std::string& detail,
                                   uint32_t auto_close_ms = 2500);
 void close_status_popup();
-void refresh_network_switch_ui();
-void open_switch_reboot_popup(const char* target_name);
-void schedule_network_switch(int target_type);
 void refresh_sim_slot_ui();
 void open_sim_switching_popup(int target_slot);
 void schedule_sim_slot_query();
@@ -322,10 +311,6 @@ int GetSavedNetworkType() {
     const NetworkType type =
         DualNetworkBoard::LoadNetworkTypeFromSettings(kNetTypeWifi);
     return type == NetworkType::ML307 ? kNetTypeCellular : kNetTypeWifi;
-}
-
-DualNetworkBoard* GetDualNetworkBoard() {
-    return dynamic_cast<DualNetworkBoard*>(&Board::GetInstance());
 }
 
 // 当前是否处于 4G（蜂窝）模式。Settings 中 "network/type" 的语义：
@@ -1134,7 +1119,12 @@ void on_kb_event(lv_event_t* e) {
     if (code == LV_EVENT_CANCEL) {
         close_password_popup();
     } else if (code == LV_EVENT_READY) {
-        lv_obj_t* ta = lv_keyboard_get_textarea(kb);
+        lv_obj_t* ta = nullptr;
+        if constexpr (kRoundLayout) {
+            ta = RoundKeyboard_GetTextarea(kb);
+        } else {
+            ta = lv_keyboard_get_textarea(kb);
+        }
         const char* pwd = (ta != nullptr) ? lv_textarea_get_text(ta) : "";
         // 开放网络若用户没输入密码也允许（password 留空）
         schedule_connect(s_pending_ssid, pwd ? pwd : "");
@@ -1224,26 +1214,40 @@ void open_password_popup(const std::string& ssid, wifi_auth_mode_t authmode) {
         lv_obj_center(close_lbl);
     }
 
-    lv_obj_t* hint = lv_label_create(card);
-    lv_label_set_text(hint,
-                      authmode == WIFI_AUTH_OPEN
-                          ? I18n::T("该网络无需密码，可直接连接")
-                          : I18n::T("请输入 WiFi 密码（8~63 字符）"));
-    lv_obj_set_style_text_color(hint, lv_color_hex(kColorSubtle), LV_PART_MAIN);
-    lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
-    lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(hint, content_w);
-    lv_obj_align_to(hint, title, LV_ALIGN_OUT_BOTTOM_LEFT, 0, kRoundLayout ? 6 : 12);
+    lv_obj_t* hint = nullptr;
+    if constexpr (!kRoundLayout) {
+        hint = lv_label_create(card);
+        lv_label_set_text(hint,
+                          authmode == WIFI_AUTH_OPEN
+                              ? I18n::T("该网络无需密码，可直接连接")
+                              : I18n::T("请输入 WiFi 密码（8~63 字符）"));
+        lv_obj_set_style_text_color(hint, lv_color_hex(kColorSubtle), LV_PART_MAIN);
+        lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
+        lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(hint, content_w);
+        lv_obj_align_to(hint, title, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 12);
+    }
 
     // 密码输入框
     lv_obj_t* ta = lv_textarea_create(card);
     s_ui.pwd_textarea = ta;
-    lv_obj_set_size(ta, content_w, kRoundLayout ? 42 : 60);
-    lv_obj_align_to(ta, hint, LV_ALIGN_OUT_BOTTOM_LEFT, 0, kRoundLayout ? 6 : 12);
+    lv_obj_set_size(ta, content_w, kRoundLayout ? 40 : 60);
+    if constexpr (kRoundLayout) {
+        lv_obj_align_to(ta, title, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 8);
+        lv_obj_set_style_pad_hor(ta, 8, LV_PART_MAIN);
+        lv_obj_set_style_pad_ver(ta, 6, LV_PART_MAIN);
+        lv_obj_set_style_border_width(ta, 1, LV_PART_MAIN);
+        lv_obj_set_style_border_color(ta, lv_color_hex(kColorText), LV_PART_MAIN);
+        lv_obj_set_style_border_opa(ta, LV_OPA_40, LV_PART_MAIN);
+    } else {
+        lv_obj_align_to(ta, hint, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 12);
+    }
     lv_textarea_set_one_line(ta, true);
     lv_textarea_set_password_mode(ta, true);
     lv_textarea_set_max_length(ta, kMaxPasswordLen);
-    lv_textarea_set_placeholder_text(ta, I18n::T("WiFi 密码"));
+    lv_textarea_set_placeholder_text(
+        ta, authmode == WIFI_AUTH_OPEN ? I18n::T("开放网络，可直接确认")
+                                       : I18n::T("WiFi 密码"));
     lv_obj_set_style_text_font(ta, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_bg_color(ta, lv_color_hex(0x121726), LV_PART_MAIN);
     lv_obj_set_style_text_color(ta, lv_color_hex(kColorText), LV_PART_MAIN);
@@ -1255,7 +1259,7 @@ void open_password_popup(const std::string& ssid, wifi_auth_mode_t authmode) {
     lv_obj_t* chk = lv_checkbox_create(card);
     s_ui.pwd_show_chk = chk;
     lv_checkbox_set_text(chk, I18n::T("显示密码"));
-    lv_obj_align_to(chk, ta, LV_ALIGN_OUT_BOTTOM_LEFT, 0, kRoundLayout ? 4 : 12);
+    lv_obj_align_to(chk, ta, LV_ALIGN_OUT_BOTTOM_LEFT, 0, kRoundLayout ? 8 : 12);
     lv_obj_set_style_text_color(chk, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(chk, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_add_event_cb(chk, on_show_pwd_changed, LV_EVENT_VALUE_CHANGED, nullptr);
@@ -1294,17 +1298,18 @@ void open_password_popup(const std::string& ssid, wifi_auth_mode_t authmode) {
 
     // 屏幕底部键盘：大屏吃满底部 ~390px；圆屏按卡片实际高度反算剩余空间，
     // 确保卡片 + 键盘不超出 360 高的面板。
-    lv_obj_t* kb = lv_keyboard_create(mask);
-    s_ui.pwd_keyboard = kb;
+    // 圆屏用收窄的 RoundKeyboard；方屏仍用全宽默认键盘。
+    lv_obj_t* kb = nullptr;
     if constexpr (kRoundLayout) {
-        const int kb_h = kPanelH - (kPwdCardTopInset + kPwdCardH + kPwdKeyboardGap);
-        lv_obj_set_size(kb, kPanelW, kb_h);
+        kb = RoundKeyboard_Create(mask, ta, 0);
     } else {
+        kb = lv_keyboard_create(mask);
         lv_obj_set_size(kb, kPanelW, 390);
+        lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+        lv_keyboard_set_textarea(kb, ta);
     }
-    lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_keyboard_set_textarea(kb, ta);
+    s_ui.pwd_keyboard = kb;
     lv_obj_add_event_cb(kb, on_kb_event, LV_EVENT_READY, nullptr);
     lv_obj_add_event_cb(kb, on_kb_event, LV_EVENT_CANCEL, nullptr);
     // 键盘是触摸密集型控件——禁止屏幕级右滑返回手势把它的拖动判定为返回
@@ -1590,23 +1595,16 @@ void on_screen_unloaded(lv_event_t* /*e*/) {
     s_ui.tabview       = nullptr;
     s_ui.nearby_tab    = nullptr;
     s_ui.saved_tab       = nullptr;
-    s_ui.network_tab     = nullptr;
     s_ui.sim_tab         = nullptr;
     s_ui.nearby_list     = nullptr;
     s_ui.nearby_spinner  = nullptr;
     s_ui.saved_list      = nullptr;
     s_ui.clear_btn       = nullptr;
-    s_ui.network_wifi_btn    = nullptr;
-    s_ui.network_wifi_lbl    = nullptr;
-    s_ui.network_cell_btn    = nullptr;
-    s_ui.network_cell_lbl    = nullptr;
-    s_ui.network_current_lbl = nullptr;
     s_ui.sim_external_btn = nullptr;
     s_ui.sim_external_lbl = nullptr;
     s_ui.sim_internal_btn = nullptr;
     s_ui.sim_internal_lbl = nullptr;
     s_ui.sim_current_lbl  = nullptr;
-    s_network_switch_pending = false;
     // 注意：s_sim_switch_pending 不在这里清零——AT 任务可能还在后台跑，
     // 它结束后回调里会检测 screen_alive() 并自行复位。
     s_ui.pwd_overlay   = nullptr;
@@ -1626,139 +1624,6 @@ void on_screen_unloaded(lv_event_t* /*e*/) {
     s_restart_headline.clear();
     s_pending_ssid.clear();
     s_scan_results.clear();
-}
-
-// ---------------------------------------------------------------------------
-// 网络切换（WiFi <-> 4G）
-// ---------------------------------------------------------------------------
-void switch_network_task(void* /*arg*/) {
-    vTaskDelay(pdMS_TO_TICKS(1500));
-    if (auto* dual = GetDualNetworkBoard()) {
-        dual->SwitchNetworkType();
-    } else {
-        ESP_LOGE(TAG, "DualNetworkBoard not available, reboot anyway");
-        esp_restart();
-    }
-    vTaskDelete(nullptr);
-}
-
-void open_switch_reboot_popup(const char* target_name) {
-    if (s_ui.screen == nullptr) {
-        return;
-    }
-    close_status_popup();
-
-    lv_obj_t* mask = lv_obj_create(s_ui.screen);
-    screen_strip_obj_chrome(mask);
-    lv_obj_set_size(mask, kPanelW, kPanelH);
-    lv_obj_set_pos(mask, 0, 0);
-    lv_obj_set_style_bg_color(mask, lv_color_hex(0x000000), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(mask, LV_OPA_80, LV_PART_MAIN);
-    lv_obj_remove_flag(mask, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(mask, LV_OBJ_FLAG_CLICKABLE);
-    screen_swipe_back_ignore(mask, true);
-    s_ui.status_overlay = mask;
-
-    lv_obj_t* card = lv_obj_create(mask);
-    screen_strip_obj_chrome(card);
-    lv_obj_set_size(card, kDialogW, kDialogHSmall);
-    lv_obj_center(card);
-    lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(card, 20, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, kDialogPad, LV_PART_MAIN);
-    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-    screen_swipe_back_ignore(card, true);
-
-    lv_obj_t* head = lv_label_create(card);
-    lv_label_set_text(head, I18n::T("切换网络"));
-    lv_obj_set_style_text_color(head, lv_color_hex(kColorBtnActive), LV_PART_MAIN);
-    lv_obj_set_style_text_font(head, kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4,
-                               LV_PART_MAIN);
-    lv_obj_align(head, LV_ALIGN_TOP_MID, 0, kRoundLayout ? 12 : 20);
-
-    lv_obj_t* body = lv_label_create(card);
-    s_ui.status_message_lbl = body;
-    char buf[160];
-    snprintf(buf, sizeof(buf), I18n::T("正在切换到 %s\n设备即将重启…"), target_name);
-    lv_label_set_text(body, buf);
-    lv_obj_set_width(body, kDialogLabelW);
-    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_color(body, lv_color_hex(kColorText), LV_PART_MAIN);
-    lv_obj_set_style_text_font(body, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_align(body, LV_ALIGN_CENTER, 0, kRoundLayout ? 10 : 20);
-
-    if (xTaskCreate(switch_network_task, "net_switch", 4096, nullptr, 5,
-                    nullptr) != pdPASS) {
-        s_network_switch_pending = false;
-        post_status(I18n::T("无法启动切换任务"), kColorError);
-        close_status_popup();
-        refresh_network_switch_ui();
-    }
-}
-
-// 把"按钮 → 切换"逻辑收成一个函数，两个上网方式按钮共用：
-//   * 同一目标点两次 / 当前已经是该模式：no-op，避免重复进入重启流程
-//   * 没有 4G 板（DualNetworkBoard 不可用）：状态栏报错并把高亮拉回真值
-//   * 否则进入重启确认弹窗，由 switch_network_task 异步触发设备重启
-void schedule_network_switch(int target_type) {
-    if (s_network_switch_pending) {
-        return;
-    }
-    if (target_type != kNetTypeWifi && target_type != kNetTypeCellular) {
-        return;
-    }
-    if (GetSavedNetworkType() == target_type) {
-        return;
-    }
-
-    if (GetDualNetworkBoard() == nullptr) {
-        post_status(I18n::T("当前设备不支持网络切换"), kColorError);
-        refresh_network_switch_ui();
-        return;
-    }
-
-    s_network_switch_pending = true;
-    const char* target = target_type == kNetTypeCellular ? "4G" : "WiFi";
-    post_status(target_type == kNetTypeCellular ? I18n::T("准备切换到 4G…")
-                                                 : I18n::T("准备切换到 WiFi…"),
-                kColorScanning);
-    open_switch_reboot_popup(target);
-}
-
-void on_network_wifi_clicked(lv_event_t* /*e*/) {
-    schedule_network_switch(kNetTypeWifi);
-}
-
-void on_network_cell_clicked(lv_event_t* /*e*/) {
-    schedule_network_switch(kNetTypeCellular);
-}
-
-// 把两个上网方式按钮的高亮状态同步成「当前模式高亮、另一个置灰」。
-// 行为完全对应 refresh_sim_slot_ui()，方便直观比对维护。
-void refresh_network_switch_ui() {
-    if (s_ui.network_wifi_btn == nullptr ||
-        s_ui.network_cell_btn == nullptr) {
-        return;
-    }
-    const int type = GetSavedNetworkType();
-    const bool is_wifi = (type != kNetTypeCellular);
-
-    lv_obj_set_style_bg_color(s_ui.network_wifi_btn,
-                              lv_color_hex(is_wifi ? kColorBtnActive
-                                                   : kColorBtn),
-                              LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_ui.network_cell_btn,
-                              lv_color_hex(is_wifi ? kColorBtn
-                                                   : kColorBtnActive),
-                              LV_PART_MAIN);
-
-    if (s_ui.network_current_lbl != nullptr) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), I18n::T("当前：%s"), is_wifi ? "WiFi" : "4G");
-        lv_label_set_text(s_ui.network_current_lbl, buf);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2148,8 +2013,7 @@ void build_tabview(lv_obj_t* parent) {
         screen_swipe_back_ignore(content, true);
     }
 
-    // 4G 模式下没有 WiFi 列表 / 扫描概念，直接跳过这两个 Tab，只保留「网络
-    // 切换」入口。WiFi 模式或未配置时正常展示三个 Tab。
+    // 4G 模式下没有 WiFi 列表 / 扫描概念，跳过这两个 Tab。
     const bool show_wifi_tabs = !IsCellularMode();
 
     if (show_wifi_tabs) {
@@ -2293,96 +2157,8 @@ void build_tabview(lv_obj_t* parent) {
     }  // if (show_wifi_tabs)
 
     // -----------------------------------------------------------------------
-    // 「网络切换」和「SIM 卡切换」两个 Tab 的构造分别封到 lambda 里，让
-    // 真正决定显示顺序的逻辑在最后一段集中处理：
-    //   - WiFi 模式：只挂「网络切换」
-    //   - 4G 模式：先「SIM 卡切换」（最常用的现场操作），再「网络切换」
+    // 4G 模式才挂 SIM / 蜂窝信息 Tab；WiFi 只有附近/已保存两个 Tab。
     // -----------------------------------------------------------------------
-    auto build_network_switch_tab = [&]() {
-        lv_obj_t* tab3 = lv_tabview_add_tab(tv, I18n::T("网络切换"));
-        s_ui.network_tab = tab3;
-        lv_obj_set_style_pad_all(tab3, 24, LV_PART_MAIN);
-        lv_obj_remove_flag(tab3, LV_OBJ_FLAG_SCROLLABLE);
-
-        lv_obj_t* card = lv_obj_create(tab3);
-        screen_strip_obj_chrome(card);
-        lv_obj_set_size(card, LV_PCT(100), LV_SIZE_CONTENT);
-        lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_radius(card, 18, LV_PART_MAIN);
-        lv_obj_set_style_pad_all(card, 24, LV_PART_MAIN);
-        lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
-                              LV_FLEX_ALIGN_START);
-        lv_obj_set_style_pad_row(card, 16, LV_PART_MAIN);
-
-        lv_obj_t* title3 = lv_label_create(card);
-        lv_label_set_text(title3, I18n::T("上网方式"));
-        lv_obj_set_style_text_color(title3, lv_color_hex(kColorText),
-                                    LV_PART_MAIN);
-        lv_obj_set_style_text_font(title3, &font_puhui_30_4, LV_PART_MAIN);
-
-        lv_obj_t* hint3 = lv_label_create(card);
-        lv_label_set_text(hint3,
-                          I18n::T("选择上网方式。切换后设备将自动重启生效。"));
-        lv_obj_set_width(hint3, LV_PCT(100));
-        lv_label_set_long_mode(hint3, LV_LABEL_LONG_WRAP);
-        lv_obj_set_style_text_color(hint3, lv_color_hex(kColorSubtle),
-                                    LV_PART_MAIN);
-        lv_obj_set_style_text_font(hint3, &font_puhui_20_4, LV_PART_MAIN);
-
-        // 两个并排按钮：WiFi / 4G。布局、配色、尺寸、字体全部沿用
-        // build_sim_switch_tab 里的 make_sim_btn 配方，保证两类切换在
-        // 视觉上完全对仗，用户只要会用 SIM 卡切换就会用这里。
-        lv_obj_t* net_row = lv_obj_create(card);
-        screen_strip_obj_chrome(net_row);
-        lv_obj_set_size(net_row, LV_PCT(100), kNetBtnH + 16);
-        lv_obj_set_style_bg_opa(net_row, LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_remove_flag(net_row, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_flex_flow(net_row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(net_row, LV_FLEX_ALIGN_SPACE_BETWEEN,
-                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-
-        auto make_net_btn = [&](const char* text, lv_event_cb_t cb,
-                                lv_obj_t** out_btn, lv_obj_t** out_lbl) {
-            lv_obj_t* btn = lv_button_create(net_row);
-            lv_obj_set_size(btn, kNetBtnW, kNetBtnH);
-            lv_obj_set_style_radius(btn, 16, LV_PART_MAIN);
-            lv_obj_set_style_bg_color(btn, lv_color_hex(kColorBtn),
-                                      LV_PART_MAIN);
-            lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
-            lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
-            screen_swipe_back_ignore(btn, true);
-            lv_obj_t* lbl = lv_label_create(btn);
-            lv_label_set_text(lbl, text);
-            lv_obj_set_style_text_color(lbl, lv_color_hex(kColorText),
-                                        LV_PART_MAIN);
-            lv_obj_set_style_text_font(lbl, kRoundLayout ? &font_puhui_20_4
-                                                          : &font_puhui_30_4,
-                                       LV_PART_MAIN);
-            lv_obj_center(lbl);
-            *out_btn = btn;
-            *out_lbl = lbl;
-        };
-
-        make_net_btn("WiFi", on_network_wifi_clicked,
-                     &s_ui.network_wifi_btn, &s_ui.network_wifi_lbl);
-        make_net_btn("4G", on_network_cell_clicked,
-                     &s_ui.network_cell_btn, &s_ui.network_cell_lbl);
-
-        // "当前：xxx" 文字由 refresh_network_switch_ui() 同步刷新；这里给
-        // 个占位，避免首帧空白。
-        lv_obj_t* cur = lv_label_create(card);
-        s_ui.network_current_lbl = cur;
-        lv_label_set_text(cur, I18n::T("当前：--"));
-        lv_obj_set_style_text_color(cur, lv_color_hex(kColorSubtle),
-                                    LV_PART_MAIN);
-        lv_obj_set_style_text_font(cur, &font_puhui_20_4, LV_PART_MAIN);
-
-        refresh_network_switch_ui();
-    };  // build_network_switch_tab
-
     // SIM 卡切换页（仅双卡 4G 板）。单卡板走下方「蜂窝信息」占位页。
     auto build_sim_switch_tab = [&]() {
         lv_obj_t* tab4 = lv_tabview_add_tab(tv, I18n::T("SIM 卡切换"));
@@ -2557,19 +2333,13 @@ void build_tabview(lv_obj_t* parent) {
         add_kv(I18n::T("IMEI"), imei);
     };  // build_cellular_info_tab
 
-    // 真正决定 Tab 顺序的地方：
-    //   - 双卡 4G：「SIM 卡切换」+「网络切换」
-    //   - 单卡 4G：「蜂窝信息」占位 +「网络切换」
-    //   - WiFi 模式：只挂「网络切换」
+    // 4G 模式才挂 SIM / 蜂窝信息 Tab。
     if (IsCellularMode()) {
         if (BOARD_HAS_DUAL_SIM) {
             build_sim_switch_tab();
         } else {
             build_cellular_info_tab();
         }
-        build_network_switch_tab();
-    } else {
-        build_network_switch_tab();
     }
 }
 
@@ -2610,8 +2380,7 @@ void NetworkScreen::LifecycleCallback(screen_lifecycle_event_t event) {
     if (event == SCREEN_LIFECYCLE_LOAD) {
         ESP_LOGI(TAG, "load: network_screen");
         // 4G 模式下「附近 WiFi」「已保存 WiFi」两个 Tab 都被隐藏，没必要
-        // 启动本地 STA 栈做扫描——会无谓地占用 wifi 硬件、抢蜂窝模块的
-        // 资源、还可能在 SwitchNetworkType 重启前后产生事件回调毛刺。
+        // 启动本地 STA 栈做扫描。
         if (!IsCellularMode()) {
             // 不再自动扫描——等用户主动点「扫描」。这样不会无谓地停掉外面
             // 跑的 WifiStation 抢硬件，也不会让用户一进来就被 spinner 干扰。
@@ -2621,7 +2390,6 @@ void NetworkScreen::LifecycleCallback(screen_lifecycle_event_t event) {
             // 刷新一遍已保存列表（可能用户在外面改过）
             refresh_saved_list();
         }
-        refresh_network_switch_ui();
 #if BOARD_HAS_DUAL_SIM
         refresh_sim_slot_ui();
         // 4G 模式下向模组发 AT+ECSIMCFG? 同步真实当前槽位，避免本地 NVS

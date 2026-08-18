@@ -1,0 +1,25 @@
+# 设置页：顶部 Tab 切换（圆屏 360×360）
+# Tab 栏中心 y ≈ 84（header 64 + tabbar/2）
+
+wait 800
+shot 01_brightness.png
+
+log 切到「待机」
+tap 90 84
+wait 500
+shot 02_standby.png
+
+log 切到「音量」
+tap 150 84
+wait 500
+shot 03_volume.png
+
+log 切到「语言」
+tap 210 84
+wait 500
+shot 04_language.png
+
+log 切到「升级」
+tap 330 84
+wait 500
+shot 06_ota.png

@@ -14,7 +14,8 @@ public:
     Ota();
     ~Ota();
 
-    esp_err_t CheckVersion();
+    // pause_lvgl：启动阶段检查可暂停 LVGL 避让 HTTPS；前台 UI 检查必须传 false。
+    esp_err_t CheckVersion(bool pause_lvgl = true);
     esp_err_t Activate();
     bool HasActivationChallenge() { return has_activation_challenge_; }
     bool HasNewVersion() { return has_new_version_; }

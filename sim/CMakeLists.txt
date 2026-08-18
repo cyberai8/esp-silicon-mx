@@ -55,6 +55,7 @@ set(SCREEN_SOURCES
     ${REPO_ROOT}/main/display/screen/screen_util.cc
     ${REPO_ROOT}/main/display/screen/album_screen/album_screen.cc
     ${REPO_ROOT}/main/display/screen/clock_screen/clock_screen.cc
+    ${REPO_ROOT}/main/display/screen/settings_screen/settings_screen.cc
     ${REPO_ROOT}/main/i18n/i18n.cc
 )
 
@@ -92,6 +93,7 @@ set(SIM_SOURCES
     stubs/sim_esp_shims.cc
     stubs/sim_freertos.cc
     stubs/sim_settings.cc
+    stubs/sim_board.cc
     stubs/sim_jpeg.cc
     ${SOUND_STUB}
 )
@@ -113,6 +115,7 @@ target_include_directories(sim PRIVATE
 )
 
 target_compile_definitions(sim PRIVATE
+    ESP_YUN_SIM=1
     SIM_SDCARD_DIR="${SIM_SDCARD_DIR}"
     SIM_ASSETS_DIR="${SIM_ASSETS_DIR}"
     SIM_NVS_DIR="${SIM_NVS_DIR}"

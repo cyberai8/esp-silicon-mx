@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <memory>
+#include <string>
 
 #include <esp_log.h>
 
@@ -16,6 +18,13 @@
 #include "native_bluetooth_audio.h"
 #include "screen_util.h"
 #include "settings.h"
+
+#ifndef ESP_YUN_SIM
+#include "application.h"
+#include "ota.h"
+#include "wifi_required_dialog.h"
+#include <esp_app_desc.h>
+#endif
 
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_puhui_30_4);
@@ -42,6 +51,7 @@ constexpr int kSliderCardH = 96;
 constexpr int kTabPadHor = 40;   // 内容左右安全区（≈280 宽）
 constexpr int kTabPadTop = 6;
 constexpr int kTabPadBottom = 36;
+constexpr int kTabBtnMinW = 60;
 #else
 constexpr bool kRoundLayout = false;
 constexpr int kPanelW = DISPLAY_WIDTH;
@@ -78,6 +88,16 @@ struct UiState {
     lv_obj_t* enter_standby_min_label = nullptr;
     lv_obj_t* enter_standby_slider = nullptr;
     lv_obj_t* charge_tab = nullptr;
+    lv_obj_t* ota_tab = nullptr;
+    lv_obj_t* ota_current_label = nullptr;
+    lv_obj_t* ota_remote_label = nullptr;
+    lv_obj_t* ota_status_label = nullptr;
+    lv_obj_t* ota_auto_switch = nullptr;
+    lv_obj_t* ota_check_btn = nullptr;
+    lv_obj_t* ota_upgrade_btn = nullptr;
+    bool ota_checking = false;
+    int brightness_drag_start_x = 0;
+    int brightness_drag_start_val = 0;
 };
 UiState s_ui;
 
@@ -86,6 +106,57 @@ constexpr int kChargeFastMa = 1000;
 constexpr int kChargeDefaultMa = kChargeFastMa;
 constexpr const char* kChargeNs = "charge";
 constexpr const char* kChargeIchgKey = "ichg_ma";
+constexpr const char* kAutoOtaKey = "auto_ota";
+constexpr const char* kOtaRemoteVerKey = "ota_remote_ver";
+constexpr const char* kOtaHasUpdateKey = "ota_has_update";
+constexpr const char* kOtaFirmwareUrlKey = "ota_firmware_url";
+
+const char* ReadCurrentFirmwareVersion() {
+#ifndef ESP_YUN_SIM
+    const esp_app_desc_t* app_desc = esp_app_get_description();
+    if (app_desc != nullptr && app_desc->version[0] != '\0') {
+        return app_desc->version;
+    }
+#endif
+    return "1.0.0";
+}
+
+bool ReadAutoOtaEnabled() {
+    Settings settings("display", false);
+    return settings.GetInt(kAutoOtaKey, 1) != 0;
+}
+
+void SaveAutoOtaEnabled(bool enabled) {
+    Settings settings("display", true);
+    settings.SetInt(kAutoOtaKey, enabled ? 1 : 0);
+}
+
+std::string ReadCachedRemoteVersion() {
+    Settings settings("display", false);
+    return settings.GetString(kOtaRemoteVerKey, "");
+}
+
+bool ReadCachedHasUpdate() {
+    Settings settings("display", false);
+    return settings.GetInt(kOtaHasUpdateKey, 0) != 0;
+}
+
+std::string ReadCachedFirmwareUrl() {
+    Settings settings("display", false);
+    return settings.GetString(kOtaFirmwareUrlKey, "");
+}
+
+void SaveOtaCheckCache(const std::string& remote_ver, bool has_update,
+                       const std::string& firmware_url) {
+    Settings settings("display", true);
+    settings.SetString(kOtaRemoteVerKey, remote_ver);
+    settings.SetInt(kOtaHasUpdateKey, has_update ? 1 : 0);
+    if (has_update) {
+        settings.SetString(kOtaFirmwareUrlKey, firmware_url);
+    }
+}
+
+void SetBrightnessFromUi(int value);
 
 int NormalizeChargeMa(int ma) {
     if (ma == kChargeNormalMa || ma == kChargeFastMa) {
@@ -175,6 +246,48 @@ void ApplyBrightness(int value) {
     if (backlight != nullptr) {
         backlight->SetBrightness(static_cast<uint8_t>(value), true);
     }
+}
+
+void SetBrightnessFromUi(int value) {
+    if (value < static_cast<int>(kBacklightMinPercent)) {
+        value = kBacklightMinPercent;
+    } else if (value > 100) {
+        value = 100;
+    }
+    UpdatePctLabel(s_ui.brightness_pct_label, value);
+    if (s_ui.brightness_slider != nullptr) {
+        lv_slider_set_value(s_ui.brightness_slider, value, LV_ANIM_OFF);
+    }
+    ApplyBrightness(value);
+}
+
+void OnBrightnessCardDrag(lv_event_t* e) {
+    const lv_event_code_t code = lv_event_get_code(e);
+    lv_indev_t* indev = lv_indev_active();
+    if (indev == nullptr) {
+        return;
+    }
+
+    lv_point_t point{};
+    lv_indev_get_point(indev, &point);
+
+    if (code == LV_EVENT_PRESSED) {
+        s_ui.brightness_drag_start_x = point.x;
+        s_ui.brightness_drag_start_val =
+            s_ui.brightness_slider != nullptr
+                ? static_cast<int>(lv_slider_get_value(s_ui.brightness_slider))
+                : ReadInitialBrightness();
+        return;
+    }
+
+    if (code != LV_EVENT_PRESSING && code != LV_EVENT_RELEASED) {
+        return;
+    }
+
+    const int card_w = kRoundLayout ? (kPanelW - kTabPadHor * 2) : (kPanelW - kTabPadHor * 2);
+    const int span = card_w > 0 ? card_w : 280;
+    const int delta = ((point.x - s_ui.brightness_drag_start_x) * 100) / span;
+    SetBrightnessFromUi(s_ui.brightness_drag_start_val + delta);
 }
 
 void ApplyVolume(int volume) {
@@ -325,14 +438,24 @@ void BuildBrightnessTab(lv_obj_t* tab, int initial_brightness) {
     char range_buf[24];
     std::snprintf(range_buf, sizeof(range_buf), "%d%% ~ 100%%",
                   static_cast<int>(kBacklightMinPercent));
-    BuildSliderPanel(tab, I18n::T("拖动调节"), I18n::T("当前亮度"), range_buf,
+    BuildSliderPanel(tab, I18n::T("左右滑动调节"), I18n::T("当前亮度"), range_buf,
                      initial_brightness, &s_ui.brightness_pct_label,
                      &s_ui.brightness_slider,
                      static_cast<int>(kBacklightMinPercent), 100,
                      OnBrightnessSliderChanged, kSliderCardH);
 
+    lv_obj_t* card = lv_obj_get_child(tab, 0);
+    if (card != nullptr) {
+        lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(card, OnBrightnessCardDrag, LV_EVENT_PRESSED, nullptr);
+        lv_obj_add_event_cb(card, OnBrightnessCardDrag, LV_EVENT_PRESSING, nullptr);
+        lv_obj_add_event_cb(card, OnBrightnessCardDrag, LV_EVENT_RELEASED, nullptr);
+        screen_swipe_back_ignore(card, true);
+    }
+
     lv_obj_t* foot = lv_label_create(tab);
-    lv_label_set_text(foot, I18n::T(kRoundLayout ? "自动保存" : "亮度设置会自动保存"));
+    lv_label_set_text(foot, I18n::T(kRoundLayout ? "左右滑动或拖动滑条，自动保存"
+                                                 : "可在数值区左右滑动或拖动滑条，自动保存"));
     lv_obj_set_style_text_color(foot, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(foot, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_align(foot, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
@@ -542,14 +665,288 @@ void BuildLanguageTab(lv_obj_t* tab) {
     lv_obj_set_width(foot, LV_PCT(100));
 }
 
+void StyleSettingsSwitch(lv_obj_t* sw) {
+    lv_obj_set_size(sw, kRoundLayout ? 40 : 52, kRoundLayout ? 22 : 28);
+    lv_obj_set_style_bg_color(sw, lv_color_hex(kColorAccent), LV_PART_INDICATOR);
+    screen_swipe_back_ignore(sw, true);
+}
+
+lv_obj_t* CreateInfoRow(lv_obj_t* parent, const char* title, const char* value,
+                        lv_obj_t** value_out = nullptr) {
+    lv_obj_t* card = lv_obj_create(parent);
+    screen_strip_obj_chrome(card);
+    lv_obj_set_width(card, LV_PCT(100));
+    lv_obj_set_height(card, kRoundLayout ? 56 : 72);
+    lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(card, 16, LV_PART_MAIN);
+    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* title_lbl = lv_label_create(card);
+    lv_label_set_text(title_lbl, title);
+    lv_obj_set_style_text_color(title_lbl, lv_color_hex(kColorSubtle), LV_PART_MAIN);
+    lv_obj_set_style_text_font(title_lbl, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, kRoundLayout ? 12 : 16, -10);
+
+    lv_obj_t* val_lbl = lv_label_create(card);
+    lv_label_set_text(val_lbl, value);
+    if (value_out != nullptr) {
+        *value_out = val_lbl;
+    }
+    lv_obj_set_style_text_color(val_lbl, lv_color_hex(kColorText), LV_PART_MAIN);
+    lv_obj_set_style_text_font(val_lbl, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_align(val_lbl, LV_ALIGN_LEFT_MID, kRoundLayout ? 12 : 16, 12);
+    return card;
+}
+
+void RefreshOtaLabels() {
+    if (s_ui.ota_current_label != nullptr) {
+        lv_label_set_text(s_ui.ota_current_label, ReadCurrentFirmwareVersion());
+    }
+    if (s_ui.ota_remote_label != nullptr) {
+        const std::string remote = ReadCachedRemoteVersion();
+        lv_label_set_text(s_ui.ota_remote_label,
+                          remote.empty() ? I18n::T("尚未检查") : remote.c_str());
+    }
+    if (s_ui.ota_status_label != nullptr) {
+        const char* status = I18n::T("已是最新版本");
+        if (ReadCachedHasUpdate()) {
+            status = I18n::T("发现新版本");
+        } else if (ReadCachedRemoteVersion().empty()) {
+            status = I18n::T("点击检查更新");
+        }
+        lv_label_set_text(s_ui.ota_status_label, status);
+    }
+    if (s_ui.ota_upgrade_btn != nullptr) {
+        if (ReadCachedHasUpdate()) {
+            lv_obj_remove_state(s_ui.ota_upgrade_btn, LV_STATE_DISABLED);
+        } else {
+            lv_obj_add_state(s_ui.ota_upgrade_btn, LV_STATE_DISABLED);
+        }
+    }
+}
+
+#ifndef ESP_YUN_SIM
+struct OtaCheckResult {
+    esp_err_t err = ESP_OK;
+    std::string remote_version;
+    bool has_update = false;
+    std::string firmware_url;
+};
+
+void OnOtaCheckDone(void* user_data) {
+    std::unique_ptr<OtaCheckResult> result(static_cast<OtaCheckResult*>(user_data));
+    s_ui.ota_checking = false;
+    if (s_ui.ota_check_btn != nullptr) {
+        lv_obj_remove_state(s_ui.ota_check_btn, LV_STATE_DISABLED);
+    }
+    if (result == nullptr) {
+        return;
+    }
+
+    if (result->err != ESP_OK) {
+        ESP_LOGW(TAG, "ota check failed: 0x%x", result->err);
+        if (s_ui.ota_status_label != nullptr) {
+            lv_label_set_text(s_ui.ota_status_label, I18n::T("检查失败，请稍后重试"));
+        }
+        return;
+    }
+
+    ESP_LOGI(TAG, "ota check done: remote=%s has_update=%d",
+             result->remote_version.c_str(), result->has_update ? 1 : 0);
+    SaveOtaCheckCache(result->remote_version, result->has_update,
+                      result->firmware_url);
+    RefreshOtaLabels();
+}
+
+void StartOtaVersionCheck() {
+    if (s_ui.ota_checking) {
+        return;
+    }
+    if (WifiRequired_ShouldBlock()) {
+        WifiRequired_ShowDialog("请先连接 WiFi 后再检查更新");
+        return;
+    }
+
+    s_ui.ota_checking = true;
+    if (s_ui.ota_check_btn != nullptr) {
+        lv_obj_add_state(s_ui.ota_check_btn, LV_STATE_DISABLED);
+    }
+    if (s_ui.ota_status_label != nullptr) {
+        lv_label_set_text(s_ui.ota_status_label, I18n::T("正在检查更新..."));
+    }
+    ESP_LOGI(TAG, "start ota version check");
+
+    Application::GetInstance().Schedule([]() {
+        Ota ota;
+        auto result = std::make_unique<OtaCheckResult>();
+        result->err = ota.CheckVersion(/*pause_lvgl=*/false);
+        if (result->err == ESP_OK) {
+            result->remote_version = ota.GetFirmwareVersion();
+            result->has_update = ota.HasNewVersion();
+            result->firmware_url = ota.GetFirmwareUrl();
+        }
+        lv_async_call(OnOtaCheckDone, result.release());
+    });
+}
+
+void OtaUpgradeTask() {
+    Ota ota;
+    if (ota.CheckVersion(/*pause_lvgl=*/false) != ESP_OK || !ota.HasNewVersion()) {
+        lv_async_call(
+            [](void* /*user_data*/) {
+                if (s_ui.ota_status_label != nullptr) {
+                    lv_label_set_text(s_ui.ota_status_label,
+                                      I18n::T("暂无可升级版本"));
+                }
+                if (s_ui.ota_upgrade_btn != nullptr) {
+                    lv_obj_add_state(s_ui.ota_upgrade_btn, LV_STATE_DISABLED);
+                }
+            },
+            nullptr);
+        return;
+    }
+    Application::GetInstance().UpgradeFirmware(ota);
+}
+
+void OnOtaCheckClicked(lv_event_t* /*e*/) { StartOtaVersionCheck(); }
+
+void OnOtaUpgradeClicked(lv_event_t* /*e*/) {
+    if (!ReadCachedHasUpdate()) {
+        return;
+    }
+    if (WifiRequired_ShouldBlock()) {
+        WifiRequired_ShowDialog("请先连接 WiFi 后再升级");
+        return;
+    }
+    if (s_ui.ota_status_label != nullptr) {
+        lv_label_set_text(s_ui.ota_status_label, I18n::T("准备升级..."));
+    }
+    Application::GetInstance().Schedule([]() { OtaUpgradeTask(); });
+}
+#endif
+
+void OnAutoOtaSwitchChanged(lv_event_t* e) {
+    lv_obj_t* sw = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    SaveAutoOtaEnabled(lv_obj_has_state(sw, LV_STATE_CHECKED));
+}
+
+void BuildOtaTab(lv_obj_t* tab) {
+    s_ui.ota_tab = tab;
+    s_ui.ota_current_label = nullptr;
+    s_ui.ota_remote_label = nullptr;
+    s_ui.ota_status_label = nullptr;
+    s_ui.ota_auto_switch = nullptr;
+    s_ui.ota_check_btn = nullptr;
+    s_ui.ota_upgrade_btn = nullptr;
+
+    lv_obj_set_style_pad_hor(tab, kTabPadHor, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(tab, kTabPadTop, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(tab, kTabPadBottom, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(tab, kRoundLayout ? 8 : 12, LV_PART_MAIN);
+    lv_obj_set_flex_flow(tab, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(tab, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_add_flag(tab, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* auto_card = lv_obj_create(tab);
+    screen_strip_obj_chrome(auto_card);
+    lv_obj_set_width(auto_card, LV_PCT(100));
+    lv_obj_set_height(auto_card, kRoundLayout ? 56 : 72);
+    lv_obj_set_style_bg_color(auto_card, lv_color_hex(kColorCard), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(auto_card, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(auto_card, 16, LV_PART_MAIN);
+    lv_obj_remove_flag(auto_card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* auto_title = lv_label_create(auto_card);
+    lv_label_set_text(auto_title, I18n::T("自动 OTA 升级"));
+    lv_obj_set_style_text_color(auto_title, lv_color_hex(kColorText), LV_PART_MAIN);
+    lv_obj_set_style_text_font(auto_title, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_align(auto_title, LV_ALIGN_LEFT_MID, kRoundLayout ? 12 : 16, 0);
+
+    lv_obj_t* sw = lv_switch_create(auto_card);
+    s_ui.ota_auto_switch = sw;
+    StyleSettingsSwitch(sw);
+    lv_obj_align(sw, LV_ALIGN_RIGHT_MID, -12, 0);
+    if (ReadAutoOtaEnabled()) {
+        lv_obj_add_state(sw, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(sw, OnAutoOtaSwitchChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    CreateInfoRow(tab, I18n::T("当前版本"), ReadCurrentFirmwareVersion(),
+                  &s_ui.ota_current_label);
+    CreateInfoRow(tab, I18n::T("最新版本"),
+                  ReadCachedRemoteVersion().empty()
+                      ? I18n::T("尚未检查")
+                      : ReadCachedRemoteVersion().c_str(),
+                  &s_ui.ota_remote_label);
+
+    lv_obj_t* status_card = lv_obj_create(tab);
+    screen_strip_obj_chrome(status_card);
+    lv_obj_set_width(status_card, LV_PCT(100));
+    lv_obj_set_height(status_card, kRoundLayout ? 44 : 56);
+    lv_obj_set_style_bg_opa(status_card, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_remove_flag(status_card, LV_OBJ_FLAG_SCROLLABLE);
+    s_ui.ota_status_label = lv_label_create(status_card);
+    lv_label_set_text(s_ui.ota_status_label, I18n::T("点击检查更新"));
+    lv_obj_set_style_text_color(s_ui.ota_status_label, lv_color_hex(kColorValue),
+                                LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_ui.ota_status_label, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_align(s_ui.ota_status_label, LV_TEXT_ALIGN_CENTER,
+                                LV_PART_MAIN);
+    lv_obj_set_width(s_ui.ota_status_label, LV_PCT(100));
+
+    auto make_btn = [&](const char* text, lv_event_cb_t cb, bool primary) {
+        lv_obj_t* btn = lv_button_create(tab);
+        lv_obj_set_width(btn, LV_PCT(100));
+        lv_obj_set_height(btn, kRoundLayout ? 44 : 56);
+        lv_obj_set_style_radius(btn, 14, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(
+            btn, lv_color_hex(primary ? kColorAccent : kColorCard), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+        screen_swipe_back_ignore(btn, true);
+
+        lv_obj_t* lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, text);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(kColorText), LV_PART_MAIN);
+        lv_obj_set_style_text_font(lbl, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_center(lbl);
+        return btn;
+    };
+
+#ifndef ESP_YUN_SIM
+    s_ui.ota_check_btn = make_btn(I18n::T("检查更新"), OnOtaCheckClicked, false);
+    s_ui.ota_upgrade_btn = make_btn(I18n::T("立即升级"), OnOtaUpgradeClicked, true);
+#else
+    s_ui.ota_check_btn =
+        make_btn(I18n::T("检查更新"), static_cast<lv_event_cb_t>(nullptr), false);
+    s_ui.ota_upgrade_btn =
+        make_btn(I18n::T("立即升级"), static_cast<lv_event_cb_t>(nullptr), true);
+    lv_obj_add_state(s_ui.ota_check_btn, LV_STATE_DISABLED);
+#endif
+    RefreshOtaLabels();
+
+    lv_obj_t* foot = lv_label_create(tab);
+    lv_label_set_text(foot, I18n::T("关闭自动升级后，启动时仅检查版本不自动安装"));
+    lv_obj_set_style_text_color(foot, lv_color_hex(kColorSubtle), LV_PART_MAIN);
+    lv_obj_set_style_text_font(foot, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_align(foot, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(foot, LV_PCT(100));
+    lv_label_set_long_mode(foot, LV_LABEL_LONG_WRAP);
+}
+
 void FixTabBarItemHeights(lv_obj_t* tabview) {
     lv_obj_t* bar = lv_tabview_get_tab_bar(tabview);
     if constexpr (kRoundLayout) {
-        // 顶部横向 Tab：均分宽度，避免左侧栏挤占内容区。
-        lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER,
+        // 顶部 Tab 可横向滑动，Tab 多时也不挤。
+        lv_obj_add_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scroll_dir(bar, LV_DIR_HOR);
+        lv_obj_set_scrollbar_mode(bar, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
         lv_obj_set_style_pad_column(bar, kTabItemGap, LV_PART_MAIN);
-        lv_obj_set_style_pad_hor(bar, 28, LV_PART_MAIN);
+        lv_obj_set_style_pad_hor(bar, 16, LV_PART_MAIN);
         lv_obj_set_style_pad_ver(bar, 2, LV_PART_MAIN);
     } else {
         lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
@@ -566,7 +963,8 @@ void FixTabBarItemHeights(lv_obj_t* tabview) {
             continue;
         }
         if constexpr (kRoundLayout) {
-            lv_obj_set_flex_grow(btn, 1);
+            lv_obj_set_flex_grow(btn, 0);
+            lv_obj_set_width(btn, kTabBtnMinW);
             lv_obj_set_height(btn, kTabItemH);
         } else {
             lv_obj_set_flex_grow(btn, 0);
@@ -780,9 +1178,14 @@ void BuildTabView(lv_obj_t* parent) {
 
     lv_obj_t* content = lv_tabview_get_content(tv);
     // 方屏：内容区忽略右滑，避免横滑切 Tab 误退出。
-    // 圆屏：无返回箭头，允许内容区右滑回桌面。
+    // 圆屏：无返回箭头，允许内容区左右滑动切换 Tab。
     if constexpr (!kRoundLayout) {
         screen_swipe_back_ignore(content, true);
+    } else {
+        lv_obj_add_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scroll_dir(content, LV_DIR_HOR);
+        lv_obj_set_scroll_snap_x(content, LV_SCROLL_SNAP_CENTER);
+        lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_OFF);
     }
 
     lv_obj_t* tab_brightness = lv_tabview_add_tab(tv, I18n::T("亮度"));
@@ -796,6 +1199,9 @@ void BuildTabView(lv_obj_t* parent) {
 
     lv_obj_t* tab_language = lv_tabview_add_tab(tv, I18n::T("语言"));
     BuildLanguageTab(tab_language);
+
+    lv_obj_t* tab_ota = lv_tabview_add_tab(tv, I18n::T("升级"));
+    BuildOtaTab(tab_ota);
 
     // 老设备无 CX25601N（0x6B）时不显示充电 Tab
     if (cx25601n_is_ready()) {
@@ -839,6 +1245,14 @@ void OnScreenUnloaded(lv_event_t* /*e*/) {
     s_ui.enter_standby_min_label = nullptr;
     s_ui.enter_standby_slider = nullptr;
     s_ui.charge_tab = nullptr;
+    s_ui.ota_tab = nullptr;
+    s_ui.ota_current_label = nullptr;
+    s_ui.ota_remote_label = nullptr;
+    s_ui.ota_status_label = nullptr;
+    s_ui.ota_auto_switch = nullptr;
+    s_ui.ota_check_btn = nullptr;
+    s_ui.ota_upgrade_btn = nullptr;
+    s_ui.ota_checking = false;
 }
 
 }  // namespace

@@ -16,10 +16,8 @@
 //     SsidManager::AddSsid 保存到 NVS。
 //   - 已保存 WiFi 列表（来自 SsidManager::GetSsidList）支持「置为默认」、
 //     「删除」、「清空」操作。
-//   - 「网络切换」Tab：开关在 WiFi / 4G 间切换，提示重启后调用
-//     DualNetworkBoard::SwitchNetworkType()。
 //   - 当设备处于 4G 模式时，「附近 WiFi」「已保存 WiFi」两个 Tab 会被隐藏，
-//     只保留「网络切换」Tab；切换回 WiFi 模式后两个 Tab 重新出现。
+//     改为显示「SIM 卡切换」或「蜂窝信息」。
 //   - 滑动右滑返回时（或离开屏幕时）销毁本地 STA 栈，并重启 WifiStation
 //     让设备恢复原来的网络管理逻辑。
 // ---------------------------------------------------------------------------

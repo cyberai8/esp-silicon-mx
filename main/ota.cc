@@ -29,10 +29,10 @@ namespace {
 
 class LvglPauseGuard {
 public:
-    // force=true：固件写入等必须停 LVGL 的场景。
-    // VoCat 版本检查默认不 pause，否则开机动画会卡死约 1~2 秒。
-    explicit LvglPauseGuard(bool force = false) {
-        if (OtaScreen::IsActive()) {
+    // enable=false：前台 UI 检查，不停 LVGL。
+    // force=true：固件写入必须停 LVGL（含 VoCat）。
+    explicit LvglPauseGuard(bool enable = true, bool force = false) {
+        if (!enable || OtaScreen::IsActive()) {
             return;
         }
 #if CONFIG_BOARD_TYPE_ESP_VOCAT
@@ -109,8 +109,8 @@ std::unique_ptr<Http> Ota::SetupHttp() {
 /* 
  * Specification: https://ccnphfhqs21z.feishu.cn/wiki/FjW6wZmisimNBBkov6OcmfvknVd
  */
-esp_err_t Ota::CheckVersion() {
-    LvglPauseGuard lvgl_pause;
+esp_err_t Ota::CheckVersion(bool pause_lvgl) {
+    LvglPauseGuard lvgl_pause(pause_lvgl);
     auto& board = Board::GetInstance();
     auto app_desc = esp_app_get_description();
 
@@ -308,7 +308,7 @@ void Ota::MarkCurrentVersionValid() {
 }
 
 bool Ota::Upgrade(const std::string& firmware_url) {
-    LvglPauseGuard lvgl_pause(/*force=*/true);
+    LvglPauseGuard lvgl_pause(/*enable=*/true, /*force=*/true);
     ESP_LOGI(TAG, "Upgrading firmware from %s", firmware_url.c_str());
     esp_ota_handle_t update_handle = 0;
     auto update_partition = esp_ota_get_next_update_partition(NULL);

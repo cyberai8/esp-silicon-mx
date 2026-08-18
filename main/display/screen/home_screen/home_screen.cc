@@ -29,7 +29,7 @@
 #define BOARD_HAS_DUAL_SIM 0
 #endif
 
-#if defined(BOARD_ESP_VOCAT)
+#if CONFIG_BOARD_TYPE_ESP_VOCAT
 extern "C" void board_release_power_hold_if_supported();
 #endif
 #include "settings.h"
@@ -954,6 +954,7 @@ struct HomeTouchSession {
     bool active = false;
     bool consumed = false;
     bool paging = false;
+    bool page_flipped = false;  // 同一次触摸最多翻一页，避免长滑连跳
 HomeGestureAxis axis = HomeGestureAxis::None;
     int16_t start_x = 0;
     int16_t start_y = 0;
@@ -2077,6 +2078,10 @@ void CloverGoToPage(PagerState* state, int target_page) {
     const int step = delta > 0 ? 1 : -1;
 
     if (state->clover_busy) {
+        // 同一次滑动手势内不排队连翻，避免一次滑动跳多页。
+        if (s_home_touch.active && s_home_touch.page_flipped) {
+            return;
+        }
         state->clover_queued_step = step;
         ResetHomeIdleTimer();
         return;
@@ -2365,9 +2370,15 @@ void OnHomePressed(lv_event_t* e) {
     lv_obj_t* screen = lv_event_get_current_target_obj(e);
     lv_obj_t* cell = FindAppCellFromTarget(lv_event_get_target_obj(e), screen);
 
+    auto* state = static_cast<PagerState*>(lv_event_get_user_data(e));
+    if (state != nullptr && state->clover) {
+        state->clover_queued_step = 0;
+    }
+
     s_home_touch.active = true;
     s_home_touch.consumed = false;
     s_home_touch.paging = false;
+    s_home_touch.page_flipped = false;
     s_home_touch.axis = HomeGestureAxis::None;
     s_home_touch.start_x = static_cast<int16_t>(p.x);
     s_home_touch.start_y = static_cast<int16_t>(p.y);
@@ -2404,17 +2415,18 @@ void OnHomePressing(lv_event_t* e) {
         return;
     }
 
-    // 圆屏四叶瓣不跟手拖页（两页图标会叠在同一张底图上），但也不必等松手：
-    // 横移够 kCloverSwipeTriggerPx 就立刻翻，手上有即时反馈才不显得"迟钝"。
-    // last_x 当锚点，一次长拖可以连翻多页。
+    // 圆屏四叶瓣不跟手拖页：横移够阈值就立刻翻一页；同一次触摸不再连翻。
     if (state != nullptr && state->clover) {
-        const int anchor_dx = p.x - s_home_touch.last_x;
-        if (std::abs(anchor_dx) >= kCloverSwipeTriggerPx) {
-            s_home_touch.consumed = true;
-            s_home_touch.paging = true;  // 让 RELEASED 不再重复触发
-            s_home_touch.last_x = static_cast<int16_t>(p.x);
-            HomeTouchHandleSwipe(state, anchor_dx < 0 ? HomeTouchKind::SwipeLeft
-                                                     : HomeTouchKind::SwipeRight);
+        if (!s_home_touch.page_flipped && !state->clover_busy) {
+            const int anchor_dx = p.x - s_home_touch.last_x;
+            if (std::abs(anchor_dx) >= kCloverSwipeTriggerPx) {
+                s_home_touch.consumed = true;
+                s_home_touch.paging = true;
+                s_home_touch.page_flipped = true;
+                s_home_touch.last_x = static_cast<int16_t>(p.x);
+                HomeTouchHandleSwipe(state, anchor_dx < 0 ? HomeTouchKind::SwipeLeft
+                                                         : HomeTouchKind::SwipeRight);
+            }
         }
         return;
     }
@@ -2469,7 +2481,9 @@ void OnHomeReleased(lv_event_t* e) {
             HomeTouchDispatchTapLike(kind);
         } else {
             const HomeTouchKind kind = HomeTouchClassifySwipe(dx, dy);
-            if (state != nullptr && kind != HomeTouchKind::None) {
+            if (state != nullptr && kind != HomeTouchKind::None &&
+                !s_home_touch.page_flipped) {
+                s_home_touch.page_flipped = true;
                 HomeTouchHandleSwipe(state, kind);
             }
         }
@@ -2478,6 +2492,7 @@ void OnHomeReleased(lv_event_t* e) {
     s_home_touch.active = false;
     s_home_touch.consumed = false;
     s_home_touch.paging = false;
+    s_home_touch.page_flipped = false;
     s_home_touch.axis = HomeGestureAxis::None;
     s_home_touch.press_cell = nullptr;
     s_home_touch.app = nullptr;
@@ -2684,9 +2699,14 @@ void ShowShutdownScreen(ShutdownScreenMode mode, const char* reason) {
 
 // 关机脉冲 task：Claw4 用 TCA9555 打 PWR_KEY_PULSE；VoCat 释放 PG2；S31 无硬件断电。
 void PwrShutdownPulseTask(void* /*arg*/) {
-#if defined(BOARD_ESP_VOCAT)
+#if CONFIG_BOARD_TYPE_ESP_VOCAT
     vTaskDelay(pdMS_TO_TICKS(1200));
     board_release_power_hold_if_supported();
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+#elif defined(BOARD_WAVESHARE_S3_TOUCH_LCD_1_85B)
+    ESP_LOGW(TAG_HOME, "Waveshare 1.85B has no software power-off IO");
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -2708,8 +2728,9 @@ void PwrShutdownPulseTask(void* /*arg*/) {
 }
 
 void BeginSystemShutdown(const char* reason) {
-#if defined(CONFIG_IDF_TARGET_ESP32S31) && !defined(BOARD_ESP_VOCAT)
-    ESP_LOGW(TAG_HOME, "S31 has no IOExpander; skip software power-off");
+#if (defined(CONFIG_IDF_TARGET_ESP32S31) && !defined(BOARD_ESP_VOCAT)) || \
+    defined(BOARD_WAVESHARE_S3_TOUCH_LCD_1_85B)
+    ESP_LOGW(TAG_HOME, "board has no IOExpander/software power-off");
     IdlePower_Stop();
     ShowShutdownScreen(ShutdownScreenMode::kUnsupported, reason);
     return;

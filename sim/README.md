@@ -17,6 +17,7 @@
 cd sim
 ./run.sh                      # 编译 + 跑相册的默认场景 + 出截图
 ./run.sh clock                # 换个屏
+./run.sh settings             # 设置页（亮度/待机/音量/语言/充电）
 ./run.sh --list               # 看有哪些屏
 ```
 

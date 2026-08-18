@@ -2,6 +2,10 @@
 // 电源键策略全链进来，仿真里暂时不需要，只要「返回键有地方去」。
 #include "home_screen/home_screen.h"
 
+namespace {
+int s_idle_standby_minutes = 5;
+}  // namespace
+
 lv_obj_t* HomeScreen::Create() {
     lv_obj_t* scr = lv_obj_create(nullptr);
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
@@ -23,6 +27,8 @@ int HomeScreen::GetIdleShutdownMinutes() {
 }
 void HomeScreen::SetIdleShutdownMinutes(int /*minutes*/) {}
 int HomeScreen::GetIdleStandbyMinutes() {
-    return 0;
+    return s_idle_standby_minutes;
 }
-void HomeScreen::SetIdleStandbyMinutes(int /*minutes*/) {}
+void HomeScreen::SetIdleStandbyMinutes(int minutes) {
+    s_idle_standby_minutes = minutes;
+}

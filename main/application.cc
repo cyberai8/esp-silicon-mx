@@ -21,6 +21,7 @@
 #include <ssid_manager.h>
 #include <inttypes.h>
 #include <vector>
+#include <wifi_station.h>
 
 #if CONFIG_ESP_HOSTED_ENABLED
 #include "esp_hosted.h"
@@ -33,6 +34,7 @@
 #include "digital_people_screen/digital_people_screen.h"
 #include "standby_screen/standby_screen.h"
 #include "idle_power_policy.h"
+#include "battery_alert.h"
 #include "lv_adapter_display.h"
 #include "esp_lv_adapter.h"
 #endif
@@ -192,13 +194,16 @@ void Application::CheckNewVersion(Ota& ota) {
     const int MAX_RETRY = 10;
     int retry_count = 0;
     int retry_delay = 10; // 初始重试延迟为10秒
+    const bool ui_ready = (device_state_ == kDeviceStateIdle);
 
     auto& board = Board::GetInstance();
     while (true) {
-        SetDeviceState(kDeviceStateActivating);
-        auto display = board.GetDisplay();
-        if (display != nullptr) {
-            display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
+        if (!ui_ready) {
+            SetDeviceState(kDeviceStateActivating);
+            auto display = board.GetDisplay();
+            if (display != nullptr) {
+                display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
+            }
         }
 
         esp_err_t err = ota.CheckVersion();
@@ -228,8 +233,19 @@ void Application::CheckNewVersion(Ota& ota) {
         retry_count = 0;
         retry_delay = 10; // 重置重试延迟时间
 
+        {
+            Settings ota_settings("display", true);
+            ota_settings.SetString("ota_remote_ver", ota.GetFirmwareVersion());
+            ota_settings.SetInt("ota_has_update", ota.HasNewVersion() ? 1 : 0);
+            if (ota.HasNewVersion()) {
+                ota_settings.SetString("ota_firmware_url", ota.GetFirmwareUrl());
+            }
+        }
+
         if (ota.HasNewVersion()) {
-            if (UpgradeFirmware(ota)) {
+            Settings ota_settings("display", false);
+            const bool auto_ota = ota_settings.GetInt("auto_ota", 1) != 0;
+            if (auto_ota && UpgradeFirmware(ota)) {
                 return; // This line will never be reached after reboot
             }
             // If upgrade failed, continue to normal operation (don't break, just fall through)
@@ -247,12 +263,21 @@ void Application::CheckNewVersion(Ota& ota) {
             vTaskDelay(pdMS_TO_TICKS(500));
         }
 
-        if (display != nullptr) {
-            display->SetStatus(Lang::Strings::ACTIVATION);
+        if (!ui_ready) {
+            auto display = board.GetDisplay();
+            if (display != nullptr) {
+                display->SetStatus(Lang::Strings::ACTIVATION);
+            }
         }
-        // Activation code is shown to the user and waiting for the user to input
         if (ota.HasActivationCode()) {
-            ShowActivationCode(ota.GetActivationCode(), ota.GetActivationMessage());
+            if (ui_ready) {
+                pending_activation_code_ = ota.GetActivationCode();
+#ifdef HAVE_LVGL
+                HomeScreen::RefreshStatusBar();
+#endif
+            } else {
+                ShowActivationCode(ota.GetActivationCode(), ota.GetActivationMessage());
+            }
         }
 
         // This will block the loop until the activation is done or timeout
@@ -277,6 +302,9 @@ void Application::CheckNewVersion(Ota& ota) {
             if (device_state_ == kDeviceStateIdle) {
                 break;
             }
+        }
+        if (ui_ready) {
+            break;
         }
     }
 }
@@ -492,99 +520,13 @@ void Application::StopListening() {
     });
 }
 
-void Application::Start() {
+bool Application::InitializeProtocol(Ota& ota) {
     auto& board = Board::GetInstance();
-    ESP_LOGW(TAG, "Reset reason: %s (%d)", ResetReasonName(esp_reset_reason()),
-             static_cast<int>(esp_reset_reason()));
-    SetDeviceState(kDeviceStateStarting);
-
     Display* display = board.GetDisplay();
-
-#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
-    // VoCat 原先把音频推迟到 MQTT 之后；但无 WiFi 时 StartNetwork→配网会
-    // Alert+PlaySound 并永久阻塞，必须先 Initialize，否则 codec_ 空指针崩溃。
-    // Initialize 不启动 I2S（Start 才开），OTA/联网阶段仍可保持低功耗。
-    audio_service_.Initialize(board.GetAudioCodec());
-#else
-    // Print board name/version info
-    display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
-
-    /* Setup the audio service */
-    auto codec = board.GetAudioCodec();
-    audio_service_.Initialize(codec);
-#endif
-    // VoCat：板级构造时已拉起 BootScreen；AudioService::Start 仍推迟到 MQTT 之后。
-
-    AudioServiceCallbacks callbacks;
-    callbacks.on_send_queue_available = [this]() {
-        xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
-    };
-    callbacks.on_wake_word_detected = [this](const std::string& wake_word) {
-        xEventGroupSetBits(event_group_, MAIN_EVENT_WAKE_WORD_DETECTED);
-    };
-    callbacks.on_vad_change = [this](bool speaking) {
-        xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
-    };
-    audio_service_.SetCallbacks(callbacks);
-
-    // ESP_LOGI(TAG, "---测试OTA地址---");
-    // std::string test_ota_url = "http://192.168.8.140:8080/xiaozhi/ota/";
-    // Settings settings("wifi", true);
-    // settings.SetString("ota_url", test_ota_url);
-    // ESP_LOGI(TAG, "OTA URL:%s ", test_ota_url.c_str());
-
-    // auto &ssid_manager = SsidManager::GetInstance();
-    // ssid_manager.AddSsid("CloudZao-RJ", "asdfghjkl");
-    // ESP_LOGI(TAG, "---测试OTA地址---");
-
-    // Start the main event loop task with priority 3
-    xTaskCreate([](void* arg) {
-        ((Application*)arg)->MainEventLoop();
-        vTaskDelete(NULL);
-    }, "main_event_loop", 2048 * 4, this, 3, &main_event_loop_task_handle_);
-
-    //直接校验OTA
-    Ota ota;
-    ota.MarkCurrentVersionValid();
-
-    /* Wait for the network to be ready */
-#ifdef HAVE_LVGL
-#if !(CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
-    // VoCat：保持开机动画播放，不要 pause LVGL。
-    if (esp_lv_adapter_is_initialized() && esp_lv_adapter_pause(-1) != ESP_OK) {
-        ESP_LOGW(TAG, "LVGL pause before network/OTA failed");
-    }
-#endif
-    HomeScreen::WarmStatusCaches();
-    IdlePower_WarmSettingsCache();
-#endif
-
-    board.PrepareForNetworkOta();
-    board.StartNetwork();
-
-#if !(CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
-    // Update the status bar immediately to show the network state
-    if (display != nullptr) {
-        display->UpdateStatusBar(true);
-    }
-#endif
-
-    CheckNewVersion(ota);
-
-    board.RestoreAfterNetworkOta();
-
-#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
-    // 开机动画已在板级构造时拉起；这里只取 display，并稍歇再开 MQTT。
-    display = board.GetDisplay();
-    vTaskDelay(pdMS_TO_TICKS(200));
-#endif
-
-    // Initialize the protocol (MQTT/WS)；VoCat 此时继续播开机动画。
-    if (display != nullptr) {
+    if (display != nullptr && device_state_ != kDeviceStateIdle) {
         display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
     }
 
-    // Add MCP common tools before initializing the protocol
     auto& mcp_server = McpServer::GetInstance();
     mcp_server.AddCommonTools();
     mcp_server.AddUserOnlyTools();
@@ -631,7 +573,6 @@ void Application::Start() {
         });
     });
     protocol_->OnIncomingJson([this](const cJSON* root) {
-        // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
@@ -692,7 +633,6 @@ void Application::Start() {
             if (cJSON_IsString(command)) {
                 ESP_LOGI(TAG, "System command: %s", command->valuestring);
                 if (strcmp(command->valuestring, "reboot") == 0) {
-                    // Do a reboot if user requests a OTA update
                     Schedule([this]() {
                         Reboot();
                     });
@@ -727,16 +667,150 @@ void Application::Start() {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         }
     });
-    bool protocol_started = protocol_->Start();
+
+    const bool protocol_started = protocol_->Start();
+    has_server_time_ = ota.HasServerTime();
+    if (protocol_started && display != nullptr) {
+        std::string message = std::string(Lang::Strings::VERSION) + ota.GetCurrentVersion();
+        display->ShowNotification(message.c_str());
+        display->SetChatMessage("system", "");
+    }
+    return protocol_started;
+}
+
+void Application::StartNetworkAndProtocol() {
+    auto& board = Board::GetInstance();
+    ESP_LOGI(TAG, "Background network/OTA/protocol start");
+#if !CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B
+    board.StartNetwork();
+#endif
+
+#if CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B
+    ESP_LOGI(TAG, "Waiting for WiFi in background (UI already on home)");
+    while (!WifiStation::GetInstance().IsConnected()) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    ESP_LOGI(TAG, "WiFi connected, continue OTA/protocol");
+#endif
+
+    Ota ota;
+    CheckNewVersion(ota);
+    InitializeProtocol(ota);
+    ESP_LOGI(TAG, "Background network/OTA/protocol done");
+}
+
+void Application::Start() {
+    auto& board = Board::GetInstance();
+    ESP_LOGW(TAG, "Reset reason: %s (%d)", ResetReasonName(esp_reset_reason()),
+             static_cast<int>(esp_reset_reason()));
+    SetDeviceState(kDeviceStateStarting);
+
+    Display* display = board.GetDisplay();
 
 #if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+    // VoCat 原先把音频推迟到 MQTT 之后；但无 WiFi 时 StartNetwork→配网会
+    // Alert+PlaySound 并永久阻塞，必须先 Initialize，否则 codec_ 空指针崩溃。
+    // Initialize 不启动 I2S（Start 才开），OTA/联网阶段仍可保持低功耗。
+    audio_service_.Initialize(board.GetAudioCodec());
+#else
+    // Print board name/version info
+    display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
+
+    /* Setup the audio service */
+    auto codec = board.GetAudioCodec();
+    audio_service_.Initialize(codec);
+#endif
+    // VoCat：板级构造时已拉起 BootScreen；AudioService::Start 仍推迟到 MQTT 之后。
+
+    AudioServiceCallbacks callbacks;
+    callbacks.on_send_queue_available = [this]() {
+        xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
+    };
+    callbacks.on_wake_word_detected = [this](const std::string& wake_word) {
+        xEventGroupSetBits(event_group_, MAIN_EVENT_WAKE_WORD_DETECTED);
+    };
+    callbacks.on_vad_change = [this](bool speaking) {
+        xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
+    };
+    audio_service_.SetCallbacks(callbacks);
+
+    // ESP_LOGI(TAG, "---测试OTA地址---");
+    // std::string test_ota_url = "http://192.168.8.140:8080/xiaozhi/ota/";
+    // Settings settings("wifi", true);
+    // settings.SetString("ota_url", test_ota_url);
+    // ESP_LOGI(TAG, "OTA URL:%s ", test_ota_url.c_str());
+
+    // auto &ssid_manager = SsidManager::GetInstance();
+    // ssid_manager.AddSsid("CloudZao-RJ", "asdfghjkl");
+    // ESP_LOGI(TAG, "---测试OTA地址---");
+
+    // Start the main event loop task with priority 3
+    xTaskCreate([](void* arg) {
+        ((Application*)arg)->MainEventLoop();
+        vTaskDelete(NULL);
+    }, "main_event_loop", 2048 * 4, this, 3, &main_event_loop_task_handle_);
+
+    //直接校验OTA
+    Ota ota;
+    ota.MarkCurrentVersionValid();
+
+#if CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B
+    // WiFi RX 缓冲必须走内部 DMA 内存，要在主屏/AFE 之前申请。
+    board.StartNetwork();
+#endif
+
+    /* Wait for the network to be ready */
+#ifdef HAVE_LVGL
+#if !(CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+    // VoCat：保持开机动画播放，不要 pause LVGL。
+    if (esp_lv_adapter_is_initialized() && esp_lv_adapter_pause(-1) != ESP_OK) {
+        ESP_LOGW(TAG, "LVGL pause before network/OTA failed");
+    }
+#endif
+    HomeScreen::WarmStatusCaches();
+    IdlePower_WarmSettingsCache();
+    BatteryAlert_Start();
+#endif
+
+#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+    // 开机动画结束后立刻进菜单；OTA/MQTT 在后台。WiFi STA 已在上面拉起。
     display = board.GetDisplay();
     if (display == nullptr) {
         board.EnsureUiInitialized();
         display = board.GetDisplay();
     }
-    audio_service_.Initialize(board.GetAudioCodec());
+    board.RestoreAfterNetworkOta();
+    audio_service_.Start();
+#if CONFIG_USE_AFE_WAKE_WORD || CONFIG_USE_CUSTOM_WAKE_WORD || CONFIG_USE_ESP_WAKE_WORD
+    GetAudioService().SetModelsList(esp_srmodel_init("model"));
+    GetAudioService().EnableWakeWordDetection(false);
 #endif
+#ifdef HAVE_LVGL
+    if (auto* lv_display = dynamic_cast<LVAdapterDisplay*>(display)) {
+        lv_display->WaitForBootAnimation();
+        lv_display->ShowHomeScreen();
+    }
+#endif
+    esp_timer_start_periodic(clock_timer_handle_, 1000000);
+    SystemInfo::PrintHeapStats();
+    SetDeviceState(kDeviceStateIdle);
+
+    xTaskCreate([](void* arg) {
+        static_cast<Application*>(arg)->StartNetworkAndProtocol();
+        vTaskDelete(NULL);
+    }, "net_boot", 4096 * 4, this, 3, &check_new_version_task_handle_);
+#else
+    board.PrepareForNetworkOta();
+    board.StartNetwork();
+
+    if (display != nullptr) {
+        display->UpdateStatusBar(true);
+    }
+
+    CheckNewVersion(ota);
+    board.RestoreAfterNetworkOta();
+    InitializeProtocol(ota);
+
     audio_service_.Start();
 #if CONFIG_USE_AFE_WAKE_WORD || CONFIG_USE_CUSTOM_WAKE_WORD || CONFIG_USE_ESP_WAKE_WORD
     GetAudioService().SetModelsList(esp_srmodel_init("model"));
@@ -744,42 +818,19 @@ void Application::Start() {
 #endif
 
 #ifdef HAVE_LVGL
-#if !(CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
     if (auto* backlight = board.GetBacklight()) {
         backlight->RestoreBrightness();
     }
-#endif
-#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
-    // 开机动画播完后再进四叶瓣菜单；联网/OTA/MQTT 期间继续播动画。
-    if (auto* lv_display = dynamic_cast<LVAdapterDisplay*>(display)) {
-        lv_display->WaitForBootAnimation();
-        lv_display->ShowHomeScreen();
-    }
-#else
     if (auto* lv_display = dynamic_cast<LVAdapterDisplay*>(display)) {
         lv_display->ShowHomeScreen();
     }
-#endif
 #endif
 
     esp_timer_start_periodic(clock_timer_handle_, 1000000);
-
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
-#if !(CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
-    // Home/chat launcher owns wake-word lifecycle (enabled when entering chat).
-    // Classic LcdDisplay boards (e.g. ESP-VoCat) keep wake word on in idle.
     audio_service_.EnableWakeWordDetection(false);
 #endif
-
-    has_server_time_ = ota.HasServerTime();
-    if (protocol_started && display != nullptr) {
-        std::string message = std::string(Lang::Strings::VERSION) + ota.GetCurrentVersion();
-        display->ShowNotification(message.c_str());
-        display->SetChatMessage("system", "");
-        // Play the success sound to indicate the device is ready
-        // audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
-    }
 }
 
 // Add a async task to MainLoop

@@ -740,12 +740,13 @@ void SyncEditRepeatUi() {
             if (on) {
                 lv_obj_set_style_bg_color(b, lv_color_hex(kAccent), LV_PART_MAIN);
                 lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN);
+                lv_obj_set_style_border_width(b, 0, LV_PART_MAIN);
                 if (l) lv_obj_set_style_text_color(l, lv_color_hex(kBg), LV_PART_MAIN);
             } else {
                 lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, LV_PART_MAIN);
                 lv_obj_set_style_border_width(b, 1, LV_PART_MAIN);
                 lv_obj_set_style_border_color(b, lv_color_hex(kAccent), LV_PART_MAIN);
-                if (l) lv_obj_set_style_text_color(l, lv_color_hex(kMuted), LV_PART_MAIN);
+                if (l) lv_obj_set_style_text_color(l, lv_color_hex(kAccent), LV_PART_MAIN);
             }
         };
         paint(s_edit_once_btn, s_edit_once);
@@ -821,25 +822,25 @@ void ShowAlarmEdit(int index) {
     lv_obj_set_size(s_edit_min, roller_w, roller_h);
     lv_obj_align(s_edit_min, LV_ALIGN_TOP_MID, kRound ? 48 : 70, kRound ? 70 : 90);
 
-    // 单次 / 重复
+    // 单次 / 重复：两个独立胶囊，不要外套一层描边（会双边框、挤在一起）。
     lv_obj_t* seg = lv_obj_create(ov);
     screen_strip_obj_chrome(seg);
-    lv_obj_set_size(seg, kRound ? 200 : 320, kRound ? 36 : 48);
+    const int seg_h = kRound ? 36 : 48;
+    lv_obj_set_size(seg, kRound ? 220 : 340, seg_h);
     lv_obj_align(seg, LV_ALIGN_TOP_MID, 0, kRound ? 178 : 270);
-    lv_obj_set_style_radius(seg, 20, LV_PART_MAIN);
-    lv_obj_set_style_border_width(seg, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(seg, lv_color_hex(kAccent), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(seg, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_flex_flow(seg, LV_FLEX_FLOW_ROW);
-    lv_obj_set_style_pad_all(seg, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(seg, kRound ? 16 : 20, LV_PART_MAIN);
     lv_obj_set_flex_align(seg, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
 
     auto make_seg = [&](const char* txt, bool once_side) {
         lv_obj_t* b = lv_btn_create(seg);
-        lv_obj_set_size(b, kRound ? 96 : 150, kRound ? 30 : 40);
-        lv_obj_set_style_radius(b, 16, LV_PART_MAIN);
+        lv_obj_set_size(b, kRound ? 90 : 148, seg_h);
+        lv_obj_set_style_radius(b, seg_h / 2, LV_PART_MAIN);
         lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
+        lv_obj_set_style_border_width(b, 1, LV_PART_MAIN);
+        lv_obj_set_style_border_color(b, lv_color_hex(kAccent), LV_PART_MAIN);
         lv_obj_t* l = lv_label_create(b);
         lv_label_set_text(l, I18n::T(txt));
         lv_obj_set_style_text_font(l, FontSmall(), LV_PART_MAIN);
@@ -1295,10 +1296,18 @@ void BuildCountdownPage(lv_obj_t* parent) {
                             reinterpret_cast<void*>(static_cast<intptr_t>(p.sec)));
     }
 
+    // 快捷预设下沿约 176。两个主按钮都用 TOP_MID，中间留 12px，
+    // 避免自定义底边和开始顶边叠在一起（原先一个 TOP、一个 CENTER）。
+    const int btn_w = kRound ? 140 : 200;
+    const int custom_h = kRound ? 36 : 44;
+    const int start_h = kRound ? 40 : 56;
+    const int custom_y = kRound ? 188 : 300;
+    const int start_y = custom_y + custom_h + 12;
+
     lv_obj_t* custom = lv_btn_create(s_page_cd);
-    lv_obj_set_size(custom, kRound ? 120 : 180, kRound ? 30 : 40);
-    lv_obj_align(custom, LV_ALIGN_TOP_MID, 0, kRound ? 184 : 290);
-    lv_obj_set_style_radius(custom, 14, LV_PART_MAIN);
+    lv_obj_set_size(custom, btn_w, custom_h);
+    lv_obj_align(custom, LV_ALIGN_TOP_MID, 0, custom_y);
+    lv_obj_set_style_radius(custom, custom_h / 2, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(custom, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(custom, 1, LV_PART_MAIN);
     lv_obj_set_style_border_color(custom, lv_color_hex(kAccent), LV_PART_MAIN);
@@ -1312,9 +1321,9 @@ void BuildCountdownPage(lv_obj_t* parent) {
                         LV_EVENT_CLICKED, nullptr);
 
     s_cd_start_btn = lv_btn_create(s_page_cd);
-    lv_obj_set_size(s_cd_start_btn, kRound ? 160 : 240, kRound ? 40 : 56);
-    lv_obj_align(s_cd_start_btn, LV_ALIGN_CENTER, 0, kRound ? 50 : 70);
-    lv_obj_set_style_radius(s_cd_start_btn, 22, LV_PART_MAIN);
+    lv_obj_set_size(s_cd_start_btn, btn_w, start_h);
+    lv_obj_align(s_cd_start_btn, LV_ALIGN_TOP_MID, 0, start_y);
+    lv_obj_set_style_radius(s_cd_start_btn, start_h / 2, LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_cd_start_btn, lv_color_hex(kAccent), LV_PART_MAIN);
     lv_obj_set_style_border_width(s_cd_start_btn, 0, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(s_cd_start_btn, 0, LV_PART_MAIN);
