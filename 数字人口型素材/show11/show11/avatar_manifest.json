@@ -1,0 +1,25 @@
+{
+  "version": "avatar-layers-v5.1-2026-08",
+  "canvas": "360x360",
+  "upper_face_canvas": "220x105",
+  "mouth_canvas": "160x100",
+  "emotion_mouth_canvas": "160x100",
+  "install": {
+    "upper_face": [70, 105],
+    "mouth": [100, 210],
+    "emotion_mouth": [100, 210],
+    "overlay_blush": [70, 184],
+    "overlay_tear": [224, 179],
+    "overlay_sweat": [269, 92],
+    "overlay_question": [273, 63],
+    "overlay_sparkle": [267, 139],
+    "overlay_heart": [270, 125]
+  },
+  "layers": ["base", "upper_face", "mouth", "overlay"],
+  "draw_order": "base -> upper_face -> mouth -> overlay",
+  "face_states": [
+    "neutral", "happy", "sad", "angry", "surprised", "sleepy", "thinking", "focused", "playful",
+    "shy", "crying", "silly", "loving", "cool"
+  ],
+  "note": "V5: upper_face 220x105 ends at Y=209; opaque mouth tiles 160x100 begin at Y=210; only overlays use alpha. V5.1 adds shy/crying/silly/loving/cool with identical geometry. V5.2 adds 8 transition_* mid-mouth frames for large-span viseme edges."
+}
