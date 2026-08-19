@@ -290,12 +290,13 @@ void Application::CheckNewVersion(Ota& ota, bool pause_lvgl) {
                 vTaskDelay(pdMS_TO_TICKS(500));
             }
             ESP_LOGI(TAG, "Activating... %d/%d", i + 1, 10);
-            esp_err_t err = ota.Activate();
+            esp_err_t err = ota.Activate(pause_lvgl);
             if (err == ESP_OK) {
                 pending_activation_code_.clear();
 #ifdef HAVE_LVGL
                 HomeScreen::RefreshStatusBar();
 #endif
+                ESP_LOGI(TAG, "Device activated");
                 xEventGroupSetBits(event_group_, MAIN_EVENT_CHECK_NEW_VERSION_DONE);
                 break;
             } else if (err == ESP_ERR_TIMEOUT) {
@@ -724,6 +725,34 @@ void Application::StartNetworkAndProtocol() {
     }
     ESP_LOGI(TAG, "Background network/OTA/protocol done (protocol=%s)",
              protocol_ ? "ready" : "missing");
+
+    // 首页就绪时激活只试一次就去连 MQTT；用户在网页完成绑定后需继续轮询，
+    // 成功后清掉中间的激活码。
+    while (!pending_activation_code_.empty()) {
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        if (activation_suspended_) {
+            continue;
+        }
+        ESP_LOGI(TAG, "Activating (wait for bind)...");
+        if (ota.HasActivationChallenge()) {
+            if (ota.Activate(/*pause_lvgl=*/false) == ESP_OK) {
+                pending_activation_code_.clear();
+#ifdef HAVE_LVGL
+                HomeScreen::RefreshStatusBar();
+#endif
+                ESP_LOGI(TAG, "Device activated, hide activation code");
+                break;
+            }
+        } else if (ota.CheckVersion(/*pause_lvgl=*/false) == ESP_OK &&
+                   !ota.HasActivationCode()) {
+            pending_activation_code_.clear();
+#ifdef HAVE_LVGL
+            HomeScreen::RefreshStatusBar();
+#endif
+            ESP_LOGI(TAG, "Activation no longer required, hide activation code");
+            break;
+        }
+    }
 }
 
 bool Application::SpawnNetBootTask() {

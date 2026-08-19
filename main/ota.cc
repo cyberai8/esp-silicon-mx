@@ -506,13 +506,13 @@ std::string Ota::GetActivationPayload() {
     return json;
 }
 
-esp_err_t Ota::Activate() {
+esp_err_t Ota::Activate(bool pause_lvgl) {
     if (!has_activation_challenge_) {
         ESP_LOGW(TAG, "No activation challenge found");
         return ESP_FAIL;
     }
 
-    LvglPauseGuard lvgl_pause;
+    LvglPauseGuard lvgl_pause(pause_lvgl);
     std::string url = GetCheckVersionUrl();
     if (url.back() != '/') {
         url += "/activate";

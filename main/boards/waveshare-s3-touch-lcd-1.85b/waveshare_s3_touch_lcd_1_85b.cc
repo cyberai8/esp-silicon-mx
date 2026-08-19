@@ -9,6 +9,7 @@
 #include "SdCardManager.hpp"
 #include "settings.h"
 #include "wifi_board.h"
+#include "wifi_station.h"
 
 #include <cstdlib>
 #include <driver/gpio.h>
@@ -494,6 +495,17 @@ public:
             backlight->RestoreBrightnessImmediately();
         }
         ESP_LOGI(TAG, "LCD visible");
+    }
+
+    void StartNetwork() override {
+        WifiBoard::StartNetwork();
+        // 对话 + AFE 容易丢 beacon；这款小屏板关掉 modem sleep。
+        SetPowerSaveMode(false);
+    }
+
+    void SetPowerSaveMode(bool enabled) override {
+        (void)enabled;
+        WifiBoard::SetPowerSaveMode(false);
     }
 
     AudioCodec* GetAudioCodec() override {

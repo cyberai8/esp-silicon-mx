@@ -13,7 +13,7 @@
 
 namespace {
 constexpr size_t kAudioDetectionTaskStackSize = 6144;
-// 高于 LVGL(1)/draw(3)，低于 audio_input(8)；与 feed 同核，避免与 EAF 解码抢 core 1。
+// 必须避开 WiFi 所在的 core 0：WakeNet 推理会长时间占核，同核就会 bcn_timeout 掉线。
 constexpr UBaseType_t kAudioDetectionTaskPriority = 6;
 }  // namespace
 
@@ -200,7 +200,7 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
         },
         "audio_detection", kAudioDetectionTaskStackSize, this,
         kAudioDetectionTaskPriority, audio_detection_task_stack_,
-        audio_detection_task_buffer_, 0);
+        audio_detection_task_buffer_, 1);
 #else
     audio_detection_task_ = xTaskCreateStatic(
         [](void* arg) {
