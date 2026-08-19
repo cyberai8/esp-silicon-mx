@@ -18,6 +18,7 @@
 #include "native_bluetooth_audio.h"
 #include "screen_util.h"
 #include "settings.h"
+#include "standby_screen/standby_screen.h"
 
 #ifndef ESP_YUN_SIM
 #include "application.h"
@@ -87,6 +88,8 @@ struct UiState {
     lv_obj_t* volume_slider = nullptr;
     lv_obj_t* enter_standby_min_label = nullptr;
     lv_obj_t* enter_standby_slider = nullptr;
+    lv_obj_t* standby_face_weather = nullptr;
+    lv_obj_t* standby_face_clock = nullptr;
     lv_obj_t* charge_tab = nullptr;
     lv_obj_t* ota_tab = nullptr;
     lv_obj_t* ota_current_label = nullptr;
@@ -482,6 +485,53 @@ void OnEnterStandbySliderChanged(lv_event_t* e) {
     HomeScreen::SetIdleStandbyMinutes(value);
 }
 
+void StyleStandbyFaceBtn(lv_obj_t* btn, bool selected) {
+    if (btn == nullptr) {
+        return;
+    }
+    lv_obj_set_style_border_color(
+        btn, lv_color_hex(selected ? kColorAccent : kColorCard), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(
+        btn, lv_color_hex(selected ? 0x1E3A5F : kColorCard), LV_PART_MAIN);
+}
+
+void RefreshStandbyFaceButtons() {
+    const bool weather = StandbyScreen::GetPreferredFace() == StandbyFace::Weather;
+    StyleStandbyFaceBtn(s_ui.standby_face_weather, weather);
+    StyleStandbyFaceBtn(s_ui.standby_face_clock, !weather);
+}
+
+void OnStandbyFaceClicked(lv_event_t* e) {
+    const auto face = static_cast<StandbyFace>(
+        reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
+    StandbyScreen::SetPreferredFace(face);
+    RefreshStandbyFaceButtons();
+}
+
+lv_obj_t* CreateStandbyFaceBtn(lv_obj_t* parent, const char* title, StandbyFace face) {
+    lv_obj_t* btn = lv_obj_create(parent);
+    screen_strip_obj_chrome(btn);
+    lv_obj_set_flex_grow(btn, 1);
+    lv_obj_set_height(btn, kRoundLayout ? 44 : 56);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(btn, 14, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn, 2, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_remove_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(btn, OnStandbyFaceClicked, LV_EVENT_CLICKED,
+                        reinterpret_cast<void*>(static_cast<uintptr_t>(face)));
+    screen_swipe_back_ignore(btn, true);
+
+    lv_obj_t* lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, title);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(kColorText), LV_PART_MAIN);
+    lv_obj_set_style_text_font(lbl, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_center(lbl);
+    lv_obj_remove_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
+    return btn;
+}
+
 void BuildStandbyTab(lv_obj_t* tab) {
     const int initial_standby = HomeScreen::GetIdleStandbyMinutes();
     const int standby_card_h = kRoundLayout ? 100 : 132;
@@ -495,6 +545,35 @@ void BuildStandbyTab(lv_obj_t* tab) {
                      OnEnterStandbySliderChanged, standby_card_h);
     UpdateMinutesLabel(s_ui.enter_standby_min_label, initial_standby,
                        I18n::T("永不进入"));
+
+    lv_obj_t* face_title = lv_label_create(tab);
+    lv_label_set_text(face_title, I18n::T("待机界面"));
+    lv_obj_set_style_text_color(face_title, lv_color_hex(kColorText), LV_PART_MAIN);
+    lv_obj_set_style_text_font(face_title, &font_puhui_20_4, LV_PART_MAIN);
+
+    lv_obj_t* face_row = lv_obj_create(tab);
+    screen_strip_obj_chrome(face_row);
+    lv_obj_set_width(face_row, LV_PCT(100));
+    lv_obj_set_height(face_row, kRoundLayout ? 44 : 56);
+    lv_obj_set_style_bg_opa(face_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_flex_flow(face_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(face_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(face_row, 10, LV_PART_MAIN);
+    lv_obj_remove_flag(face_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_ui.standby_face_weather =
+        CreateStandbyFaceBtn(face_row, I18n::T("天气"), StandbyFace::Weather);
+    s_ui.standby_face_clock =
+        CreateStandbyFaceBtn(face_row, I18n::T("时钟"), StandbyFace::Clock);
+    RefreshStandbyFaceButtons();
+
+    lv_obj_t* face_hint = lv_label_create(tab);
+    lv_label_set_text(face_hint, I18n::T("左右滑动也可切换"));
+    lv_obj_set_style_text_color(face_hint, lv_color_hex(kColorSubtle), LV_PART_MAIN);
+    lv_obj_set_style_text_font(face_hint, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_align(face_hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(face_hint, LV_PCT(100));
 
     lv_obj_set_style_pad_row(tab, kRoundLayout ? 8 : 14, LV_PART_MAIN);
     lv_obj_set_style_pad_bottom(tab, kTabPadBottom, LV_PART_MAIN);
@@ -1244,6 +1323,8 @@ void OnScreenUnloaded(lv_event_t* /*e*/) {
     s_ui.volume_slider = nullptr;
     s_ui.enter_standby_min_label = nullptr;
     s_ui.enter_standby_slider = nullptr;
+    s_ui.standby_face_weather = nullptr;
+    s_ui.standby_face_clock = nullptr;
     s_ui.charge_tab = nullptr;
     s_ui.ota_tab = nullptr;
     s_ui.ota_current_label = nullptr;

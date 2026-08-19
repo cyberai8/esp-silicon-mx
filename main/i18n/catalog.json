@@ -3598,6 +3598,26 @@
       "key": "WIFI_NOT_CONNECTED_HINT_TRANSCRIBE",
       "zh-CN": "请先连接 WiFi 后再使用转写",
       "en-US": "Connect to WiFi before transcribing"
+    },
+    {
+      "key": "STANDBY_FACE",
+      "zh-CN": "待机界面",
+      "en-US": "Standby face"
+    },
+    {
+      "key": "CLOCK_FACE",
+      "zh-CN": "时钟",
+      "en-US": "Clock"
+    },
+    {
+      "key": "STANDBY_FACE_HINT",
+      "zh-CN": "左右滑动也可切换",
+      "en-US": "Swipe left or right to switch"
+    },
+    {
+      "key": "WEATHER_RETRY_LATER",
+      "zh-CN": "稍后自动刷新",
+      "en-US": "Will refresh shortly"
     }
   ]
 }

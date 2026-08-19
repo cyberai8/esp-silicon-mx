@@ -2,16 +2,29 @@
 #include "config.h"
 #include "i18n.h"
 
+#include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 
+#include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_system.h>
+#include <esp_lv_adapter.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#if defined(ESP_PLATFORM)
+#include "freertos/idf_additions.h"
+#endif
 
+#include "Weather.hpp"
 #include "application.h"
 #include "board.h"
 #include "home_screen/home_screen.h"
 #include "idle_power_policy.h"
 #include "pwr_key_handler.h"
+#include "settings.h"
+#include "weather_icon_map.h"
 
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_puhui_30_4);
@@ -48,6 +61,14 @@ constexpr uint32_t kHingeColor = 0x0A0A0A;
 constexpr uint32_t kDigitColor = 0xF5F5F7;
 constexpr int32_t kFlipProgressMax = kDigitHalf * 2;
 constexpr uint32_t kFlipDurationMs = 480;
+constexpr int kSwipeFaceThreshold = kRoundSmall ? 48 : 80;
+constexpr int kTapSlop = 24;
+constexpr int kWeatherIconSize = 128;
+constexpr int kWeatherPanelW = kRoundSmall ? 260 : (kPanelSize - 80);
+constexpr uint32_t kWeatherRefreshOkSec = 15 * 60;
+constexpr uint32_t kWeatherRefreshFailSec = 60;
+constexpr const char* kStandbyNvsNs = "standby";
+constexpr const char* kStandbyFaceKey = "face";
 
 const lv_font_t* StandbyDigitFont() {
     // 圆屏也用 120 字体，卡片高度 112 可容纳，视觉接近大屏。
@@ -90,12 +111,23 @@ struct FlipDigit {
 
 struct UiState {
     lv_obj_t* screen = nullptr;
+    lv_obj_t* clock_panel = nullptr;
     lv_obj_t* clock_row = nullptr;
     FlipDigit digits[kDigitCount]{};
     lv_obj_t* date_lbl = nullptr;
     lv_obj_t* activation_title_lbl = nullptr;
     lv_obj_t* activation_code_lbl = nullptr;
     lv_timer_t* update_timer = nullptr;
+
+    lv_obj_t* weather_panel = nullptr;
+    lv_obj_t* weather_icon = nullptr;
+    lv_obj_t* weather_temp_lbl = nullptr;
+    lv_obj_t* weather_text_lbl = nullptr;
+    lv_obj_t* weather_loc_lbl = nullptr;
+    lv_obj_t* weather_extra_lbl = nullptr;
+    lv_obj_t* face_dots = nullptr;
+    lv_obj_t* face_dot_weather = nullptr;
+    lv_obj_t* face_dot_clock = nullptr;
 
     lv_obj_t* charge_root = nullptr;
     lv_obj_t* charge_tip = nullptr;
@@ -106,9 +138,34 @@ struct UiState {
     bool last_charging = false;
     bool charge_primed = false;
     bool clock_primed = false;
+
+    StandbyFace face = StandbyFace::Weather;
+    uint32_t weather_ticks = 0;
+    bool weather_ok = false;
+    bool weather_fetching = false;
+    int16_t press_x = 0;
+    int16_t press_y = 0;
+    bool press_tracking = false;
 };
 
 UiState s_ui;
+std::atomic<uint32_t> s_weather_session{0};
+
+StandbyFace LoadPreferredFace() {
+    Settings settings(kStandbyNvsNs, false);
+    const int stored = settings.GetInt(kStandbyFaceKey, static_cast<int>(StandbyFace::Weather));
+    return stored == static_cast<int>(StandbyFace::Clock) ? StandbyFace::Clock
+                                                          : StandbyFace::Weather;
+}
+
+void SavePreferredFace(StandbyFace face) {
+    Settings settings(kStandbyNvsNs, true);
+    settings.SetInt(kStandbyFaceKey, static_cast<int>(face));
+}
+
+void ApplyFaceVisibility();
+void TriggerWeatherFetch();
+void ApplyWeatherData(const WeatherDistrictData& data, bool ok);
 
 void FlipDigitSetChar(lv_obj_t* lbl, char ch) {
     if (lbl == nullptr) {
@@ -400,6 +457,306 @@ lv_obj_t* CreateFlipClockRow(lv_obj_t* parent) {
     return row;
 }
 
+lv_obj_t* MakeStandbyLabel(lv_obj_t* parent, const char* text, const lv_font_t* font,
+                           uint32_t color) {
+    lv_obj_t* lbl = lv_label_create(parent);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_font(lbl, font, LV_PART_MAIN);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(color), LV_PART_MAIN);
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_remove_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
+    return lbl;
+}
+
+void SetStandbyWeatherIcon(lv_obj_t* icon, const WeatherDistrictData& data) {
+    if (icon == nullptr) {
+        return;
+    }
+    const char* code = nullptr;
+    if (!data.icon.empty()) {
+        code = data.icon.c_str();
+    }
+    if (code == nullptr || code[0] == '\0') {
+        code = WeatherIconCodeForText(data.text);
+    }
+    if (code == nullptr || code[0] == '\0') {
+        code = "104";
+    }
+    char path[48];
+    std::snprintf(path, sizeof(path), "A:ic_s_weather_%s.spng", code);
+    lv_obj_set_size(icon, kWeatherIconSize, kWeatherIconSize);
+    lv_image_set_src(icon, path);
+    lv_image_set_inner_align(icon, LV_IMAGE_ALIGN_CENTER);
+    lv_obj_remove_flag(icon, LV_OBJ_FLAG_HIDDEN);
+}
+
+void StyleFaceDot(lv_obj_t* dot, bool active) {
+    if (dot == nullptr) {
+        return;
+    }
+    lv_obj_set_style_bg_opa(dot, active ? LV_OPA_COVER : LV_OPA_40, LV_PART_MAIN);
+}
+
+void UpdateFaceDots() {
+    const bool weather = s_ui.face == StandbyFace::Weather;
+    StyleFaceDot(s_ui.face_dot_weather, weather);
+    StyleFaceDot(s_ui.face_dot_clock, !weather);
+}
+
+void ApplyFaceVisibility() {
+    auto& app = Application::GetInstance();
+    const bool activating = app.HasPendingActivation();
+    if (s_ui.activation_title_lbl != nullptr) {
+        if (activating) {
+            lv_label_set_text(s_ui.activation_code_lbl,
+                              app.GetPendingActivationCode().c_str());
+            lv_obj_remove_flag(s_ui.activation_title_lbl, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_ui.activation_code_lbl, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_ui.activation_title_lbl, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_ui.activation_code_lbl, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    const bool show_weather = !activating && s_ui.face == StandbyFace::Weather;
+    const bool show_clock = !activating && s_ui.face == StandbyFace::Clock;
+    if (s_ui.weather_panel != nullptr) {
+        if (show_weather) {
+            lv_obj_remove_flag(s_ui.weather_panel, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_ui.weather_panel, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_ui.clock_panel != nullptr) {
+        if (show_clock) {
+            lv_obj_remove_flag(s_ui.clock_panel, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_ui.clock_panel, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_ui.face_dots != nullptr) {
+        if (activating || s_ui.charge_playing) {
+            lv_obj_add_flag(s_ui.face_dots, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(s_ui.face_dots, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    UpdateFaceDots();
+}
+
+void SwitchStandbyFace(StandbyFace face) {
+    if (s_ui.face == face) {
+        ApplyFaceVisibility();
+        return;
+    }
+    s_ui.face = face;
+    SavePreferredFace(face);
+    ApplyFaceVisibility();
+}
+
+void ApplyWeatherData(const WeatherDistrictData& data, bool ok) {
+    if (s_ui.weather_temp_lbl == nullptr) {
+        return;
+    }
+    s_ui.weather_ok = ok && data.valid;
+    SetStandbyWeatherIcon(s_ui.weather_icon, data);
+
+    if (!s_ui.weather_ok) {
+        lv_label_set_text(s_ui.weather_temp_lbl, "--°");
+        lv_label_set_text(s_ui.weather_text_lbl, I18n::T("暂无天气数据"));
+        lv_label_set_text(s_ui.weather_loc_lbl, "");
+        lv_label_set_text(s_ui.weather_extra_lbl, I18n::T("稍后自动刷新"));
+        return;
+    }
+
+    char temp[24];
+    std::snprintf(temp, sizeof(temp), "%d°", static_cast<int>(data.temp));
+    lv_label_set_text(s_ui.weather_temp_lbl, temp);
+    lv_label_set_text(s_ui.weather_text_lbl,
+                      data.text.empty() ? I18n::T("天气") : data.text.c_str());
+
+    char loc[96];
+    if (!data.district.empty() && !data.city.empty() && data.district != data.city) {
+        std::snprintf(loc, sizeof(loc), "%s %s", data.city.c_str(), data.district.c_str());
+    } else if (!data.city.empty()) {
+        std::snprintf(loc, sizeof(loc), "%s", data.city.c_str());
+    } else if (!data.district.empty()) {
+        std::snprintf(loc, sizeof(loc), "%s", data.district.c_str());
+    } else {
+        loc[0] = '\0';
+    }
+    lv_label_set_text(s_ui.weather_loc_lbl, loc);
+
+    char extra[96];
+    extra[0] = '\0';
+    if (!data.forecasts.empty()) {
+        const WeatherForecastDay& today = data.forecasts.front();
+        if (data.rh > 0 && !data.air.empty()) {
+            std::snprintf(extra, sizeof(extra), "%d° / %d°  %s%d%%  %s",
+                          static_cast<int>(today.high), static_cast<int>(today.low),
+                          I18n::T("湿度"), static_cast<int>(data.rh),
+                          data.air.c_str());
+        } else if (data.rh > 0) {
+            std::snprintf(extra, sizeof(extra), "%d° / %d°  %s %d%%",
+                          static_cast<int>(today.high), static_cast<int>(today.low),
+                          I18n::T("湿度"), static_cast<int>(data.rh));
+        } else if (!data.air.empty()) {
+            std::snprintf(extra, sizeof(extra), "%d° / %d°  %s",
+                          static_cast<int>(today.high), static_cast<int>(today.low),
+                          data.air.c_str());
+        } else {
+            std::snprintf(extra, sizeof(extra), "%d° / %d°",
+                          static_cast<int>(today.high), static_cast<int>(today.low));
+        }
+    } else if (data.rh > 0) {
+        std::snprintf(extra, sizeof(extra), I18n::T("湿度 %d%%"),
+                      static_cast<int>(data.rh));
+    } else if (!data.air.empty()) {
+        std::snprintf(extra, sizeof(extra), "%s", data.air.c_str());
+    } else if (!data.wind_dir.empty()) {
+        std::snprintf(extra, sizeof(extra), "%s %s", I18n::T(data.wind_dir.c_str()),
+                      I18n::T(data.wind_class.c_str()));
+    }
+    lv_label_set_text(s_ui.weather_extra_lbl, extra);
+}
+
+void WeatherFetchTask(void* arg) {
+    const uint32_t my_session = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(arg));
+    WeatherDistrictData data;
+    const esp_err_t err = WeatherService::Instance().FetchByDevice(data);
+    if (esp_lv_adapter_lock(-1) == ESP_OK) {
+        if (s_weather_session.load() == my_session && s_ui.screen != nullptr) {
+            s_ui.weather_fetching = false;
+            ApplyWeatherData(data, err == ESP_OK);
+        }
+        esp_lv_adapter_unlock();
+    }
+    vTaskDelete(nullptr);
+}
+
+void TriggerWeatherFetch() {
+    if (s_ui.weather_fetching || s_ui.screen == nullptr) {
+        return;
+    }
+    s_ui.weather_fetching = true;
+    const uint32_t session =
+        s_weather_session.fetch_add(1, std::memory_order_relaxed) + 1;
+    void* arg = reinterpret_cast<void*>(static_cast<uintptr_t>(session));
+
+    // HTTPS 栈放 PSRAM：待机页刚建完 LVGL 对象后，内部 DRAM 最大连续块
+    // 往往不够 12KB，普通 xTaskCreate 会一直失败。
+    BaseType_t ok = pdFAIL;
+#if defined(ESP_PLATFORM)
+    static constexpr uint32_t kStackBytes[] = {12 * 1024, 10 * 1024, 8 * 1024};
+    for (uint32_t bytes : kStackBytes) {
+        if (xTaskCreateWithCaps(WeatherFetchTask, "stby_weather", bytes, arg, 4,
+                                nullptr, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) ==
+            pdPASS) {
+            ok = pdPASS;
+            break;
+        }
+    }
+#else
+    ok = xTaskCreate(WeatherFetchTask, "stby_weather", 12 * 1024, arg, 4,
+                     nullptr);
+#endif
+    if (ok != pdPASS) {
+        s_ui.weather_fetching = false;
+        ESP_LOGW(TAG,
+                 "weather fetch task failed heap=%u internal=%u largest_int=%u spiram=%u",
+                 static_cast<unsigned>(esp_get_free_heap_size()),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 static_cast<unsigned>(
+                     heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+    }
+}
+
+lv_obj_t* CreateWeatherPanel(lv_obj_t* parent) {
+    lv_obj_t* box = lv_obj_create(parent);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_size(box, kWeatherPanelW, LV_SIZE_CONTENT);
+    // 圆屏略上移，给底部充电提示留空，图标顶在原先时间的位置。
+    lv_obj_align(box, LV_ALIGN_CENTER, 0, kRoundSmall ? -8 : 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(box, kRoundSmall ? 8 : 14, LV_PART_MAIN);
+    lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(box, LV_OBJ_FLAG_CLICKABLE);
+
+    s_ui.weather_icon = lv_image_create(box);
+    lv_obj_set_size(s_ui.weather_icon, kWeatherIconSize, kWeatherIconSize);
+    lv_image_set_inner_align(s_ui.weather_icon, LV_IMAGE_ALIGN_CENTER);
+    lv_obj_remove_flag(s_ui.weather_icon, LV_OBJ_FLAG_CLICKABLE);
+    SetStandbyWeatherIcon(s_ui.weather_icon, WeatherDistrictData{});
+
+    s_ui.weather_temp_lbl =
+        MakeStandbyLabel(box, "--°", &font_puhui_30_4, 0xFFFFFF);
+    s_ui.weather_text_lbl =
+        MakeStandbyLabel(box, I18n::T("加载中..."), &font_puhui_20_4, 0xE5E7EB);
+    s_ui.weather_loc_lbl = MakeStandbyLabel(box, "", &font_puhui_20_4, 0x9AA3B2);
+    s_ui.weather_extra_lbl = MakeStandbyLabel(box, "", &font_puhui_20_4, 0x9AA3B2);
+
+    lv_obj_set_style_pad_top(s_ui.weather_temp_lbl, kRoundSmall ? -2 : 0, LV_PART_MAIN);
+    lv_obj_set_width(s_ui.weather_temp_lbl, LV_PCT(100));
+    lv_obj_set_width(s_ui.weather_text_lbl, LV_PCT(100));
+    lv_obj_set_width(s_ui.weather_loc_lbl, LV_PCT(100));
+    lv_obj_set_width(s_ui.weather_extra_lbl, LV_PCT(100));
+    lv_label_set_long_mode(s_ui.weather_text_lbl, LV_LABEL_LONG_CLIP);
+    lv_label_set_long_mode(s_ui.weather_loc_lbl, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(s_ui.weather_extra_lbl, LV_LABEL_LONG_CLIP);
+    return box;
+}
+
+lv_obj_t* CreateFaceDots(lv_obj_t* parent) {
+    lv_obj_t* row = lv_obj_create(parent);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_SIZE_CONTENT, 10);
+    lv_obj_align(row, LV_ALIGN_BOTTOM_MID, 0, kRoundSmall ? -18 : -28);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 8, LV_PART_MAIN);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    auto make_dot = [&]() {
+        lv_obj_t* d = lv_obj_create(row);
+        lv_obj_remove_style_all(d);
+        lv_obj_set_size(d, 8, 8);
+        lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(d, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(d, LV_OPA_40, LV_PART_MAIN);
+        lv_obj_remove_flag(d, LV_OBJ_FLAG_CLICKABLE);
+        return d;
+    };
+    s_ui.face_dot_weather = make_dot();
+    s_ui.face_dot_clock = make_dot();
+    return row;
+}
+
+void FormatDateText(char* buf, size_t len, const struct tm& tm_info, bool have_time) {
+    if (!have_time) {
+        std::snprintf(buf, len, "%s",
+                      kRoundSmall ? I18n::T("--/-- 周-")
+                                  : I18n::T("----年--月--日 星期-"));
+        return;
+    }
+    const int wday = tm_info.tm_wday;
+    const char* weekday =
+        (wday >= 0 && wday < 7) ? I18n::T(kWeekdayMsgIds[wday]) : "-";
+    if (kRoundSmall) {
+        std::snprintf(buf, len, I18n::T("%02d/%02d 周%s"), tm_info.tm_mon + 1,
+                      tm_info.tm_mday, weekday);
+    } else {
+        std::snprintf(buf, len, I18n::T("%04d年%02d月%02d日 星期%s"),
+                      tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
+                      weekday);
+    }
+}
+
 void StopChargeEffect();
 void StartChargeEffect(int battery_level);
 
@@ -579,10 +936,6 @@ void SyncChargeEffect(bool charging, int battery_level) {
 }
 
 void UpdateClockLabels() {
-    if (s_ui.date_lbl == nullptr || s_ui.clock_row == nullptr) {
-        return;
-    }
-
     time_t now = time(nullptr);
     struct tm tm_info = {};
     const bool have_time =
@@ -597,47 +950,20 @@ void UpdateClockLabels() {
             std::snprintf(digits, sizeof(digits), "%02d%02d%02d", tm_info.tm_hour,
                           tm_info.tm_min, tm_info.tm_sec);
         }
-        const int wday = tm_info.tm_wday;
-        const char* weekday =
-            (wday >= 0 && wday < 7) ? I18n::T(kWeekdayMsgIds[wday]) : "-";
+    }
 
-        char date_str[64];
-        if (kRoundSmall) {
-            std::snprintf(date_str, sizeof(date_str), I18n::T("%02d/%02d 周%s"),
-                          tm_info.tm_mon + 1, tm_info.tm_mday, weekday);
-        } else {
-            std::snprintf(date_str, sizeof(date_str),
-                          I18n::T("%04d年%02d月%02d日 星期%s"),
-                          tm_info.tm_year + 1900, tm_info.tm_mon + 1,
-                          tm_info.tm_mday, weekday);
-        }
+    char date_str[64];
+    FormatDateText(date_str, sizeof(date_str), tm_info, have_time);
+    if (s_ui.date_lbl != nullptr) {
         lv_label_set_text(s_ui.date_lbl, date_str);
-    } else {
-        lv_label_set_text(s_ui.date_lbl,
-                          kRoundSmall ? I18n::T("--/-- 周-")
-                                      : I18n::T("----年--月--日 星期-"));
     }
 
-    // 首次铺底无动画，之后每位变化才翻页。
-    const bool animate = s_ui.clock_primed;
-    for (int i = 0; i < kDigitCount; ++i) {
-        FlipDigitSet(&s_ui.digits[i], digits[i], animate);
-    }
-    s_ui.clock_primed = true;
-
-    if (s_ui.activation_code_lbl != nullptr) {
-        auto& app = Application::GetInstance();
-        if (app.HasPendingActivation()) {
-            lv_label_set_text(s_ui.activation_code_lbl,
-                              app.GetPendingActivationCode().c_str());
-            lv_obj_remove_flag(s_ui.activation_title_lbl, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(s_ui.activation_code_lbl, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(s_ui.clock_row, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(s_ui.activation_title_lbl, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(s_ui.activation_code_lbl, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(s_ui.clock_row, LV_OBJ_FLAG_HIDDEN);
+    if (s_ui.clock_row != nullptr) {
+        const bool animate = s_ui.clock_primed;
+        for (int i = 0; i < kDigitCount; ++i) {
+            FlipDigitSet(&s_ui.digits[i], digits[i], animate);
         }
+        s_ui.clock_primed = true;
     }
 
     int battery_level = 0;
@@ -653,12 +979,23 @@ void UpdateClockLabels() {
         }
         SyncChargeEffect(charging, battery_level);
     }
+
+    ApplyFaceVisibility();
 }
 
-void OnClockTimer(lv_timer_t* /*timer*/) { UpdateClockLabels(); }
+void OnClockTimer(lv_timer_t* /*timer*/) {
+    UpdateClockLabels();
+    s_ui.weather_ticks++;
+    const uint32_t interval =
+        s_ui.weather_ok ? kWeatherRefreshOkSec : kWeatherRefreshFailSec;
+    if (s_ui.weather_ticks > 0 && (s_ui.weather_ticks % interval) == 0) {
+        TriggerWeatherFetch();
+    }
+}
 
 void OnScreenUnloaded(lv_event_t* /*e*/) {
     IdlePower_Detach(IdlePowerSession::Standby);
+    s_weather_session.fetch_add(1, std::memory_order_relaxed);
     StopChargeEffect();
     if (s_ui.update_timer != nullptr) {
         lv_timer_delete(s_ui.update_timer);
@@ -670,11 +1007,42 @@ void OnScreenUnloaded(lv_event_t* /*e*/) {
     s_ui = UiState{};
 }
 
-void OnStandbyClicked(lv_event_t* e) {
-    if (lv_event_get_target_obj(e) != lv_event_get_current_target_obj(e)) {
+void OnStandbyPointer(lv_event_t* e) {
+    lv_indev_t* indev = lv_indev_active();
+    if (indev == nullptr) {
         return;
     }
-    StandbyScreen::ReturnHome();
+    lv_point_t point;
+    lv_indev_get_point(indev, &point);
+    const lv_event_code_t code = lv_event_get_code(e);
+
+    if (code == LV_EVENT_PRESSED) {
+        s_ui.press_x = point.x;
+        s_ui.press_y = point.y;
+        s_ui.press_tracking = true;
+        return;
+    }
+    if (code != LV_EVENT_RELEASED || !s_ui.press_tracking) {
+        return;
+    }
+    s_ui.press_tracking = false;
+    const int dx = point.x - s_ui.press_x;
+    const int dy = point.y - s_ui.press_y;
+    const int adx = dx < 0 ? -dx : dx;
+    const int ady = dy < 0 ? -dy : dy;
+
+    if (adx > kSwipeFaceThreshold && adx > ady) {
+        lv_indev_wait_release(indev);
+        if (dx < 0) {
+            SwitchStandbyFace(StandbyFace::Clock);
+        } else {
+            SwitchStandbyFace(StandbyFace::Weather);
+        }
+        return;
+    }
+    if (adx < kTapSlop && ady < kTapSlop) {
+        StandbyScreen::ReturnHome();
+    }
 }
 
 void standby_lifecycle_cb(screen_lifecycle_event_t event) {
@@ -693,8 +1061,12 @@ lv_obj_t* StandbyScreen::Create() {
     lv_obj_set_style_border_width(screen, 0, LV_PART_MAIN);
     lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(screen, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(screen, OnStandbyClicked, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(screen, OnStandbyPointer, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(screen, OnStandbyPointer, LV_EVENT_RELEASED, nullptr);
     s_ui.screen = screen;
+    s_ui.face = LoadPreferredFace();
+
+    s_ui.weather_panel = CreateWeatherPanel(screen);
 
     lv_obj_t* box = lv_obj_create(screen);
     lv_obj_remove_style_all(box);
@@ -707,6 +1079,7 @@ lv_obj_t* StandbyScreen::Create() {
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(box, LV_OBJ_FLAG_CLICKABLE);
+    s_ui.clock_panel = box;
 
     s_ui.clock_row = CreateFlipClockRow(box);
 
@@ -725,7 +1098,7 @@ lv_obj_t* StandbyScreen::Create() {
     }
     lv_obj_remove_flag(s_ui.date_lbl, LV_OBJ_FLAG_CLICKABLE);
 
-    s_ui.activation_title_lbl = lv_label_create(box);
+    s_ui.activation_title_lbl = lv_label_create(screen);
     lv_label_set_text(s_ui.activation_title_lbl, I18n::T("请绑定设备"));
     lv_obj_set_style_text_color(s_ui.activation_title_lbl, lv_color_hex(0xFFFFFF),
                                 LV_PART_MAIN);
@@ -733,10 +1106,12 @@ lv_obj_t* StandbyScreen::Create() {
                                LV_PART_MAIN);
     lv_obj_set_style_text_align(s_ui.activation_title_lbl, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
+    lv_obj_align(s_ui.activation_title_lbl, LV_ALIGN_CENTER, 0,
+                 kRoundSmall ? -28 : -40);
     lv_obj_add_flag(s_ui.activation_title_lbl, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(s_ui.activation_title_lbl, LV_OBJ_FLAG_CLICKABLE);
 
-    s_ui.activation_code_lbl = lv_label_create(box);
+    s_ui.activation_code_lbl = lv_label_create(screen);
     lv_label_set_text(s_ui.activation_code_lbl, "");
     lv_obj_set_style_text_color(s_ui.activation_code_lbl, lv_color_hex(0xFBBF24),
                                 LV_PART_MAIN);
@@ -744,10 +1119,22 @@ lv_obj_t* StandbyScreen::Create() {
                                LV_PART_MAIN);
     lv_obj_set_style_text_align(s_ui.activation_code_lbl, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
+    lv_obj_align(s_ui.activation_code_lbl, LV_ALIGN_CENTER, 0,
+                 kRoundSmall ? 8 : 12);
     lv_obj_add_flag(s_ui.activation_code_lbl, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(s_ui.activation_code_lbl, LV_OBJ_FLAG_CLICKABLE);
 
+    s_ui.face_dots = CreateFaceDots(screen);
+    screen_make_input_passive(s_ui.weather_panel);
+    screen_make_input_passive(s_ui.clock_panel);
+    screen_make_input_passive(s_ui.face_dots);
+
     UpdateClockLabels();
+    ApplyFaceVisibility();
+    if (WeatherService::Instance().DeviceCached().valid) {
+        ApplyWeatherData(WeatherService::Instance().DeviceCached(), true);
+    }
+    TriggerWeatherFetch();
     s_ui.update_timer = lv_timer_create(OnClockTimer, 1000, nullptr);
 
     lv_obj_add_event_cb(screen, OnScreenUnloaded, LV_EVENT_SCREEN_UNLOADED,
@@ -788,4 +1175,13 @@ void StandbyScreen::ReturnHome() {
 
 bool StandbyScreen::IsActive() {
     return s_ui.screen != nullptr;
+}
+
+StandbyFace StandbyScreen::GetPreferredFace() { return LoadPreferredFace(); }
+
+void StandbyScreen::SetPreferredFace(StandbyFace face) {
+    SavePreferredFace(face);
+    if (s_ui.screen != nullptr) {
+        SwitchStandbyFace(face);
+    }
 }

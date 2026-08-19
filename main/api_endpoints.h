@@ -91,6 +91,8 @@ constexpr const char* kSinicloudToken = "/xiaozhi/api/sinicloud/token";
 // Weather
 constexpr const char* kWeatherDistrictPath =
     "/api/v1/weather/district?dataType=all&districtId=";
+// 待机天气：GET {base}/api/public/device/weather/{mac}
+constexpr const char* kDeviceWeatherPath = "/api/public/device/weather/";
 
 // GPS
 constexpr const char* kGpsLocationReport =
@@ -102,6 +104,10 @@ std::string Url(const char* path);
 
 inline std::string WeatherDistrictUrl(const std::string& district_id) {
     return Url(kWeatherDistrictPath) + district_id;
+}
+
+inline std::string DeviceWeatherUrl(const std::string& mac) {
+    return Url(kDeviceWeatherPath) + mac;
 }
 
 inline std::string AsrAudioRecordsUrl(const char* original_name) {

@@ -732,10 +732,14 @@ enum class Str : uint16_t {
     TRANSLATE_START_FAILED = 713,
     WIFI_NOT_CONNECTED_TITLE = 714,
     WIFI_NOT_CONNECTED_HINT = 715,
-    WIFI_NOT_CONNECTED_HINT_TRANSCRIBE = 716
+    WIFI_NOT_CONNECTED_HINT_TRANSCRIBE = 716,
+    STANDBY_FACE = 717,
+    CLOCK_FACE = 718,
+    STANDBY_FACE_HINT = 719,
+    WEATHER_RETRY_LATER = 720
 };
 
-constexpr size_t kStringCount = 717;
+constexpr size_t kStringCount = 721;
 
 struct LocaleInfo {
     Locale id;
@@ -1468,6 +1472,10 @@ inline constexpr const char* kMsgIds[kStringCount] = {
     "未连接 WiFi",
     "请先连接 WiFi 后再使用该应用",
     "请先连接 WiFi 后再使用转写",
+    "待机界面",
+    "时钟",
+    "左右滑动也可切换",
+    "稍后自动刷新",
 };
 
 inline constexpr const char* kStringsZhCN[kStringCount] = {
@@ -2188,6 +2196,10 @@ inline constexpr const char* kStringsZhCN[kStringCount] = {
     "未连接 WiFi",
     "请先连接 WiFi 后再使用该应用",
     "请先连接 WiFi 后再使用转写",
+    "待机界面",
+    "时钟",
+    "左右滑动也可切换",
+    "稍后自动刷新",
 };
 
 inline constexpr const char* kStringsEnUS[kStringCount] = {
@@ -2908,6 +2920,10 @@ inline constexpr const char* kStringsEnUS[kStringCount] = {
     "WiFi Not Connected",
     "Connect to WiFi before using this app",
     "Connect to WiFi before transcribing",
+    "Standby face",
+    "Clock",
+    "Swipe left or right to switch",
+    "Will refresh shortly",
 };
 
 inline constexpr const char* const* kLocaleTables[kLocaleCount] = {

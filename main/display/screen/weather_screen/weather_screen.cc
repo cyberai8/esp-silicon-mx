@@ -11,8 +11,12 @@
 
 #include "esp_lv_adapter.h"
 
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#if defined(ESP_PLATFORM)
+#include "freertos/idf_additions.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -997,9 +1001,22 @@ void TriggerFetch() {
     ShowStatus(I18n::T("加载中..."));
     ShowLoadingPlaceholder();
 
-    BaseType_t ok = xTaskCreate(
+    BaseType_t ok = pdFAIL;
+#if defined(ESP_PLATFORM)
+    static constexpr uint32_t kStackBytes[] = {12 * 1024, 10 * 1024, 8 * 1024};
+    void* arg = reinterpret_cast<void*>(static_cast<uintptr_t>(session));
+    for (uint32_t bytes : kStackBytes) {
+        if (xTaskCreateWithCaps(FetchTask, "weather_fetch", bytes, arg, 4, nullptr,
+                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS) {
+            ok = pdPASS;
+            break;
+        }
+    }
+#else
+    ok = xTaskCreate(
         FetchTask, "weather_fetch", 12 * 1024,
         reinterpret_cast<void*>(static_cast<uintptr_t>(session)), 4, nullptr);
+#endif
     if (ok != pdPASS) {
         ShowStatus(I18n::T("任务创建失败"));
     }

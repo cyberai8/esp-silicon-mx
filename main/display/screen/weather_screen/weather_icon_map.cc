@@ -1,6 +1,7 @@
 #include "weather_icon_map.h"
 
 #include <cstring>
+#include <string>
 
 namespace {
 
@@ -63,12 +64,22 @@ constexpr const char* kDefaultIconCode = "104";  // 阴
 
 const char* WeatherIconCodeForText(const std::string& text) {
     if (text.empty()) {
-        return nullptr;
+        return kDefaultIconCode;
     }
     for (const auto& entry : kWeatherIconMap) {
         if (text == entry.text) {
             return entry.code;
         }
     }
-    return kDefaultIconCode;
+    // 「晴转多云」「阴转小雨」等组合描述：取最长命中。
+    const char* best = kDefaultIconCode;
+    size_t best_len = 0;
+    for (const auto& entry : kWeatherIconMap) {
+        const size_t n = std::strlen(entry.text);
+        if (n > best_len && text.find(entry.text) != std::string::npos) {
+            best = entry.code;
+            best_len = n;
+        }
+    }
+    return best;
 }

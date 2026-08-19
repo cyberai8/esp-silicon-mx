@@ -2,6 +2,7 @@
 
 #include "api_endpoints.h"
 #include "board.h"
+#include "system_info.h"
 
 #include <cJSON.h>
 #include <esp_err.h>
@@ -9,6 +10,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -86,6 +88,8 @@ struct WeatherDistrictData {
     int32_t pressure = 0;
     int32_t dpt = 0;
     std::string uptime;
+    std::string icon;  // 和风码，如 "101"；接口可能直接给
+    std::string air;   // 公共接口：空气质量中文，如「优」
 
     std::vector<WeatherForecastDay> forecasts;
     std::vector<WeatherForecastHour> forecast_hours;
@@ -119,6 +123,75 @@ inline int32_t JsonInt(const cJSON* obj, const char* key) {
         return static_cast<int32_t>(atoi(item->valuestring));
     }
     return 0;
+}
+
+inline bool JsonHas(const cJSON* obj, const char* key) {
+    return obj != nullptr && cJSON_GetObjectItem(obj, key) != nullptr;
+}
+
+inline std::string JsonStrAny(const cJSON* obj, const char* a, const char* b = nullptr,
+                              const char* c = nullptr) {
+    std::string v = JsonStr(obj, a);
+    if (v.empty() && b != nullptr) {
+        v = JsonStr(obj, b);
+    }
+    if (v.empty() && c != nullptr) {
+        v = JsonStr(obj, c);
+    }
+    return v;
+}
+
+inline int32_t JsonIntAny(const cJSON* obj, const char* a, const char* b = nullptr,
+                          const char* c = nullptr) {
+    if (JsonHas(obj, a)) {
+        return JsonInt(obj, a);
+    }
+    if (b != nullptr && JsonHas(obj, b)) {
+        return JsonInt(obj, b);
+    }
+    if (c != nullptr && JsonHas(obj, c)) {
+        return JsonInt(obj, c);
+    }
+    return 0;
+}
+
+inline void FillNowFields(const cJSON* obj, WeatherDistrictData& out) {
+    if (obj == nullptr) {
+        return;
+    }
+    if (out.text.empty()) {
+        out.text = JsonStrAny(obj, "text", "weather", "condition");
+        if (out.text.empty()) {
+            out.text = JsonStrAny(obj, "textDay", "weatherText");
+        }
+    }
+    if (!JsonHas(obj, "temp") && !JsonHas(obj, "temperature") && !JsonHas(obj, "tempFc")) {
+        // keep existing
+    } else if (!JsonHas(obj, "temp") && out.temp != 0) {
+        out.temp = JsonIntAny(obj, "temperature", "tempFc");
+    } else if (JsonHas(obj, "temp") || out.temp == 0) {
+        out.temp = JsonIntAny(obj, "temp", "temperature", "tempFc");
+    }
+    if (out.feels_like == 0) {
+        out.feels_like = JsonIntAny(obj, "feelsLike", "feels_like");
+    }
+    if (out.rh == 0) {
+        out.rh = JsonIntAny(obj, "rh", "humidity");
+    }
+    if (out.wind_class.empty()) {
+        out.wind_class = JsonStrAny(obj, "windClass", "windScale", "wind_class");
+    }
+    if (out.wind_dir.empty()) {
+        out.wind_dir = JsonStrAny(obj, "windDir", "wind_dir", "windDirection");
+    }
+    if (out.icon.empty()) {
+        out.icon = JsonStr(obj, "icon");
+        if (out.icon.empty() && JsonHas(obj, "icon")) {
+            char buf[12];
+            std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(JsonInt(obj, "icon")));
+            out.icon = buf;
+        }
+    }
 }
 
 inline float JsonFloat(const cJSON* obj, const char* key) {
@@ -183,6 +256,11 @@ inline void ParseAlert(const cJSON* item, WeatherAlert& alert) {
     }
 }
 
+inline bool WeatherCodeOk(int code) {
+    // district 接口成功为 0；/api/public/device/weather 成功为 200。
+    return code == 0 || code == 200;
+}
+
 inline bool ParseDistrictResponse(const std::string& json, WeatherDistrictData& out) {
     cJSON* root = cJSON_Parse(json.c_str());
     if (root == nullptr) {
@@ -191,7 +269,8 @@ inline bool ParseDistrictResponse(const std::string& json, WeatherDistrictData& 
 
     const int code = JsonInt(root, "code");
     const cJSON* data = cJSON_GetObjectItem(root, "data");
-    if (code != 0 || !cJSON_IsObject(data)) {
+    if (!WeatherCodeOk(code) || !cJSON_IsObject(data)) {
+        ESP_LOGW(TAG, "weather code=%d msg=%s", code, JsonStr(root, "msg").c_str());
         cJSON_Delete(root);
         return false;
     }
@@ -202,10 +281,10 @@ inline bool ParseDistrictResponse(const std::string& json, WeatherDistrictData& 
     out.city = JsonStr(data, "city");
     out.district = JsonStr(data, "district");
     out.district_id = JsonStr(data, "districtId");
-    out.text = JsonStr(data, "text");
-    out.temp = JsonInt(data, "temp");
+    out.text = JsonStrAny(data, "text", "weather", "condition");
+    out.temp = JsonIntAny(data, "temp", "temperature");
     out.feels_like = JsonInt(data, "feelsLike");
-    out.rh = JsonInt(data, "rh");
+    out.rh = JsonIntAny(data, "rh", "humidity");
     out.wind_class = JsonStr(data, "windClass");
     out.wind_dir = JsonStr(data, "windDir");
     out.wind_angle = JsonInt(data, "windAngle");
@@ -222,7 +301,27 @@ inline bool ParseDistrictResponse(const std::string& json, WeatherDistrictData& 
     out.uvi = JsonInt(data, "uvi");
     out.pressure = JsonInt(data, "pressure");
     out.dpt = JsonInt(data, "dpt");
-    out.uptime = JsonStr(data, "uptime");
+    out.uptime = JsonStrAny(data, "uptime", "updatedAt");
+    out.icon = JsonStr(data, "icon");
+    out.air = JsonStr(data, "air");
+    if (out.city.empty()) {
+        out.city = JsonStrAny(data, "cityName", "name", "location");
+    }
+    FillNowFields(data, out);
+    const cJSON* now = cJSON_GetObjectItem(data, "now");
+    if (cJSON_IsObject(now)) {
+        FillNowFields(now, out);
+        if (out.city.empty()) {
+            out.city = JsonStrAny(now, "city", "cityName", "name");
+        }
+    }
+
+    const std::string alarm = JsonStr(data, "alarm");
+    if (!alarm.empty()) {
+        WeatherAlert alert;
+        alert.title = alarm;
+        out.alerts.push_back(std::move(alert));
+    }
 
     const cJSON* forecasts = cJSON_GetObjectItem(data, "forecasts");
     if (cJSON_IsArray(forecasts)) {
@@ -286,8 +385,21 @@ inline bool ParseDistrictResponse(const std::string& json, WeatherDistrictData& 
         }
     }
 
+    if (out.forecasts.empty()) {
+        const int32_t high = JsonIntAny(data, "tempHigh", "high");
+        const int32_t low = JsonIntAny(data, "tempLow", "low");
+        if (high != 0 || low != 0) {
+            WeatherForecastDay day;
+            day.high = high;
+            day.low = low;
+            day.text_day = out.text;
+            out.forecasts.push_back(std::move(day));
+        }
+    }
+
     cJSON_Delete(root);
-    out.valid = !out.text.empty() || !out.forecasts.empty();
+    out.valid = !out.text.empty() || !out.icon.empty() || !out.forecasts.empty() ||
+                out.temp != 0;
     return out.valid;
 }
 
@@ -321,10 +433,21 @@ public:
 
     const WeatherDistrictData& Cached() const { return cached_; }
 
+    // 待机用：GET /api/public/device/weather/{mac}
+    esp_err_t FetchByDevice(WeatherDistrictData& out) {
+        esp_err_t err = FetchDeviceFromNetwork(out);
+        if (err == ESP_OK) {
+            device_cached_ = out;
+        }
+        return err;
+    }
+
+    const WeatherDistrictData& DeviceCached() const { return device_cached_; }
+
 private:
     WeatherService() : district_id_(kDefaultDistrictId) {}
 
-    esp_err_t FetchFromNetwork(WeatherDistrictData& out) {
+    esp_err_t HttpGetWeather(const std::string& url, WeatherDistrictData& out) {
         auto network = Board::GetInstance().GetNetwork();
         if (network == nullptr) {
             ESP_LOGE(weather_detail::TAG, "Network not available");
@@ -336,12 +459,11 @@ private:
             return ESP_ERR_INVALID_STATE;
         }
 
-        const std::string url = api::WeatherDistrictUrl(district_id_);
-
-        ESP_LOGI(weather_detail::TAG, "GET weather district");
+        ESP_LOGI(weather_detail::TAG, "GET weather");
         http->SetTimeout(30000);
         http->SetHeader("Accept", "application/json");
         http->SetHeader("Connection", "close");
+        http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
 
         if (!http->Open("GET", url.c_str())) {
             ESP_LOGE(weather_detail::TAG, "HTTP open failed");
@@ -364,8 +486,8 @@ private:
         }
 
         if (!weather_detail::ParseDistrictResponse(body, out)) {
-            ESP_LOGE(weather_detail::TAG, "Parse failed, len=%u",
-                     static_cast<unsigned>(body.size()));
+            ESP_LOGE(weather_detail::TAG, "Parse failed, len=%u body=%.160s",
+                     static_cast<unsigned>(body.size()), body.c_str());
             return ESP_ERR_INVALID_RESPONSE;
         }
 
@@ -376,6 +498,17 @@ private:
         return ESP_OK;
     }
 
+    esp_err_t FetchFromNetwork(WeatherDistrictData& out) {
+        return HttpGetWeather(api::WeatherDistrictUrl(district_id_), out);
+    }
+
+    esp_err_t FetchDeviceFromNetwork(WeatherDistrictData& out) {
+        const std::string mac = SystemInfo::GetMacAddress();
+        ESP_LOGI(weather_detail::TAG, "device weather mac=%s", mac.c_str());
+        return HttpGetWeather(api::DeviceWeatherUrl(mac), out);
+    }
+
     std::string district_id_;
     WeatherDistrictData cached_;
+    WeatherDistrictData device_cached_;
 };
