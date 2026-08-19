@@ -14,6 +14,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -647,8 +648,8 @@ void StartSpectrumAnalyzer() {
     s_pcm_r.store(0, std::memory_order_relaxed);
     ClearBarLevels();
     s_spectrum_run.store(true, std::memory_order_release);
-    if (xTaskCreate(SpectrumTask, "radio_fft", 6144, nullptr, 4,
-                    &s_spectrum_task) != pdPASS) {
+    if (xTaskCreateWithCaps(SpectrumTask, "radio_fft", 6144, nullptr, 4,
+                            &s_spectrum_task, MALLOC_CAP_SPIRAM) != pdPASS) {
         s_spectrum_run.store(false, std::memory_order_relaxed);
         s_spectrum_task = nullptr;
         ESP_LOGW(TAG, "spectrum task create failed");
@@ -1041,8 +1042,8 @@ void RequestPlayerStop() {
     if (!s_stop_pending.compare_exchange_strong(expected, true)) {
         return;
     }
-    if (xTaskCreate(RadioStopWorker, "radio_stop", 4096, nullptr, 6, nullptr) !=
-        pdPASS) {
+    if (xTaskCreateWithCaps(RadioStopWorker, "radio_stop", 4096, nullptr, 6,
+                            nullptr, MALLOC_CAP_SPIRAM) != pdPASS) {
         s_stop_pending.store(false, std::memory_order_release);
         esp_asp_handle_t player = s_player;
         if (player != nullptr) {
@@ -1108,9 +1109,9 @@ void KickSessionStopWorker() {
     if (!s_stop_worker_busy.compare_exchange_strong(expected, true)) {
         return;
     }
-    if (xTaskCreate(SessionStopWorker, "radio_off", 6144, nullptr, 6,
-                    nullptr) != pdPASS) {
-        ESP_LOGE(TAG, "session stop worker create failed, sync fallback");
+    if (xTaskCreateWithCaps(SessionStopWorker, "radio_off", 6144, nullptr, 6,
+                            nullptr, MALLOC_CAP_SPIRAM) != pdPASS) {
+        ESP_LOGW(TAG, "session stop worker create failed, sync fallback");
         SessionStopWorker(nullptr);
     }
 }
@@ -1646,15 +1647,9 @@ lv_obj_t* CreateRoundButton(lv_obj_t* parent, int32_t size, uint32_t bg_color,
     lv_obj_set_ext_click_area(btn, 12);
     screen_swipe_back_ignore(btn, true);
 
-    // 圆按钮内约 55% 直径放图标，避免 64px 资源在 44px 按钮上被裁切变形。
-    int32_t icon_box = (size * 11) / 20;
-    if (icon_box < 12) {
-        icon_box = 12;
-    }
     lv_obj_t* img = lv_image_create(btn);
-    lv_obj_set_size(img, icon_box, icon_box);
     lv_image_set_src(img, icon_path);
-    lv_image_set_inner_align(img, LV_IMAGE_ALIGN_CONTAIN);
+    lv_obj_set_size(img, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_center(img);
     lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);

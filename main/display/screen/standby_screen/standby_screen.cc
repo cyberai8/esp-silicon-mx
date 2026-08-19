@@ -699,9 +699,8 @@ void TriggerWeatherFetch() {
     if (!WifiStation::GetInstance().IsConnected()) {
         return;
     }
-    if (!Application::GetInstance().IsBackgroundNetworkReady()) {
-        return;
-    }
+    // 注意：IsBackgroundNetworkReady 的检查移到任务内部完成，
+    // 任务会等待最多 60 秒，避免待机屏比网络初始化更早创建时 fetch 被直接丢弃。
     if (!HttpsInternalRamReady()) {
         return;
     }
@@ -1064,13 +1063,25 @@ void OnClockTimer(lv_timer_t* /*timer*/) {
 }
 
 void ScheduleInitialWeatherFetch() {
+    // 每 3 秒重试一次，直到触发成功（最多 40 次 / 2 分钟）。
+    // 这样即使待机屏在网络就绪之前创建，也能在网络准备好后很快拉取天气。
+    struct RetryCtx { int remaining; };
+    auto* ctx = new RetryCtx{40};
     lv_timer_t* timer = lv_timer_create(
         [](lv_timer_t* timer) {
-            TriggerWeatherFetch();
-            lv_timer_delete(timer);
+            auto* c = static_cast<RetryCtx*>(lv_timer_get_user_data(timer));
+            const bool fetching = s_ui.weather_fetching;
+            if (!fetching) {
+                TriggerWeatherFetch();
+            }
+            // 触发成功或 fetching 已启动，或次数耗尽，停止重试
+            if (s_ui.weather_fetching || --c->remaining <= 0) {
+                delete c;
+                lv_timer_delete(timer);
+            }
         },
-        6000, nullptr);
-    lv_timer_set_repeat_count(timer, 1);
+        3000, ctx);
+    lv_timer_set_repeat_count(timer, LV_TIMER_REPEAT_INFINITE);
 }
 
 void OnScreenUnloaded(lv_event_t* /*e*/) {
