@@ -517,6 +517,22 @@ void wifi_evt_handler(void* /*arg*/, esp_event_base_t base, int32_t id,
 
 // 初始化我们自己的 STA 栈。如果设备处于 WiFi 模式（WifiStation 已经在跑），
 // 先把它停掉避免事件回调互相打架。返回是否成功。
+bool register_screen_wifi_handlers() {
+    esp_err_t err = esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_evt_handler, nullptr, &s_wifi_evt_inst);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "wifi handler register failed: %d", err);
+        return false;
+    }
+    err = esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_evt_handler, nullptr, &s_ip_evt_inst);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ip handler register failed: %d", err);
+        return false;
+    }
+    return true;
+}
+
 bool wifi_init_for_screen() {
     if (s_wifi_initialized) return true;
 
@@ -526,14 +542,23 @@ bool wifi_init_for_screen() {
     wifi_mode_t mode_before = WIFI_MODE_NULL;
     esp_err_t mode_err = esp_wifi_get_mode(&mode_before);
     s_wifi_station_was_active = (mode_err == ESP_OK && mode_before != WIFI_MODE_NULL);
-    if (s_wifi_station_was_active) {
-        WifiStation::GetInstance().Stop();
-    }
 
     if (s_evt_group == nullptr) {
         s_evt_group = xEventGroupCreate();
     } else {
         xEventGroupClearBits(s_evt_group, 0xFFFFFF);
+    }
+
+    // AFE 之后内部 DMA RAM 不够再 init WiFi。已有栈就复用，禁止 Stop/deinit。
+    if (s_wifi_station_was_active) {
+        s_netif = nullptr;
+        if (!register_screen_wifi_handlers()) {
+            return false;
+        }
+        s_wifi_initialized = true;
+        ESP_LOGI(TAG, "reuse existing wifi stack for screen");
+        WifiStation::GetInstance().PauseScanning();
+        return true;
     }
 
     // 注意：netif / event loop 已经在更早阶段初始化，这里只补一下 default sta。
@@ -548,7 +573,12 @@ bool wifi_init_for_screen() {
         return false;
     }
 
-    s_netif = esp_netif_create_default_wifi_sta();
+    s_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    bool netif_owned = false;
+    if (s_netif == nullptr) {
+        s_netif = esp_netif_create_default_wifi_sta();
+        netif_owned = (s_netif != nullptr);
+    }
     if (s_netif == nullptr) {
         ESP_LOGE(TAG, "create wifi netif failed");
         return false;
@@ -559,18 +589,32 @@ bool wifi_init_for_screen() {
     err = esp_wifi_init(&cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_init failed: %d", err);
+        if (netif_owned) {
+            esp_netif_destroy(s_netif);
+            s_netif = nullptr;
+        }
         return false;
     }
 
-    err = esp_event_handler_instance_register(
-        WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_evt_handler, nullptr, &s_wifi_evt_inst);
-    if (err != ESP_OK) ESP_LOGE(TAG, "wifi handler register failed: %d", err);
-    err = esp_event_handler_instance_register(
-        IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_evt_handler, nullptr, &s_ip_evt_inst);
-    if (err != ESP_OK) ESP_LOGE(TAG, "ip handler register failed: %d", err);
+    if (!register_screen_wifi_handlers()) {
+        if (netif_owned) {
+            esp_wifi_deinit();
+            esp_netif_destroy(s_netif);
+            s_netif = nullptr;
+        }
+        return false;
+    }
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_mode failed: %d", err);
+        return false;
+    }
+    err = esp_wifi_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_start failed: %d", err);
+        return false;
+    }
 
     s_wifi_initialized = true;
     ESP_LOGI(TAG, "wifi stack initialized for screen");
@@ -580,7 +624,6 @@ bool wifi_init_for_screen() {
 void wifi_teardown_for_screen() {
     if (!s_wifi_initialized) return;
     esp_wifi_scan_stop();
-    esp_wifi_disconnect();
 
     if (s_wifi_evt_inst != nullptr) {
         esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, s_wifi_evt_inst);
@@ -590,6 +633,18 @@ void wifi_teardown_for_screen() {
         esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, s_ip_evt_inst);
         s_ip_evt_inst = nullptr;
     }
+
+    if (s_wifi_station_was_active) {
+        // 复用的是开机 WifiStation，不要 stop/deinit（RX DMA 缓冲不能再申请）。
+        WifiStation::GetInstance().ResumeScanning();
+        s_wifi_initialized = false;
+        s_wifi_station_was_active = false;
+        s_netif = nullptr;
+        ESP_LOGI(TAG, "wifi screen handlers removed (station kept)");
+        return;
+    }
+
+    esp_wifi_disconnect();
     esp_wifi_stop();
     esp_wifi_deinit();
     if (s_netif != nullptr) {
@@ -598,12 +653,6 @@ void wifi_teardown_for_screen() {
     }
     s_wifi_initialized = false;
     ESP_LOGI(TAG, "wifi stack torn down");
-
-    // 只有进入页面前 WifiStation 在跑时（即 WiFi 模式）才恢复它；ML307
-    // 模式下进入本页面前 wifi 栈本来就没起，不要无中生有起一份。
-    if (s_wifi_station_was_active) {
-        WifiStation::GetInstance().Start();
-    }
     s_wifi_station_was_active = false;
 }
 
@@ -636,6 +685,7 @@ void scan_task(void* /*arg*/) {
 
     post_status(I18n::T("正在扫描附近 WiFi…"), kColorScanning);
 
+    WifiStation::GetInstance().PauseScanning();
     xEventGroupClearBits(s_evt_group, kBitScanDone);
 
     wifi_scan_config_t cfg = {};
@@ -1427,7 +1477,7 @@ void restart_timer_cb(lv_timer_t* /*timer*/) {
     if (s_ui.status_message_lbl != nullptr) {
         lv_label_set_text(s_ui.status_message_lbl, I18n::T("正在重启…"));
     }
-    xTaskCreate(reboot_task, "wifi_reboot", 2048, nullptr, 5, nullptr);
+    xTaskCreate(reboot_task, "wifi_reboot", 4096, nullptr, 5, nullptr);
 }
 
 // 失败提示自动关闭：复用 s_restart_timer 槽位，到期回调里只做收掉遮罩，

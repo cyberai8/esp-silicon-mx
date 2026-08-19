@@ -7,6 +7,7 @@
 
 #include <esp_log.h>
 
+#include "application.h"
 #include "board.h"
 #include "home_screen/home_screen.h"
 #include "idle_power_policy.h"
@@ -92,6 +93,8 @@ struct UiState {
     lv_obj_t* clock_row = nullptr;
     FlipDigit digits[kDigitCount]{};
     lv_obj_t* date_lbl = nullptr;
+    lv_obj_t* activation_title_lbl = nullptr;
+    lv_obj_t* activation_code_lbl = nullptr;
     lv_timer_t* update_timer = nullptr;
 
     lv_obj_t* charge_root = nullptr;
@@ -622,6 +625,21 @@ void UpdateClockLabels() {
     }
     s_ui.clock_primed = true;
 
+    if (s_ui.activation_code_lbl != nullptr) {
+        auto& app = Application::GetInstance();
+        if (app.HasPendingActivation()) {
+            lv_label_set_text(s_ui.activation_code_lbl,
+                              app.GetPendingActivationCode().c_str());
+            lv_obj_remove_flag(s_ui.activation_title_lbl, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_ui.activation_code_lbl, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_ui.clock_row, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_ui.activation_title_lbl, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_ui.activation_code_lbl, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_ui.clock_row, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
     int battery_level = 0;
     bool charging = false;
     bool discharging = false;
@@ -706,6 +724,28 @@ lv_obj_t* StandbyScreen::Create() {
         lv_label_set_long_mode(s_ui.date_lbl, LV_LABEL_LONG_CLIP);
     }
     lv_obj_remove_flag(s_ui.date_lbl, LV_OBJ_FLAG_CLICKABLE);
+
+    s_ui.activation_title_lbl = lv_label_create(box);
+    lv_label_set_text(s_ui.activation_title_lbl, I18n::T("请绑定设备"));
+    lv_obj_set_style_text_color(s_ui.activation_title_lbl, lv_color_hex(0xFFFFFF),
+                                LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_ui.activation_title_lbl, &font_puhui_20_4,
+                               LV_PART_MAIN);
+    lv_obj_set_style_text_align(s_ui.activation_title_lbl, LV_TEXT_ALIGN_CENTER,
+                                LV_PART_MAIN);
+    lv_obj_add_flag(s_ui.activation_title_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_ui.activation_title_lbl, LV_OBJ_FLAG_CLICKABLE);
+
+    s_ui.activation_code_lbl = lv_label_create(box);
+    lv_label_set_text(s_ui.activation_code_lbl, "");
+    lv_obj_set_style_text_color(s_ui.activation_code_lbl, lv_color_hex(0xFBBF24),
+                                LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_ui.activation_code_lbl, &font_puhui_30_4,
+                               LV_PART_MAIN);
+    lv_obj_set_style_text_align(s_ui.activation_code_lbl, LV_TEXT_ALIGN_CENTER,
+                                LV_PART_MAIN);
+    lv_obj_add_flag(s_ui.activation_code_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_ui.activation_code_lbl, LV_OBJ_FLAG_CLICKABLE);
 
     UpdateClockLabels();
     s_ui.update_timer = lv_timer_create(OnClockTimer, 1000, nullptr);

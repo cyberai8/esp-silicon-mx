@@ -1097,19 +1097,12 @@ void Application::SetDeviceState(DeviceState state) {
 
 void Application::Reboot() {
     ESP_LOGI(TAG, "Rebooting...");
-    // 重启前关背光，避免过渡花屏/蓝屏；不写 NVS，下次启动仍按原亮度恢复。
+    // 只关背光再硬复位。不要在这里拆 MQTT/音频：析构 TLS 栈很深，
+    // 配网用的 wifi_reboot 任务会 stack overflow。芯片复位会清掉所有状态。
     if (Backlight* bl = Board::GetInstance().GetBacklight()) {
         bl->SetBrightness(0, false);
     }
-    // Disconnect the audio channel
-    if (protocol_ && protocol_->IsAudioChannelOpened()) {
-        protocol_->CloseAudioChannel();
-    }
-    protocol_.reset();
-    audio_service_.Stop();
-
-    // 等待背光渐暗（SetBrightness 约 5ms/级）后再重启
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(400));
     esp_restart();
 }
 

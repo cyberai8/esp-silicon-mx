@@ -106,8 +106,12 @@ void WifiBoard::StartNetwork() {
     auto ssid_list = ssid_manager.GetSsidList();
 #if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
     // 圆屏/VoCat：无 SSID 时不要卡在配网热点，直接进菜单，稍后在网络页配置。
+    // 但仍要把 STA 驱动在 AFE 之前拉起：WiFi RX DMA 必须走内部 RAM，
+    // 进网络页再 esp_wifi_init 会 malloc buffer fail。
     if (ssid_list.empty()) {
         ESP_LOGW(TAG, "No WiFi SSID configured, skip AP mode and continue offline");
+        WifiStation::GetInstance().Start();
+        ESP_LOGI(TAG, "WiFi station started (offline, for later scan)");
         return;
     }
 #else

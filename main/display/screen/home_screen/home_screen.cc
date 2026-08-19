@@ -1198,6 +1198,8 @@ struct HomeStatusState {
 lv_obj_t* battery_icon_lbl = nullptr;
 lv_obj_t* battery_pct_lbl  = nullptr;
     lv_obj_t* time_lbl = nullptr;
+    lv_obj_t* activation_overlay = nullptr;
+    lv_obj_t* activation_title_lbl = nullptr;
     lv_obj_t* activation_code_lbl = nullptr;
     lv_timer_t* update_timer = nullptr;
     const char* last_icon = nullptr;
@@ -1569,23 +1571,23 @@ st->last_battery_icon = FONT_AWESOME_BATTERY_SLASH;
         }
     }
 
-    if (st->activation_code_lbl != nullptr) {
+    if (st->activation_overlay != nullptr && st->activation_code_lbl != nullptr) {
         auto& app = Application::GetInstance();
         if (app.HasPendingActivation()) {
-            char buf[48];
-            std::snprintf(buf, sizeof(buf), I18n::T("激活码 %s"), app.GetPendingActivationCode().c_str());
-            if (st->last_activation_text != buf) {
-                st->last_activation_text = buf;
-                lv_label_set_text(st->activation_code_lbl, buf);
+            const char* code = app.GetPendingActivationCode().c_str();
+            if (st->last_activation_text != code) {
+                st->last_activation_text = code;
+                lv_label_set_text(st->activation_code_lbl, code);
             }
             if (!st->last_activation_visible) {
                 st->last_activation_visible = true;
-                lv_obj_remove_flag(st->activation_code_lbl, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_remove_flag(st->activation_overlay, LV_OBJ_FLAG_HIDDEN);
             }
+            lv_obj_move_foreground(st->activation_overlay);
         } else if (st->last_activation_visible) {
             st->last_activation_visible = false;
             st->last_activation_text.clear();
-            lv_obj_add_flag(st->activation_code_lbl, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(st->activation_overlay, LV_OBJ_FLAG_HIDDEN);
         }
     }
 }
@@ -1607,6 +1609,45 @@ void OnHomeStatusDeleted(lv_event_t* e) {
         st->update_timer = nullptr;
     }
     delete st;
+}
+
+void CreateActivationOverlay(lv_obj_t* screen, HomeStatusState* st) {
+    lv_obj_t* box = lv_obj_create(screen);
+    st->activation_overlay = box;
+    lv_obj_remove_style_all(box);
+    lv_obj_set_size(box, kLayoutRoundSmall ? 200 : 420, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(box, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(box, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(box, 10, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(box, LV_OPA_60, LV_PART_MAIN);
+    lv_obj_set_style_radius(box, 16, LV_PART_MAIN);
+    lv_obj_add_flag(box, LV_OBJ_FLAG_FLOATING);
+    lv_obj_remove_flag(box, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(box, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(box, LV_OBJ_FLAG_HIDDEN);
+
+    st->activation_title_lbl = lv_label_create(box);
+    lv_label_set_text(st->activation_title_lbl, I18n::T("请绑定设备"));
+    lv_obj_set_style_text_font(st->activation_title_lbl, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(st->activation_title_lbl, lv_color_hex(0xFFFFFF),
+                                LV_PART_MAIN);
+    lv_obj_set_style_text_align(st->activation_title_lbl, LV_TEXT_ALIGN_CENTER,
+                                LV_PART_MAIN);
+
+    st->activation_code_lbl = lv_label_create(box);
+    lv_label_set_text(st->activation_code_lbl, "");
+    lv_obj_set_style_text_font(st->activation_code_lbl, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(st->activation_code_lbl, lv_color_hex(0xFBBF24),
+                                LV_PART_MAIN);
+    lv_obj_set_style_text_align(st->activation_code_lbl, LV_TEXT_ALIGN_CENTER,
+                                LV_PART_MAIN);
+
+    UpdateHomeStatusBar(st);
 }
 
 lv_obj_t* CreateStatusBar(lv_obj_t* screen, HomeStatusState* st) {
@@ -1720,15 +1761,6 @@ lv_obj_t* CreateStatusBar(lv_obj_t* screen, HomeStatusState* st) {
     lv_obj_set_style_text_align(st->time_lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(st->time_lbl, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_color(st->time_lbl, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-
-    st->activation_code_lbl = lv_label_create(center);
-    lv_label_set_long_mode(st->activation_code_lbl, LV_LABEL_LONG_CLIP);
-    lv_obj_set_width(st->activation_code_lbl, LV_SIZE_CONTENT);
-    lv_label_set_text(st->activation_code_lbl, "");
-    lv_obj_set_style_text_font(st->activation_code_lbl, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_set_style_text_color(st->activation_code_lbl, lv_color_hex(0xFBBF24),
-                                LV_PART_MAIN);
-    lv_obj_add_flag(st->activation_code_lbl, LV_OBJ_FLAG_HIDDEN);
 
     UpdateHomeStatusBar(st);
     st->update_timer = lv_timer_create(OnHomeStatusTimer, 1000, st);
@@ -3191,6 +3223,7 @@ lv_obj_t* CreateRoundCloverHome() {
     if (status->bar != nullptr) {
         lv_obj_move_foreground(status->bar);
     }
+    CreateActivationOverlay(screen, status);
     return screen;
 }
 
@@ -3275,6 +3308,7 @@ lv_obj_add_flag(screen, LV_OBJ_FLAG_CLICKABLE);
                         nullptr);
     lv_obj_add_event_cb(screen, OnScreenDeleted, LV_EVENT_DELETE, state);
 
+    CreateActivationOverlay(screen, status);
     return screen;
 }
 
