@@ -14,6 +14,10 @@
 
 分辨率与 UI 栈相同（`LVAdapterDisplay` + 圆屏适配），但 **GPIO 完全不同**，且无 PG1/PG2、无 ML307。
 
+## 内存
+
+8MB Octal PSRAM 已启用；`sdkconfig.waveshare-s3-touch-lcd-1.85b` 将 TLS/mbedTLS 堆、LVGL 线程栈、NVS 缓存放到 PSRAM，并关闭硬件 AES（避免 `esp-aes: Failed to allocate memory`）。详见 `sdkconfig.defaults.waveshare-s3-touch-lcd-1.85b`。
+
 ## 构建
 
 ```bash

@@ -453,8 +453,9 @@ private:
         std::lock_guard<std::mutex> https_guard(HttpsRequestLock());
         if (!HttpsInternalRamReady()) {
             ESP_LOGW(weather_detail::TAG,
-                     "HTTPS deferred, largest_int=%u internal=%u",
+                     "HTTPS deferred, largest_int=%u spiram=%u internal=%u",
                      static_cast<unsigned>(HttpsLargestInternalBlock()),
+                     static_cast<unsigned>(HttpsLargestSpiramBlock()),
                      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
             return ESP_ERR_NO_MEM;
         }
