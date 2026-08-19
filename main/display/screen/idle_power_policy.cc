@@ -17,6 +17,8 @@ constexpr const char* kShutdownNvsKey = "idle_off_min";
 constexpr const char* kStandbyNvsKey = "idle_stby_min";
 constexpr uint32_t kTickPeriodMs = 1000;
 constexpr uint32_t kStatusLogIntervalMs = 60 * 1000;
+// 测试用：首页空闲后多久进待机时钟。0 = 跟设置走（分钟）。
+constexpr uint32_t kTestStandbySec = 5;
 
 struct State {
     lv_timer_t* timer = nullptr;
@@ -56,7 +58,10 @@ void OnIdleTick(lv_timer_t* /*timer*/) {
     }
 
     const uint32_t idle_ms = lv_tick_elaps(s.last_activity_tick);
-    const uint32_t standby_ms = MinutesToMs(IdlePower_GetStandbyMinutes());
+    uint32_t standby_ms = MinutesToMs(IdlePower_GetStandbyMinutes());
+    if (kTestStandbySec > 0 && standby_ms > 0) {
+        standby_ms = kTestStandbySec * 1000U;
+    }
 
     if (s.session == IdlePowerSession::Home && standby_ms > 0 &&
         idle_ms >= standby_ms) {
