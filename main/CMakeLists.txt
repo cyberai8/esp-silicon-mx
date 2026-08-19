@@ -53,6 +53,7 @@ set(SOURCES "audio/audio_codec.cc"
             "display/screen/chat_screen/chat_screen.cc"
             "display/screen/network_screen/network_screen.cc"
             "display/screen/digital_people_screen/digital_people_screen.cc"
+            "display/screen/digital_people_screen/avatar_compositor.cc"
             "display/screen/level_screen/level_screen.cc"
             "display/screen/magnet_screen/magnet_screen.cc"
             "display/screen/sd_card_screen/sd_card_screen.cc"
@@ -341,6 +342,8 @@ target_compile_definitions(${COMPONENT_LIB}
 if(CONFIG_BOARD_TYPE_ESP_VOCAT OR CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
     # 360 圆屏 UI 适配（home/radio 等）复用 VoCat 分支
     target_compile_definitions(${COMPONENT_LIB} PRIVATE BOARD_ESP_VOCAT=1)
+    # OTA 上报 esp-show，服务端才会下发 viseme 口型轴
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE OTA_BOARD_TYPE=\"esp-show\")
 endif()
 if(CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE BOARD_WAVESHARE_S3_TOUCH_LCD_1_85B=1)
@@ -522,9 +525,23 @@ else()
     message(STATUS "Assets partition not found, using v1 partition table")
 endif()
 
+# 数字人 show11 runtime PNG 打进 mmap 资源分区（A:），预览图不进固件。
+# 聊天应用仍读 SD 卡 system/chat/*.eaf，互不影响。
+set(AVATAR_RUNTIME_DIR "${CMAKE_SOURCE_DIR}/数字人口型素材/show11/show11/runtime")
+if(NOT EXISTS "${AVATAR_RUNTIME_DIR}/base_360.png")
+    message(FATAL_ERROR "Digital people avatar runtime missing: ${AVATAR_RUNTIME_DIR}")
+endif()
+set(ASSETS_PACK_DIR "${CMAKE_BINARY_DIR}/xingzhi-assets-pack")
+file(REMOVE_RECURSE "${ASSETS_PACK_DIR}")
+file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/xingzhi-assets/" DESTINATION "${ASSETS_PACK_DIR}")
+file(GLOB AVATAR_RUNTIME_PNGS "${AVATAR_RUNTIME_DIR}/*.png")
+file(COPY ${AVATAR_RUNTIME_PNGS} DESTINATION "${ASSETS_PACK_DIR}")
+list(LENGTH AVATAR_RUNTIME_PNGS AVATAR_PNG_COUNT)
+message(STATUS "Packing show11 avatar runtime PNGs: ${AVATAR_PNG_COUNT} files")
+
 spiffs_create_partition_assets(
     resources
-    "./xingzhi-assets"
+    "${ASSETS_PACK_DIR}"
     FLASH_IN_PROJECT
     MMAP_FILE_SUPPORT_FORMAT ".jpg,.png,.eaf"
     MMAP_SUPPORT_SJPG

@@ -3,9 +3,11 @@
 #include "system_info.h"
 #include "settings.h"
 #include "assets/lang_config.h"
+#include "https_request_lock.h"
 
 #include <cJSON.h>
 #include <esp_log.h>
+#include <mutex>
 #include <esp_partition.h>
 #include <esp_ota_ops.h>
 #include <esp_app_format.h>
@@ -111,6 +113,7 @@ std::unique_ptr<Http> Ota::SetupHttp() {
  */
 esp_err_t Ota::CheckVersion(bool pause_lvgl) {
     LvglPauseGuard lvgl_pause(pause_lvgl);
+    std::lock_guard<std::mutex> https_guard(HttpsRequestLock());
     auto& board = Board::GetInstance();
     auto app_desc = esp_app_get_description();
 
@@ -309,6 +312,7 @@ void Ota::MarkCurrentVersionValid() {
 
 bool Ota::Upgrade(const std::string& firmware_url) {
     LvglPauseGuard lvgl_pause(/*enable=*/true, /*force=*/true);
+    std::lock_guard<std::mutex> https_guard(HttpsRequestLock());
     ESP_LOGI(TAG, "Upgrading firmware from %s", firmware_url.c_str());
     esp_ota_handle_t update_handle = 0;
     auto update_partition = esp_ota_get_next_update_partition(NULL);
@@ -513,6 +517,7 @@ esp_err_t Ota::Activate(bool pause_lvgl) {
     }
 
     LvglPauseGuard lvgl_pause(pause_lvgl);
+    std::lock_guard<std::mutex> https_guard(HttpsRequestLock());
     std::string url = GetCheckVersionUrl();
     if (url.back() != '/') {
         url += "/activate";

@@ -645,6 +645,10 @@ void SdPlayTask(void* /*arg*/) {
             continue;
         }
 
+        if (s_codec != nullptr) {
+            Application::GetInstance().GetAudioService().NotifyExternalPlayback();
+        }
+
         const uint32_t gen = s_play_gen.load(std::memory_order_relaxed);
         s_cur_bytes.store(track.size_kb * 1024, std::memory_order_relaxed);
         s_total_sec.store(track.dur_sec, std::memory_order_relaxed);
@@ -716,6 +720,7 @@ void PlayIndex(size_t idx) {
     }
     s_index.store(idx, std::memory_order_relaxed);
     s_want_play.store(true, std::memory_order_relaxed);
+    Application::GetInstance().GetAudioService().NotifyExternalPlayback();
     StopCurrentPlayback();
     RefreshTrackUi();
 }
@@ -1254,6 +1259,7 @@ void OnPlayClicked(lv_event_t* /*e*/) {
         ApplyPlayStateToUi(false);
         return;
     }
+    Application::GetInstance().GetAudioService().NotifyExternalPlayback();
     if (s_paused.load(std::memory_order_relaxed) && s_player != nullptr) {
         esp_audio_simple_player_resume(s_player);
         s_paused.store(false, std::memory_order_relaxed);
@@ -1563,7 +1569,8 @@ void MusicScreenSd::LifecycleCallback(screen_lifecycle_event_t event) {
         }
         if (s_codec != nullptr) {
             s_codec->EnableInput(false);
-            s_codec->EnableOutput(true);
+            as.SetExternalPlaybackHold(true);
+            as.NotifyExternalPlayback();
         }
 
         StartScan();
@@ -1576,6 +1583,7 @@ void MusicScreenSd::LifecycleCallback(screen_lifecycle_event_t event) {
             vTaskDelay(pdMS_TO_TICKS(25));
         }
         ShutdownPlayTask();
+        Application::GetInstance().GetAudioService().SetExternalPlaybackHold(false);
         if (s_wake_disabled_by_us) {
             Application::GetInstance().GetAudioService().EnableWakeWordDetection(
                 true);

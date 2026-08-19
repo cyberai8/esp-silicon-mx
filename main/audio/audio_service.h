@@ -125,6 +125,8 @@ public:
     // 电台 / SD 音乐等绕过 AudioService 直接写 codec 时调用：刷新输出活跃时间，
     // 防止 audio_power_timer 把扬声器关掉。
     void NotifyExternalPlayback();
+    // 本地音乐/电台页面前台时保持 DAC 不关（暂停时也允许随时恢复出声）。
+    void SetExternalPlaybackHold(bool hold);
     // 双工 I2S：先打开 TX，再启 AFE，避免 speaking 时重配控制器踩坏唤醒队列。
     void EnsureOutputEnabled();
 
@@ -168,6 +170,7 @@ private:
     esp_timer_handle_t audio_power_timer_ = nullptr;
     std::chrono::steady_clock::time_point last_input_time_;
     std::chrono::steady_clock::time_point last_output_time_;
+    bool external_playback_hold_ = false;
 
     void AudioInputTask();
     void AudioOutputTask();

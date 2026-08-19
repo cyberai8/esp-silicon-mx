@@ -1,0 +1,572 @@
+#include "avatar_compositor.h"
+
+#include "application.h"
+#include "audio_codec.h"
+#include "board.h"
+#include "device_state.h"
+#include "screen_util.h"
+
+#include <cstring>
+#include <mutex>
+
+#include "esp_log.h"
+#include "esp_random.h"
+
+namespace {
+
+constexpr const char* TAG = "AvatarCompositor";
+
+constexpr int32_t kCanvas = 360;
+constexpr int32_t kUpperX = 70;
+constexpr int32_t kUpperY = 105;
+constexpr int32_t kMouthX = 100;
+constexpr int32_t kMouthY = 210;
+constexpr uint32_t kTickMs = 40;
+constexpr uint32_t kVisemeSampleRate = 24000;
+constexpr int kTransitionTicks = 1;  // ~40ms，接近现网 32ms
+constexpr size_t kPathMax = 40;
+constexpr size_t kMaxVisemes = 96;
+constexpr size_t kStateNameMax = 16;
+constexpr size_t kOverlayNameMax = 24;
+
+struct OverlayGeom {
+    const char* name;
+    int32_t x;
+    int32_t y;
+};
+
+constexpr OverlayGeom kOverlays[] = {
+    {"overlay_blush", 70, 184},
+    {"overlay_tear", 224, 179},
+    {"overlay_sweat", 269, 92},
+    {"overlay_question", 273, 63},
+    {"overlay_sparkle", 267, 139},
+    {"overlay_heart", 270, 125},
+};
+
+struct EmotionPose {
+    const char* emotion;
+    const char* state;
+    const char* overlay;  // nullptr = 无
+    bool hide_overlay_when_speaking;
+};
+
+constexpr EmotionPose kEmotionMap[] = {
+    {"happy", "happy", nullptr, false},
+    {"laughing", "happy", nullptr, false},
+    {"funny", "happy", nullptr, false},
+    {"paishou", "happy", nullptr, false},
+    {"loving", "loving", "overlay_heart", false},
+    {"kissy", "loving", "overlay_heart", false},
+    {"love", "loving", "overlay_heart", false},
+    {"embarrassed", "shy", "overlay_blush", false},
+    {"shy", "shy", "overlay_blush", false},
+    {"crying", "crying", "overlay_tear", false},
+    {"cry", "crying", "overlay_tear", false},
+    {"sad", "sad", nullptr, false},
+    {"angry", "angry", nullptr, false},
+    {"surprised", "surprised", nullptr, false},
+    {"shocked", "surprised", nullptr, false},
+    {"surprise", "surprised", nullptr, false},
+    {"insert", "surprised", nullptr, false},
+    {"thinking", "thinking", "overlay_question", true},
+    {"think", "thinking", "overlay_question", true},
+    {"question", "thinking", "overlay_question", true},
+    {"book", "thinking", "overlay_question", true},
+    {"confused", "thinking", "overlay_sweat", false},
+    {"dizzy", "thinking", "overlay_sweat", false},
+    {"nauseated", "thinking", "overlay_sweat", false},
+    {"silly", "silly", nullptr, false},
+    {"playful", "silly", nullptr, false},
+    {"winking", "playful", "overlay_sparkle", false},
+    {"wink", "playful", "overlay_sparkle", false},
+    {"delicious", "silly", "overlay_sparkle", false},
+    {"eat", "silly", "overlay_sparkle", false},
+    {"sleepy", "sleepy", nullptr, false},
+    {"sleep", "sleepy", nullptr, false},
+    {"tired", "sleepy", nullptr, false},
+    {"tried", "sleepy", nullptr, false},
+    {"cool", "cool", nullptr, false},
+    {"confident", "cool", "overlay_sparkle", false},
+    {"listening", "focused", nullptr, false},
+    {"focused", "focused", nullptr, false},
+    {"look_left", "focused", nullptr, false},
+    {"look_right", "focused", nullptr, false},
+    {"look_around", "focused", nullptr, false},
+    {"idle", "neutral", nullptr, false},
+    {"relaxed", "neutral", nullptr, false},
+    {"neutral", "neutral", nullptr, false},
+    {"speaking", "neutral", nullptr, false},
+};
+
+const char* kVisemeStems[] = {
+    "viseme_00_SIL",
+    "viseme_01_PP",
+    "viseme_02_FF",
+    "viseme_03_TH",
+    "viseme_04_DD",
+    "viseme_05_kk",
+    "viseme_06_CH",
+    "viseme_07_SS",
+    "viseme_08_nn",
+    "viseme_09_RR",
+    "viseme_10_aa",
+    "viseme_11_E",
+    "viseme_12_I",
+    "viseme_13_O",
+    "viseme_14_U",
+};
+
+const char* kEnergyStems[] = {
+    "viseme_00_SIL",
+    "viseme_10_aa_small",
+    "viseme_10_aa",
+    "viseme_10_aa_open",
+};
+
+struct TransitionEdge {
+    uint8_t from;
+    uint8_t to;
+    const char* stem;
+};
+
+constexpr TransitionEdge kTransitions[] = {
+    {0, 10, "transition_SIL_to_aa"},
+    {10, 0, "transition_aa_to_SIL"},
+    {1, 10, "transition_PP_to_aa"},
+    {10, 1, "transition_aa_to_PP"},
+    {12, 10, "transition_I_to_aa"},
+    {10, 12, "transition_aa_to_I"},
+    {0, 13, "transition_SIL_to_O"},
+    {13, 0, "transition_O_to_SIL"},
+};
+
+struct Ui {
+    lv_obj_t* canvas = nullptr;
+    lv_obj_t* base = nullptr;
+    lv_obj_t* upper = nullptr;
+    lv_obj_t* mouth = nullptr;
+    lv_obj_t* overlay = nullptr;
+    lv_timer_t* tick = nullptr;
+    char base_path[kPathMax]{};
+    char upper_path[kPathMax]{};
+    char mouth_path[kPathMax]{};
+    char overlay_path[kPathMax]{};
+};
+
+Ui s_ui;
+
+char s_state[kStateNameMax] = "neutral";
+char s_overlay[kOverlayNameMax] = "";
+bool s_hide_overlay_speaking = false;
+bool s_speaking = false;
+
+int s_blink_idle = 0;
+int s_blink_next = 50;
+int s_blink_step = -1;  // -1 = 不在眨眼
+
+char s_mouth_applied[kPathMax] = "";
+
+std::mutex s_lip_mu;
+int s_armed_index = 0;
+bool s_need_anchor = false;
+bool s_anchored = false;
+uint64_t s_anchor_samples = 0;
+AvatarCompositor::VisemeEvent s_events[kMaxVisemes];
+size_t s_event_count = 0;
+int s_current_viseme = -1;
+int s_trans_left = 0;
+const char* s_trans_stem = nullptr;
+int s_energy_level = 0;
+
+void FillAssetPath(char* buf, size_t n, const char* stem) {
+    std::snprintf(buf, n, "A:%s.spng", stem);
+}
+
+void SetImgSrc(lv_obj_t* img, char* buf, size_t n, const char* stem) {
+    if (img == nullptr || stem == nullptr || stem[0] == '\0') {
+        return;
+    }
+    FillAssetPath(buf, n, stem);
+    lv_image_set_src(img, buf);
+}
+
+lv_obj_t* MakeLayer(lv_obj_t* parent, int32_t x, int32_t y) {
+    lv_obj_t* img = lv_image_create(parent);
+    lv_obj_set_pos(img, x, y);
+    lv_image_set_inner_align(img, LV_IMAGE_ALIGN_DEFAULT);
+    lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
+    screen_make_input_passive(img);
+    return img;
+}
+
+const EmotionPose* PoseForEmotion(const char* emotion) {
+    if (emotion == nullptr || emotion[0] == '\0') {
+        return nullptr;
+    }
+    for (const auto& e : kEmotionMap) {
+        if (std::strcmp(e.emotion, emotion) == 0) {
+            return &e;
+        }
+    }
+    return nullptr;
+}
+
+const OverlayGeom* OverlayGeomByName(const char* name) {
+    if (name == nullptr || name[0] == '\0') {
+        return nullptr;
+    }
+    for (const auto& o : kOverlays) {
+        if (std::strcmp(o.name, name) == 0) {
+            return &o;
+        }
+    }
+    return nullptr;
+}
+
+const char* VisemeStem(int id) {
+    if (id < 0 || id > 14) {
+        return kVisemeStems[0];
+    }
+    return kVisemeStems[id];
+}
+
+const char* TransitionStem(int from, int to) {
+    for (const auto& t : kTransitions) {
+        if (t.from == from && t.to == to) {
+            return t.stem;
+        }
+    }
+    return nullptr;
+}
+
+void ApplyUpper(const char* stem) {
+    char name[32];
+    std::snprintf(name, sizeof(name), "upper_%s", stem);
+    SetImgSrc(s_ui.upper, s_ui.upper_path, sizeof(s_ui.upper_path), name);
+}
+
+void ApplyMouthStem(const char* stem) {
+    if (stem == nullptr || s_ui.mouth == nullptr) {
+        return;
+    }
+    if (std::strcmp(s_mouth_applied, stem) == 0) {
+        return;
+    }
+    std::strncpy(s_mouth_applied, stem, sizeof(s_mouth_applied) - 1);
+    s_mouth_applied[sizeof(s_mouth_applied) - 1] = '\0';
+    SetImgSrc(s_ui.mouth, s_ui.mouth_path, sizeof(s_ui.mouth_path), stem);
+}
+
+void ApplyIdleMouth() {
+    char name[32];
+    std::snprintf(name, sizeof(name), "mouth_%s", s_state);
+    ApplyMouthStem(name);
+}
+
+void ApplyOverlay() {
+    if (s_ui.overlay == nullptr) {
+        return;
+    }
+    const bool hide_for_speech =
+        s_speaking && s_hide_overlay_speaking && s_overlay[0] != '\0';
+    const OverlayGeom* geom = OverlayGeomByName(s_overlay);
+    if (geom == nullptr || hide_for_speech) {
+        lv_obj_add_flag(s_ui.overlay, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_set_pos(s_ui.overlay, geom->x, geom->y);
+    SetImgSrc(s_ui.overlay, s_ui.overlay_path, sizeof(s_ui.overlay_path),
+              geom->name);
+    lv_obj_remove_flag(s_ui.overlay, LV_OBJ_FLAG_HIDDEN);
+}
+
+int EnergyLevelFromPeak(uint32_t peak) {
+    if (peak < 800) {
+        return 0;
+    }
+    if (peak < 3000) {
+        return 1;
+    }
+    if (peak < 8000) {
+        return 2;
+    }
+    return 3;
+}
+
+void ScheduleNextBlink() {
+    s_blink_next = static_cast<int>(50 + (esp_random() % 31));
+    s_blink_idle = 0;
+}
+
+void TickBlink() {
+    static const char* kBlinkSeq[] = {
+        "blink_35", "blink_80", "closed", "blink_80", "blink_35",
+    };
+    if (s_blink_step >= 0) {
+        if (s_blink_step < 5) {
+            ApplyUpper(kBlinkSeq[s_blink_step]);
+            s_blink_step++;
+        } else {
+            ApplyUpper(s_state);
+            s_blink_step = -1;
+            ScheduleNextBlink();
+        }
+        return;
+    }
+    s_blink_idle++;
+    if (s_blink_idle >= s_blink_next) {
+        s_blink_step = 0;
+    }
+}
+
+int TickVisemeId(uint64_t played, int sample_rate) {
+    std::lock_guard<std::mutex> lock(s_lip_mu);
+    if (s_event_count == 0) {
+        return -1;
+    }
+    if (!s_anchored) {
+        if (s_need_anchor || played > 0) {
+            s_anchor_samples = played;
+            s_anchored = true;
+            s_need_anchor = false;
+        } else {
+            return 0;
+        }
+    }
+    if (sample_rate <= 0) {
+        sample_rate = static_cast<int>(kVisemeSampleRate);
+    }
+    const uint64_t delta = played > s_anchor_samples ? played - s_anchor_samples : 0;
+    const uint32_t now_ms =
+        static_cast<uint32_t>((delta * 1000ULL) / static_cast<uint64_t>(sample_rate));
+    int id = 0;
+    for (size_t i = 0; i < s_event_count; ++i) {
+        const auto& e = s_events[i];
+        const uint32_t end = static_cast<uint32_t>(e.time_ms) + e.duration_ms;
+        if (now_ms >= e.time_ms && now_ms < end) {
+            id = e.id;
+            break;
+        }
+        if (now_ms >= e.time_ms) {
+            id = e.id;
+        }
+    }
+    return id;
+}
+
+void TickMouth() {
+    AudioCodec* codec = Board::GetInstance().GetAudioCodec();
+    const uint64_t played = codec != nullptr ? codec->GetPlayedSamples() : 0;
+    const uint32_t peak = codec != nullptr ? codec->GetLastOutputPeak() : 0;
+    const int sample_rate =
+        codec != nullptr && codec->output_sample_rate() > 0
+            ? codec->output_sample_rate()
+            : static_cast<int>(kVisemeSampleRate);
+
+    if (!s_speaking) {
+        s_energy_level = 0;
+        s_current_viseme = -1;
+        s_trans_left = 0;
+        s_trans_stem = nullptr;
+        ApplyIdleMouth();
+        return;
+    }
+
+    const int viseme_id = TickVisemeId(played, sample_rate);
+    if (viseme_id >= 0) {
+        if (s_trans_left > 0 && s_trans_stem != nullptr) {
+            ApplyMouthStem(s_trans_stem);
+            s_trans_left--;
+            return;
+        }
+        if (s_current_viseme >= 0 && s_current_viseme != viseme_id) {
+            const char* trans = TransitionStem(s_current_viseme, viseme_id);
+            if (trans != nullptr) {
+                s_trans_stem = trans;
+                s_trans_left = kTransitionTicks;
+                s_current_viseme = viseme_id;
+                ApplyMouthStem(trans);
+                return;
+            }
+        }
+        s_current_viseme = viseme_id;
+        if (viseme_id == 0) {
+            const int target = EnergyLevelFromPeak(peak);
+            if (target > 0) {
+                if (s_energy_level < target) {
+                    s_energy_level++;
+                } else if (s_energy_level > target) {
+                    s_energy_level--;
+                }
+                ApplyMouthStem(kEnergyStems[s_energy_level]);
+                return;
+            }
+        }
+        s_energy_level = 0;
+        ApplyMouthStem(VisemeStem(viseme_id));
+        return;
+    }
+
+    const int target = EnergyLevelFromPeak(peak);
+    const int want = target > 0 ? target : 1;
+    if (s_energy_level < want) {
+        s_energy_level++;
+    } else if (s_energy_level > want) {
+        s_energy_level--;
+    }
+    ApplyMouthStem(kEnergyStems[s_energy_level]);
+}
+
+void OnTick(lv_timer_t* /*t*/) {
+    if (s_ui.canvas == nullptr) {
+        return;
+    }
+    TickBlink();
+    TickMouth();
+}
+
+}  // namespace
+
+void AvatarCompositor::Create(lv_obj_t* parent) {
+    if (parent == nullptr) {
+        return;
+    }
+    Destroy();
+
+    s_ui.canvas = lv_obj_create(parent);
+    screen_strip_obj_chrome(s_ui.canvas);
+    lv_obj_set_size(s_ui.canvas, kCanvas, kCanvas);
+    lv_obj_center(s_ui.canvas);
+    lv_obj_set_style_bg_opa(s_ui.canvas, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_remove_flag(s_ui.canvas, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(s_ui.canvas, LV_OBJ_FLAG_CLICKABLE);
+    screen_make_input_passive(s_ui.canvas);
+
+    s_ui.base = MakeLayer(s_ui.canvas, 0, 0);
+    s_ui.upper = MakeLayer(s_ui.canvas, kUpperX, kUpperY);
+    s_ui.mouth = MakeLayer(s_ui.canvas, kMouthX, kMouthY);
+    s_ui.overlay = MakeLayer(s_ui.canvas, 0, 0);
+
+    SetImgSrc(s_ui.base, s_ui.base_path, sizeof(s_ui.base_path), "base_360");
+    s_mouth_applied[0] = '\0';
+    ApplyUpper(s_state);
+    ApplyIdleMouth();
+    ApplyOverlay();
+    ScheduleNextBlink();
+
+    s_ui.tick = lv_timer_create(OnTick, kTickMs, nullptr);
+    ESP_LOGI(TAG, "created layered avatar state=%s", s_state);
+}
+
+void AvatarCompositor::Destroy() {
+    if (s_ui.tick != nullptr) {
+        lv_timer_delete(s_ui.tick);
+        s_ui.tick = nullptr;
+    }
+    s_ui = Ui{};
+    s_blink_step = -1;
+    s_mouth_applied[0] = '\0';
+}
+
+bool AvatarCompositor::IsCreated() {
+    return s_ui.canvas != nullptr;
+}
+
+void AvatarCompositor::SetEmotion(const char* emotion) {
+    const EmotionPose* pose = PoseForEmotion(emotion);
+    const char* state = pose != nullptr ? pose->state : "neutral";
+    const char* overlay = pose != nullptr ? pose->overlay : nullptr;
+    s_hide_overlay_speaking = pose != nullptr && pose->hide_overlay_when_speaking;
+
+    std::strncpy(s_state, state, sizeof(s_state) - 1);
+    s_state[sizeof(s_state) - 1] = '\0';
+    if (overlay != nullptr) {
+        std::strncpy(s_overlay, overlay, sizeof(s_overlay) - 1);
+        s_overlay[sizeof(s_overlay) - 1] = '\0';
+    } else {
+        s_overlay[0] = '\0';
+    }
+
+    ESP_LOGI(TAG, "emotion %s -> state=%s overlay=%s",
+             emotion != nullptr ? emotion : "<null>", s_state,
+             s_overlay[0] != '\0' ? s_overlay : "-");
+
+    if (!IsCreated()) {
+        return;
+    }
+    if (s_blink_step < 0) {
+        ApplyUpper(s_state);
+    }
+    if (!s_speaking) {
+        ApplyIdleMouth();
+    }
+    ApplyOverlay();
+}
+
+void AvatarCompositor::SetSpeaking(bool speaking) {
+    if (s_speaking == speaking) {
+        return;
+    }
+    s_speaking = speaking;
+    if (!speaking) {
+        ResetLipSync();
+        if (IsCreated()) {
+            ApplyIdleMouth();
+        }
+    }
+    if (IsCreated()) {
+        ApplyOverlay();
+    }
+}
+
+void AvatarCompositor::ArmUtterance(int index) {
+    std::lock_guard<std::mutex> lock(s_lip_mu);
+    if (index == s_armed_index && s_need_anchor) {
+        return;
+    }
+    s_armed_index = index;
+    s_need_anchor = true;
+    s_anchored = false;
+    s_event_count = 0;
+    s_current_viseme = -1;
+    s_trans_left = 0;
+    s_trans_stem = nullptr;
+}
+
+void AvatarCompositor::LoadVisemeTimeline(int index, const VisemeEvent* events,
+                                          size_t count) {
+    std::lock_guard<std::mutex> lock(s_lip_mu);
+    if (index < s_armed_index && s_armed_index != 0) {
+        ESP_LOGW(TAG, "drop stale viseme index=%d armed=%d", index, s_armed_index);
+        return;
+    }
+    if (events == nullptr || count == 0) {
+        s_event_count = 0;
+        return;
+    }
+    if (count > kMaxVisemes) {
+        count = kMaxVisemes;
+    }
+    std::memcpy(s_events, events, count * sizeof(VisemeEvent));
+    s_event_count = count;
+    s_armed_index = index;
+    if (!s_anchored) {
+        s_need_anchor = true;
+    }
+    ESP_LOGI(TAG, "viseme timeline index=%d events=%u", index,
+             static_cast<unsigned>(count));
+}
+
+void AvatarCompositor::ResetLipSync() {
+    std::lock_guard<std::mutex> lock(s_lip_mu);
+    s_armed_index = 0;
+    s_need_anchor = false;
+    s_anchored = false;
+    s_anchor_samples = 0;
+    s_event_count = 0;
+    s_current_viseme = -1;
+    s_trans_left = 0;
+    s_trans_stem = nullptr;
+    s_energy_level = 0;
+}

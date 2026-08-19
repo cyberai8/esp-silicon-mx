@@ -2,6 +2,7 @@
 
 #include "api_endpoints.h"
 #include "board.h"
+#include "https_request_lock.h"
 #include "system_info.h"
 
 #include <cJSON.h>
@@ -11,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -448,6 +450,14 @@ private:
     WeatherService() : district_id_(kDefaultDistrictId) {}
 
     esp_err_t HttpGetWeather(const std::string& url, WeatherDistrictData& out) {
+        std::lock_guard<std::mutex> https_guard(HttpsRequestLock());
+        if (!HttpsInternalRamReady()) {
+            ESP_LOGW(weather_detail::TAG,
+                     "HTTPS deferred, largest_int=%u internal=%u",
+                     static_cast<unsigned>(HttpsLargestInternalBlock()),
+                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+            return ESP_ERR_NO_MEM;
+        }
         auto network = Board::GetInstance().GetNetwork();
         if (network == nullptr) {
             ESP_LOGE(weather_detail::TAG, "Network not available");
@@ -460,7 +470,7 @@ private:
         }
 
         ESP_LOGI(weather_detail::TAG, "GET weather");
-        http->SetTimeout(30000);
+        http->SetTimeout(10000);
         http->SetHeader("Accept", "application/json");
         http->SetHeader("Connection", "close");
         http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());

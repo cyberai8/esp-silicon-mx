@@ -97,7 +97,7 @@ void AudioService::Start() {
     esp_timer_start_periodic(audio_power_timer_, 1000000);
 
 #if CONFIG_USE_AUDIO_PROCESSOR
-    /* Start the audio input task */
+    /* Start the audio input task (core 0: I2S/DMA；AFE 推理在 core 1) */
     xTaskCreatePinnedToCore([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->AudioInputTask();
@@ -752,6 +752,15 @@ void AudioService::NotifyExternalPlayback() {
     EnsureOutputEnabled();
 }
 
+void AudioService::SetExternalPlaybackHold(bool hold) {
+    external_playback_hold_ = hold;
+    if (hold) {
+        EnsureOutputEnabled();
+    } else {
+        last_output_time_ = std::chrono::steady_clock::now();
+    }
+}
+
 void AudioService::EnsureOutputEnabled() {
     if (codec_ == nullptr || audio_power_timer_ == nullptr) {
         return;
@@ -782,7 +791,8 @@ void AudioService::CheckAndUpdateAudioPowerState() {
         codec_->EnableInput(false);
     }
     // 双工板上 TX/RX 共用控制器：输入还在跑时关 TX 会打乱 AFE 队列。
-    if (output_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->output_enabled()) {
+    if (!external_playback_hold_ && output_elapsed > AUDIO_POWER_TIMEOUT_MS &&
+        codec_->output_enabled()) {
         if (!(input_active && codec_->duplex())) {
             codec_->EnableOutput(false);
         }

@@ -9,6 +9,7 @@
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
+#include "Weather.hpp"
 
 #include <cstring>
 #include <esp_log.h>
@@ -590,12 +591,18 @@ bool Application::InitializeProtocol(Ota& ota) {
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
                     aborted_ = false;
+#ifdef HAVE_LVGL
+                    DigitalPeopleScreen::ResetLipSync();
+#endif
                     if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
                         SetDeviceState(kDeviceStateSpeaking);
                     }
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
+#ifdef HAVE_LVGL
+                    DigitalPeopleScreen::ResetLipSync();
+#endif
                     if (device_state_ == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
@@ -606,6 +613,11 @@ bool Application::InitializeProtocol(Ota& ota) {
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
+                int sentence_index = 0;
+                auto index_item = cJSON_GetObjectItem(root, "index");
+                if (cJSON_IsNumber(index_item)) {
+                    sentence_index = index_item->valueint;
+                }
                 if (cJSON_IsString(text)) {
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
                     Schedule([this, message = std::string(text->valuestring)]() {
@@ -614,7 +626,14 @@ bool Application::InitializeProtocol(Ota& ota) {
                         }
                     });
                 }
+#ifdef HAVE_LVGL
+                Schedule([sentence_index]() {
+                    DigitalPeopleScreen::ArmUtterance(sentence_index);
+                });
+#endif
             }
+        } else if (strcmp(type->valuestring, "listen") == 0) {
+            // 服务端 listen 生命周期通知；STT 文本走 stt 消息。
         } else if (strcmp(type->valuestring, "stt") == 0) {
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {
@@ -634,6 +653,46 @@ bool Application::InitializeProtocol(Ota& ota) {
                     }
                 });
             }
+#ifdef HAVE_LVGL
+        } else if (strcmp(type->valuestring, "viseme") == 0) {
+            int sentence_index = 0;
+            auto index_item = cJSON_GetObjectItem(root, "index");
+            if (cJSON_IsNumber(index_item)) {
+                sentence_index = index_item->valueint;
+            }
+            auto visemes = cJSON_GetObjectItem(root, "visemes");
+            if (!cJSON_IsArray(visemes)) {
+                ESP_LOGW(TAG, "viseme message missing visemes[]");
+            } else {
+                std::vector<DigitalPeopleVisemeEvent> events;
+                const int count = cJSON_GetArraySize(visemes);
+                events.reserve(static_cast<size_t>(count));
+                for (int i = 0; i < count; ++i) {
+                    auto item = cJSON_GetArrayItem(visemes, i);
+                    if (!cJSON_IsObject(item)) {
+                        continue;
+                    }
+                    DigitalPeopleVisemeEvent ev{};
+                    auto time_ms = cJSON_GetObjectItem(item, "time_ms");
+                    auto duration_ms = cJSON_GetObjectItem(item, "duration_ms");
+                    auto id = cJSON_GetObjectItem(item, "id");
+                    if (cJSON_IsNumber(time_ms)) {
+                        ev.time_ms = static_cast<uint16_t>(time_ms->valueint);
+                    }
+                    if (cJSON_IsNumber(duration_ms)) {
+                        ev.duration_ms = static_cast<uint16_t>(duration_ms->valueint);
+                    }
+                    if (cJSON_IsNumber(id)) {
+                        ev.id = static_cast<uint8_t>(id->valueint);
+                    }
+                    events.push_back(ev);
+                }
+                Schedule([sentence_index, events = std::move(events)]() {
+                    DigitalPeopleScreen::LoadVisemeTimeline(
+                        sentence_index, events.data(), events.size());
+                });
+            }
+#endif
         } else if (strcmp(type->valuestring, "mcp") == 0) {
             auto payload = cJSON_GetObjectItem(root, "payload");
             if (cJSON_IsObject(payload)) {
@@ -718,6 +777,24 @@ void Application::StartNetworkAndProtocol() {
 
     Ota ota;
     CheckNewVersion(ota, /*pause_lvgl=*/false);
+
+    // OTA 已释放 TLS，MQTT 尚未连接：此时内部 RAM 最宽裕，预拉待机天气。
+    {
+        const bool restore_wake = audio_service_.ReleaseWakeWordDetection();
+        vTaskDelay(pdMS_TO_TICKS(120));
+        WeatherDistrictData weather;
+        const esp_err_t werr = WeatherService::Instance().FetchByDevice(weather);
+        if (restore_wake && device_state_ == kDeviceStateIdle) {
+            audio_service_.EnableWakeWordDetection(true);
+        }
+        if (werr == ESP_OK) {
+            ESP_LOGI(TAG, "Weather prefetched for standby (%s %d°C)",
+                     weather.district.c_str(), weather.temp);
+        } else {
+            ESP_LOGW(TAG, "Weather prefetch failed: %s", esp_err_to_name(werr));
+        }
+    }
+
     if (InitializeProtocol(ota)) {
         ESP_LOGI(TAG, "Protocol ready");
     } else {
@@ -753,6 +830,7 @@ void Application::StartNetworkAndProtocol() {
             break;
         }
     }
+    background_network_ready_ = true;
 }
 
 bool Application::SpawnNetBootTask() {
@@ -1078,6 +1156,7 @@ void Application::SetDeviceState(DeviceState state) {
             audio_service_.EnableWakeWordDetection(true);
             break;
         case kDeviceStateConnecting:
+            board.SetPowerSaveMode(false);
             display->SetStatus(Lang::Strings::CONNECTING);
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "");
@@ -1089,6 +1168,7 @@ void Application::SetDeviceState(DeviceState state) {
 #endif
             break;
         case kDeviceStateListening:
+            board.SetPowerSaveMode(false);
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
 
@@ -1101,6 +1181,7 @@ void Application::SetDeviceState(DeviceState state) {
             }
             break;
         case kDeviceStateSpeaking:
+            board.SetPowerSaveMode(false);
             display->SetStatus(Lang::Strings::SPEAKING);
 
             if (listening_mode_ != kListeningModeRealtime) {

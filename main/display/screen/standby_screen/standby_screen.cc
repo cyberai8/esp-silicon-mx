@@ -25,6 +25,8 @@
 #include "pwr_key_handler.h"
 #include "settings.h"
 #include "weather_icon_map.h"
+#include "https_request_lock.h"
+#include <wifi_station.h>
 
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_puhui_30_4);
@@ -622,8 +624,64 @@ void ApplyWeatherData(const WeatherDistrictData& data, bool ok) {
 
 void WeatherFetchTask(void* arg) {
     const uint32_t my_session = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(arg));
+
+    auto finish_without_fetch = [&]() {
+        if (esp_lv_adapter_lock(-1) == ESP_OK) {
+            if (s_weather_session.load() == my_session && s_ui.screen != nullptr) {
+                s_ui.weather_fetching = false;
+            }
+            esp_lv_adapter_unlock();
+        }
+        vTaskDelete(nullptr);
+    };
+
+    if (!WifiStation::GetInstance().IsConnected()) {
+        finish_without_fetch();
+        return;
+    }
+
+    for (int i = 0; i < 120; ++i) {
+        if (s_weather_session.load() != my_session || s_ui.screen == nullptr) {
+            finish_without_fetch();
+            return;
+        }
+        if (Application::GetInstance().IsBackgroundNetworkReady()) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    if (!Application::GetInstance().IsBackgroundNetworkReady()) {
+        finish_without_fetch();
+        return;
+    }
+    if (s_weather_session.load() != my_session || s_ui.screen == nullptr ||
+        Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
+        finish_without_fetch();
+        return;
+    }
+
+    if (!HttpsInternalRamReady()) {
+        ESP_LOGW(TAG, "weather deferred, largest_int=%u internal=%u",
+                 static_cast<unsigned>(HttpsLargestInternalBlock()),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+        finish_without_fetch();
+        return;
+    }
+
+    bool restore_wake = false;
+    if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
+        restore_wake =
+            Application::GetInstance().GetAudioService().ReleaseWakeWordDetection();
+        vTaskDelay(pdMS_TO_TICKS(120));
+    }
+
     WeatherDistrictData data;
     const esp_err_t err = WeatherService::Instance().FetchByDevice(data);
+
+    if (restore_wake &&
+        Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
+        Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
+    }
     if (esp_lv_adapter_lock(-1) == ESP_OK) {
         if (s_weather_session.load() == my_session && s_ui.screen != nullptr) {
             s_ui.weather_fetching = false;
@@ -636,6 +694,18 @@ void WeatherFetchTask(void* arg) {
 
 void TriggerWeatherFetch() {
     if (s_ui.weather_fetching || s_ui.screen == nullptr) {
+        return;
+    }
+    if (!WifiStation::GetInstance().IsConnected()) {
+        return;
+    }
+    if (!Application::GetInstance().IsBackgroundNetworkReady()) {
+        return;
+    }
+    if (!HttpsInternalRamReady()) {
+        return;
+    }
+    if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
         return;
     }
     s_ui.weather_fetching = true;
@@ -993,6 +1063,16 @@ void OnClockTimer(lv_timer_t* /*timer*/) {
     }
 }
 
+void ScheduleInitialWeatherFetch() {
+    lv_timer_t* timer = lv_timer_create(
+        [](lv_timer_t* timer) {
+            TriggerWeatherFetch();
+            lv_timer_delete(timer);
+        },
+        6000, nullptr);
+    lv_timer_set_repeat_count(timer, 1);
+}
+
 void OnScreenUnloaded(lv_event_t* /*e*/) {
     IdlePower_Detach(IdlePowerSession::Standby);
     s_weather_session.fetch_add(1, std::memory_order_relaxed);
@@ -1134,7 +1214,7 @@ lv_obj_t* StandbyScreen::Create() {
     if (WeatherService::Instance().DeviceCached().valid) {
         ApplyWeatherData(WeatherService::Instance().DeviceCached(), true);
     }
-    TriggerWeatherFetch();
+    ScheduleInitialWeatherFetch();
     s_ui.update_timer = lv_timer_create(OnClockTimer, 1000, nullptr);
 
     lv_obj_add_event_cb(screen, OnScreenUnloaded, LV_EVENT_SCREEN_UNLOADED,

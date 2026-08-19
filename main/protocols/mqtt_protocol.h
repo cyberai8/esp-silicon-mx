@@ -22,8 +22,8 @@
 #include <map>
 #include <mutex>
 
-#define MQTT_PING_INTERVAL_SECONDS 90
-#define MQTT_RECONNECT_INTERVAL_MS 60000
+#define MQTT_PING_INTERVAL_SECONDS 60
+#define MQTT_RECONNECT_INTERVAL_MS 15000
 
 #define MQTT_PROTOCOL_SERVER_HELLO_EVENT (1 << 0)
 
@@ -55,6 +55,7 @@ private:
     esp_timer_handle_t reconnect_timer_;
 
     bool StartMqttClient(bool report_error=false);
+    void ScheduleReconnect();
     void ParseServerHello(const cJSON* root);
     std::string DecodeHexString(const std::string& hex_string);
 

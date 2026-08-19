@@ -1993,6 +1993,7 @@ lv_obj_t* RadioScreen::Create() {
 void RadioScreen::LifecycleCallback(screen_lifecycle_event_t event) {
     if (event == SCREEN_LIFECYCLE_LOAD) {
         ESP_LOGI(TAG, "load: radio_screen");
+        Application::GetInstance().GetAudioService().SetExternalPlaybackHold(true);
         SetStatusDirect(StatusKind::Connecting);
         SetPlayIconDirect(true);
         ScheduleDeferredSessionStart();
@@ -2013,6 +2014,7 @@ void RadioScreen::LifecycleCallback(screen_lifecycle_event_t event) {
             nullptr);
     } else {
         ESP_LOGI(TAG, "unload: radio_screen");
+        Application::GetInstance().GetAudioService().SetExternalPlaybackHold(false);
         CancelDeferredSessionStart();
         RequestSessionStop(false);
     }

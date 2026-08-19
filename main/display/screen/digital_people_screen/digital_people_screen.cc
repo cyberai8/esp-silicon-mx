@@ -1,20 +1,17 @@
 #include "digital_people_screen.h"
+#include "avatar_compositor.h"
 #include "config.h"
 #include "i18n.h"
 
-#include <cstdio>
 #include <cstring>
-#include <sys/stat.h>
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "lv_eaf.h"
 
 #include "application.h"
 #include "audio_service.h"
 #include "device_state.h"
-#include "SdCardManager.hpp"
 #include "home_screen/home_screen.h"
 #include "screen_util.h"
 
@@ -32,48 +29,13 @@ constexpr int32_t kPanelSize   = DISPLAY_WIDTH;
 constexpr bool    kRoundLayout = false;
 constexpr int32_t kPanelSize   = 720;
 #endif
-constexpr uint32_t kColorBg      = 0x000000;          // 纯黑背景
-
-// 表情资源目录与扩展名（改 DIGITAL_PEOPLE_EMOTION_EXT 切换格式）：
-//   完整路径 = kEmotionDir + 大类名 + kEmotionExt
-//   例: "S:/sdcard/system/emotion/loving.eaf"
-// 大类名来自 LVAdapterDisplay::SetEmotion 里的 GetEmoteCategory()，
-// 取值范围被收敛到 6 个：crying / happy / loving / neutral / surprised /
-// thinking。所有资源都放在 SD 卡的 system/emotion/ 目录下。
-// .eaf 可用官方工具从 GIF 转换：https://esp32-gif.espressif.com/
-constexpr const char* kEmotionDir = "S:/sdcard/system/emotion/";
-constexpr const char* kEmotionPosixDir = "/sdcard/system/emotion/";
-constexpr const char* kEmotionExt = DIGITAL_PEOPLE_EMOTION_EXT;
+constexpr uint32_t kColorBg      = 0x000000;
 constexpr const char* kDefaultEmotion = "neutral";
 
-// 端侧必须存在的 6 个大类资源；缺任意一个都视为资源包未就绪。
-constexpr const char* kRequiredEmotions[] = {
-    "crying", "happy", "loving", "neutral", "surprised", "thinking",
-};
-constexpr size_t kRequiredEmotionCount =
-    sizeof(kRequiredEmotions) / sizeof(kRequiredEmotions[0]);
-
-// 记录"当前应该播放哪一张"——LVAdapterDisplay 在屏幕没进前台时也可以
-// 调用 SetEmotion 预置；下次 Create() 拿这个值拼路径。
-// s_emotion_path_buf 是 lv_eaf_set_src / lv_image_set_src 传入的路径缓冲，
-// 必须保证在调用之间一直有效，所以放在 namespace 静态。
-constexpr size_t kEmotionPathBufSize = 64;
-// 切换表情会整文件读入 PSRAM（常见 200~300KB）+ 解码首帧，瞬时电流高。
-// 与功放开声叠在一起容易拉垮电源触发 Brownout，因此：
-// 1) 同名表情不重复加载；2) 真正读卡延后一小段，避开 codec 开声尖峰。
-constexpr uint32_t kEmotionLoadDelayMs = 180;
-// 全屏 360×360 EAF 解码较重；略降帧率减轻 core 1 压力，给 AFE fetch 留余量。
-constexpr uint32_t kEmotionFrameDelayMs = 66;
-char s_current_emotion[24] = "neutral";
-char s_applied_emotion[24] = "";
-char s_pending_emotion[24] = "";
-char s_emotion_path_buf[kEmotionPathBufSize];
-lv_timer_t* s_emotion_load_timer = nullptr;
+char s_current_emotion[32] = "neutral";
 
 struct UiState {
     lv_obj_t* screen        = nullptr;
-    lv_obj_t* eaf           = nullptr;
-    lv_obj_t* hint_label    = nullptr;
     lv_obj_t* speech_bubble = nullptr;
     lv_obj_t* speech_label  = nullptr;
 };
@@ -83,145 +45,8 @@ UiState s_ui;
 constexpr size_t kSpeechTextMax = 384;
 char s_user_speech[kSpeechTextMax] = "";
 char s_system_speech[kSpeechTextMax] = "";
-// true=当前展示用户侧文案，false=当前展示设备侧文案（由最近一次 Show* 决定）。
 bool s_speech_show_user = true;
 
-// 切换表情读入 PSRAM + 首帧解码时短暂关唤醒词，避免瞬时 feed 堆积。
-struct WakeWordGuard {
-    AudioService& as;
-    bool disabled = false;
-    explicit WakeWordGuard(AudioService& audio) : as(audio) {
-        if (as.IsWakeWordRunning()) {
-            as.EnableWakeWordDetection(false);
-            disabled = true;
-            vTaskDelay(pdMS_TO_TICKS(150));
-        }
-    }
-    ~WakeWordGuard() {
-        if (disabled) {
-            as.EnableWakeWordDetection(true);
-        }
-    }
-    WakeWordGuard(const WakeWordGuard&) = delete;
-    WakeWordGuard& operator=(const WakeWordGuard&) = delete;
-};
-
-const char* EmotionCategoryName(const char* category) {
-    return (category != nullptr && category[0] != '\0') ? category
-                                                        : kDefaultEmotion;
-}
-
-const char* BuildEmotionPath(const char* category) {
-    std::snprintf(s_emotion_path_buf, sizeof(s_emotion_path_buf), "%s%s%s",
-                  kEmotionDir, EmotionCategoryName(category), kEmotionExt);
-    return s_emotion_path_buf;
-}
-
-bool EmotionUsesEaf() { return std::strcmp(kEmotionExt, ".eaf") == 0; }
-
-void CancelPendingEmotionLoad() {
-    if (s_emotion_load_timer != nullptr) {
-        lv_timer_delete(s_emotion_load_timer);
-        s_emotion_load_timer = nullptr;
-    }
-    s_pending_emotion[0] = '\0';
-}
-
-void SetEmotionSrc(lv_obj_t* widget, const char* category) {
-    const char* name = EmotionCategoryName(category);
-    const char* path = BuildEmotionPath(name);
-    ESP_LOGI(TAG, "set emotion src: %s", path);
-
-    // 先用 POSIX 确认文件可读；LVGL 走 S: 盘符（需 CONFIG_LV_USE_FS_POSIX）。
-    char posix_path[96];
-    std::snprintf(posix_path, sizeof(posix_path), "%s%s%s", kEmotionPosixDir,
-                  name, kEmotionExt);
-    FILE* fp = std::fopen(posix_path, "rb");
-    if (fp == nullptr) {
-        ESP_LOGE(TAG, "emotion fopen failed: %s", posix_path);
-        return;
-    }
-    if (std::fseek(fp, 0, SEEK_END) != 0) {
-        ESP_LOGE(TAG, "emotion fseek failed: %s", posix_path);
-        std::fclose(fp);
-        return;
-    }
-    const long file_size = std::ftell(fp);
-    std::fclose(fp);
-    if (file_size <= 0) {
-        ESP_LOGE(TAG, "emotion empty: %s", posix_path);
-        return;
-    }
-    ESP_LOGI(TAG, "emotion file ok: %s (%ld bytes)", posix_path, file_size);
-
-    WakeWordGuard guard(Application::GetInstance().GetAudioService());
-    if (EmotionUsesEaf()) {
-        lv_eaf_set_src(widget, path);
-        lv_eaf_set_loop_count(widget, -1);  // 无限循环
-        lv_eaf_set_frame_delay(widget, kEmotionFrameDelayMs);
-    } else {
-        lv_image_set_src(widget, path);
-    }
-    std::strncpy(s_applied_emotion, name, sizeof(s_applied_emotion) - 1);
-    s_applied_emotion[sizeof(s_applied_emotion) - 1] = '\0';
-}
-
-void OnEmotionLoadTimer(lv_timer_t* /*t*/) {
-    s_emotion_load_timer = nullptr;
-    if (s_ui.eaf == nullptr || s_pending_emotion[0] == '\0') {
-        return;
-    }
-    char name[sizeof(s_pending_emotion)];
-    std::strncpy(name, s_pending_emotion, sizeof(name) - 1);
-    name[sizeof(name) - 1] = '\0';
-    s_pending_emotion[0] = '\0';
-    if (s_applied_emotion[0] != '\0' &&
-        std::strcmp(s_applied_emotion, name) == 0) {
-        return;
-    }
-    SetEmotionSrc(s_ui.eaf, name);
-}
-
-void ScheduleEmotionLoad(const char* category) {
-    const char* name = EmotionCategoryName(category);
-    if (s_ui.eaf == nullptr) {
-        return;
-    }
-    if (s_applied_emotion[0] != '\0' &&
-        std::strcmp(s_applied_emotion, name) == 0 &&
-        s_pending_emotion[0] == '\0') {
-        ESP_LOGD(TAG, "emotion already applied: %s", name);
-        return;
-    }
-    std::strncpy(s_pending_emotion, name, sizeof(s_pending_emotion) - 1);
-    s_pending_emotion[sizeof(s_pending_emotion) - 1] = '\0';
-    if (s_emotion_load_timer != nullptr) {
-        lv_timer_reset(s_emotion_load_timer);
-        return;
-    }
-    s_emotion_load_timer =
-        lv_timer_create(OnEmotionLoadTimer, kEmotionLoadDelayMs, nullptr);
-    lv_timer_set_repeat_count(s_emotion_load_timer, 1);
-}
-
-lv_obj_t* CreateEmotionWidget(lv_obj_t* parent) {
-    if (EmotionUsesEaf()) {
-        lv_obj_t* eaf = lv_eaf_create(parent);
-        lv_eaf_set_frame_delay(eaf, kEmotionFrameDelayMs);
-        return eaf;
-    }
-    return lv_image_create(parent);
-}
-
-// ---------------------------------------------------------------------------
-// 底部单行字幕气泡
-//
-//   ┌─────────────────────────────────────────┐
-//   │            (EAF 表情动画)                 │
-//   │        ╭─ speech bubble ─╮              │ ← bottom-center，单行
-//   │        ╰──────────────────╯              │   过长横向滚动；谁最后说话显示谁
-//   └─────────────────────────────────────────┘
-// ---------------------------------------------------------------------------
 #if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
 constexpr int32_t kSideMargin         = 40;
 constexpr int32_t kSpeechBubbleBottom = 36;
@@ -230,13 +55,10 @@ constexpr int32_t kSideMargin         = 16;
 constexpr int32_t kSpeechBubbleBottom = 24;
 #endif
 constexpr int32_t kSpeechBubbleMaxW = kPanelSize - kSideMargin * 2;
-
 constexpr uint32_t kColorSpeechText = 0xFFFFFF;
-constexpr uint32_t kColorHintText   = 0xC8C9CC;
 
 lv_timer_t* s_activation_guard_timer = nullptr;
 
-// 未激活拦截：全屏模态弹窗，不可关闭，仅能通过返回键离开。
 struct ActivationBlockedDialogUi {
     lv_obj_t* mask = nullptr;
 };
@@ -245,59 +67,6 @@ bool s_activation_blocked = false;
 
 const lv_font_t* bubble_font() {
     return kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4;
-}
-
-bool EmotionFileExists(const char* name) {
-    char path[96];
-    std::snprintf(path, sizeof(path), "%s%s%s", kEmotionPosixDir, name,
-                  kEmotionExt);
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
-}
-
-void LogMissingEmotionFiles() {
-    for (size_t i = 0; i < kRequiredEmotionCount; ++i) {
-        if (!EmotionFileExists(kRequiredEmotions[i])) {
-            ESP_LOGW(TAG, "missing emotion file: %s%s%s", kEmotionPosixDir,
-                     kRequiredEmotions[i], kEmotionExt);
-        }
-    }
-}
-
-bool CheckEmotionResourcesReady() {
-    if (!SdCardManager::GetInstance().IsMounted()) {
-        return false;
-    }
-    for (size_t i = 0; i < kRequiredEmotionCount; ++i) {
-        if (!EmotionFileExists(kRequiredEmotions[i])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-const char* MissingResourceHintText() {
-    if (!SdCardManager::GetInstance().IsMounted()) {
-        return I18n::T(
-            "未检测到 SD 卡\n\n请将数字人资源包放入 SD 卡\nsystem/emotion/ 目录");
-    }
-    return I18n::T(
-        "数字人资源缺失\n\n请将 .eaf 动画复制到 SD 卡\nsystem/emotion/ 目录\n\n"
-        "需包含 6 个：crying/happy/loving/\nneutral/surprised/thinking.eaf");
-}
-
-lv_obj_t* BuildMissingResourceHint(lv_obj_t* parent) {
-    lv_obj_t* hint = lv_label_create(parent);
-    lv_label_set_text(hint, MissingResourceHintText());
-    lv_obj_set_width(hint, kPanelSize - 80);
-    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_set_style_text_color(hint, lv_color_hex(kColorHintText),
-                                LV_PART_MAIN);
-    lv_obj_set_style_text_font(hint, bubble_font(), LV_PART_MAIN);
-    lv_obj_align(hint, LV_ALIGN_CENTER, 0, 0);
-    screen_make_input_passive(hint);
-    return hint;
 }
 
 void StyleSpeechBubble(lv_obj_t* bubble) {
@@ -309,7 +78,6 @@ void StyleSpeechBubble(lv_obj_t* bubble) {
     lv_obj_set_style_shadow_width(bubble, 0, LV_PART_MAIN);
 }
 
-// 创建底部单行字幕气泡，初始隐藏。
 struct SpeechBubbleHandles {
     lv_obj_t* bubble;
     lv_obj_t* label;
@@ -379,16 +147,14 @@ void ApplySpeechToLabel(const char* text) {
         if (bubble_w < 48) {
             bubble_w = 48;
         }
-        const int32_t inner_w = bubble_w;
         lv_obj_set_width(s_ui.speech_bubble, bubble_w);
-        lv_obj_set_width(s_ui.speech_label, inner_w);
+        lv_obj_set_width(s_ui.speech_label, bubble_w);
         lv_obj_set_height(s_ui.speech_label, line_h);
         lv_label_set_long_mode(s_ui.speech_label, LV_LABEL_LONG_CLIP);
         lv_obj_set_style_text_align(s_ui.speech_label, LV_TEXT_ALIGN_CENTER,
                                     LV_PART_MAIN);
         lv_obj_align(s_ui.speech_label, LV_ALIGN_CENTER, 0, 0);
     } else {
-        // 长文案：气泡拉满宽度，横向循环滚动。
         lv_obj_set_width(s_ui.speech_bubble, kSpeechBubbleMaxW);
         lv_obj_set_width(s_ui.speech_label, inner_max_w);
         lv_obj_set_height(s_ui.speech_label, line_h);
@@ -433,14 +199,14 @@ void RefreshSpeechBar() {
 }
 
 void on_refresh_device_state_async(void* /*param*/) {
+    const bool speaking =
+        Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking;
+    AvatarCompositor::SetSpeaking(speaking);
     RefreshSpeechBar();
 }
 
 void OnSwipeBack();
 
-// ---------------------------------------------------------------------------
-// 设备激活检查
-// ---------------------------------------------------------------------------
 bool is_device_activated() {
     auto& app = Application::GetInstance();
     if (app.HasPendingActivation()) {
@@ -589,13 +355,10 @@ void OnScreenUnloaded(lv_event_t* /*e*/) {
         s_activation_guard_timer = nullptr;
     }
     ClearSpeechStorage();
-    CancelPendingEmotionLoad();
-    s_applied_emotion[0] = '\0';
+    AvatarCompositor::Destroy();
     s_activation_dlg = ActivationBlockedDialogUi{};
     s_activation_blocked = false;
     s_ui.screen        = nullptr;
-    s_ui.eaf           = nullptr;
-    s_ui.hint_label    = nullptr;
     s_ui.speech_bubble = nullptr;
     s_ui.speech_label  = nullptr;
 }
@@ -608,7 +371,7 @@ lv_obj_t* DigitalPeopleScreen::Create() {
         log_activation_blocked();
     }
 
-    ESP_LOGI(TAG, "create digital people screen");
+    ESP_LOGI(TAG, "create digital people screen (firmware show11 avatar)");
 
     lv_obj_t* scr = lv_obj_create(nullptr);
     s_ui.screen = scr;
@@ -618,19 +381,8 @@ lv_obj_t* DigitalPeopleScreen::Create() {
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-
-    const bool resources_ready = CheckEmotionResourcesReady();
-    if (!resources_ready) {
-        ESP_LOGW(TAG, "emotion resources not ready (mounted=%d)",
-                 SdCardManager::GetInstance().IsMounted() ? 1 : 0);
-        LogMissingEmotionFiles();
-        s_ui.hint_label = BuildMissingResourceHint(scr);
-    } else {
-        s_ui.eaf = CreateEmotionWidget(scr);
-        // 真正 set_src 延后到 SCREEN_LOADED，与聊天页一致，避免 Create 阻塞过久。
-        lv_image_set_inner_align(s_ui.eaf, LV_IMAGE_ALIGN_CONTAIN);
-        lv_obj_center(s_ui.eaf);
-        screen_make_input_passive(s_ui.eaf);
+    if (!s_activation_blocked) {
+        AvatarCompositor::Create(scr);
     }
 
     {
@@ -658,9 +410,8 @@ lv_obj_t* DigitalPeopleScreen::Create() {
             ensure_activation_blocked_dialog();
             return;
         }
-        if (s_ui.eaf != nullptr) {
-            ScheduleEmotionLoad(s_current_emotion);
-        }
+        AvatarCompositor::SetEmotion(s_current_emotion);
+        on_refresh_device_state_async(nullptr);
     }, LV_EVENT_SCREEN_LOADED, nullptr);
 
     return scr;
@@ -716,21 +467,31 @@ void DigitalPeopleScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         ESP_LOGI(TAG, "unload: digital_people_screen");
         Application::GetInstance().ForceReturnToIdle();
         audio_service.EnableWakeWordDetection(false);
+        ResetLipSync();
     }
 }
 
-void DigitalPeopleScreen::SetEmotion(const char* category) {
-    if (category == nullptr || category[0] == '\0') {
-        category = kDefaultEmotion;
+void DigitalPeopleScreen::SetEmotion(const char* emotion) {
+    if (emotion == nullptr || emotion[0] == '\0') {
+        emotion = kDefaultEmotion;
     }
-    // 同步更新静态缓存：屏幕不在前台时也能记住请求，下次 Create()
-    // 走 BuildEmotionPath(s_current_emotion) 时就会用上。
-    std::strncpy(s_current_emotion, category, sizeof(s_current_emotion) - 1);
+    std::strncpy(s_current_emotion, emotion, sizeof(s_current_emotion) - 1);
     s_current_emotion[sizeof(s_current_emotion) - 1] = '\0';
-
     ESP_LOGI(TAG, "SetEmotion -> %s", s_current_emotion);
+    AvatarCompositor::SetEmotion(s_current_emotion);
+}
 
-    // 在前台才真的替换表情源；调用方必须已经持有 LVGL 主锁
-    // （和 ShowUserMessage / ShowSystemMessage 一致的约定）。
-    ScheduleEmotionLoad(s_current_emotion);
+void DigitalPeopleScreen::ArmUtterance(int index) {
+    AvatarCompositor::ArmUtterance(index);
+}
+
+void DigitalPeopleScreen::LoadVisemeTimeline(
+    int index, const DigitalPeopleVisemeEvent* events, size_t count) {
+    AvatarCompositor::LoadVisemeTimeline(
+        index, reinterpret_cast<const AvatarCompositor::VisemeEvent*>(events),
+        count);
+}
+
+void DigitalPeopleScreen::ResetLipSync() {
+    AvatarCompositor::ResetLipSync();
 }

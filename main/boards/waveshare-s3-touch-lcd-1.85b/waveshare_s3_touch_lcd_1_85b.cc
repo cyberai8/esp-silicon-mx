@@ -22,6 +22,7 @@
 #include <esp_lcd_touch_cst816s.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -501,6 +502,7 @@ public:
         WifiBoard::StartNetwork();
         // 对话 + AFE 容易丢 beacon；这款小屏板关掉 modem sleep。
         SetPowerSaveMode(false);
+        esp_wifi_set_inactive_time(WIFI_IF_STA, 30);
     }
 
     void SetPowerSaveMode(bool enabled) override {

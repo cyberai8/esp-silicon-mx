@@ -17,6 +17,23 @@ AudioCodec::~AudioCodec() {
 void AudioCodec::OutputData(std::vector<int16_t>& data) {
     std::lock_guard<std::mutex> lock(output_mutex_);
     Write(data.data(), data.size());
+    const int channels = output_channels_ > 0 ? output_channels_ : 1;
+    const size_t frames = data.size() / static_cast<size_t>(channels);
+    if (frames > 0) {
+        played_samples_.fetch_add(static_cast<uint64_t>(frames),
+                                  std::memory_order_relaxed);
+    }
+    uint32_t peak = 0;
+    for (int16_t sample : data) {
+        int32_t v = sample;
+        if (v < 0) {
+            v = -v;
+        }
+        if (static_cast<uint32_t>(v) > peak) {
+            peak = static_cast<uint32_t>(v);
+        }
+    }
+    last_output_peak_.store(peak, std::memory_order_relaxed);
 }
 
 bool AudioCodec::InputData(std::vector<int16_t>& data) {

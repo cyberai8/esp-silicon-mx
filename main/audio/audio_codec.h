@@ -9,6 +9,7 @@
 #include <string>
 #include <functional>
 #include <mutex>
+#include <atomic>
 
 #include "board.h"
 
@@ -28,6 +29,15 @@ public:
     virtual void OutputData(std::vector<int16_t>& data);
     virtual bool InputData(std::vector<int16_t>& data);
     virtual void Start();
+
+    // 口型时钟：累计已送入 DAC 的采样数（按声道折成单声道样本）。
+    inline uint64_t GetPlayedSamples() const {
+        return played_samples_.load(std::memory_order_relaxed);
+    }
+    // 最近一包 PCM 峰值（0~32767），给没有 viseme 轴时的能量假嘴用。
+    inline uint32_t GetLastOutputPeak() const {
+        return last_output_peak_.load(std::memory_order_relaxed);
+    }
 
     inline bool duplex() const { return duplex_; }
     inline bool input_reference() const { return input_reference_; }
@@ -56,6 +66,8 @@ protected:
     int output_channels_ = 1;
     int output_volume_ = 70;
     float input_gain_ = 0.0;
+    std::atomic<uint64_t> played_samples_{0};
+    std::atomic<uint32_t> last_output_peak_{0};
 
     virtual int Read(int16_t* dest, int samples) = 0;
     virtual int Write(const int16_t* data, int samples) = 0;

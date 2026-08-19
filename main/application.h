@@ -7,9 +7,10 @@
 #include <esp_timer.h>
 
 #include <string>
-#include <mutex>
 #include <deque>
 #include <memory>
+#include <atomic>
+#include <mutex>
 
 #include "protocol.h"
 #include "ota.h"
@@ -70,6 +71,7 @@ public:
     const std::string& GetPendingActivationCode() const { return pending_activation_code_; }
     void SetActivationSuspended(bool suspended);
     bool IsActivationSuspended() const { return activation_suspended_; }
+    bool IsBackgroundNetworkReady() const { return background_network_ready_; }
     void StopSystemAudioForStressTest();
     void RestoreSystemAudioAfterStressTest();
 
@@ -90,6 +92,7 @@ private:
     AudioService audio_service_;
     std::string pending_activation_code_;
     volatile bool activation_suspended_ = false;
+    std::atomic<bool> background_network_ready_{false};
 
     bool has_server_time_ = false;
     bool aborted_ = false;

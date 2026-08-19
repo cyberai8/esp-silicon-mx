@@ -1,11 +1,13 @@
 # ESP-IDF Partition Table — 16MB Flash（单槽 OTA）
 # 当前固件约 8.6MB+，16MB 放不下双 OTA；先单槽 ota_0（9MB）+ resources。
+# resources 扩到 5504K：UI 图标 + show11 数字人 runtime PNG（打包后约 5.1MB）。
+# ota_0 缩到 8704K（当前 app ~7.5MB，仍有余量）；factory_test 保持 600K。
 # Name,         Type, SubType,      Offset,   Size, Flags
 nvsfactory,     data, nvs,                ,   120K,
 nvs,            data, nvs,                ,   200K,
 otadata,        data, ota,                ,     8K,
 phy_init,       data, phy,                ,     4K,
 model,          data, spiffs,             ,   960K,
-ota_0,          app,  ota_0,      0x160000,  9216K,
-resources,      data, spiffs,             ,     4M,
-factory_test,   data, spiffs,             ,   600K,
+ota_0,          app,  ota_0,      0x160000,  8704K,
+resources,      data, spiffs,             ,    5504K,
+factory_test,   data, spiffs,             ,    600K,

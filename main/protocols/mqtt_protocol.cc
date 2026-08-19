@@ -2,6 +2,7 @@
 #include "board.h"
 #include "application.h"
 #include "settings.h"
+#include <wifi_station.h>
 
 #include <esp_log.h>
 #include <cstring>
@@ -16,14 +17,7 @@ MqttProtocol::MqttProtocol() {
     // Initialize reconnect timer
     esp_timer_create_args_t reconnect_timer_args = {
         .callback = [](void* arg) {
-            MqttProtocol* protocol = (MqttProtocol*)arg;
-            auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateIdle) {
-                ESP_LOGI(TAG, "Reconnecting to MQTT server");
-                app.Schedule([protocol]() {
-                    protocol->StartMqttClient(false);
-                });
-            }
+            static_cast<MqttProtocol*>(arg)->ScheduleReconnect();
         },
         .arg = this,
     };
@@ -49,6 +43,23 @@ bool MqttProtocol::Start() {
     return StartMqttClient(false);
 }
 
+void MqttProtocol::ScheduleReconnect() {
+    if (!WifiStation::GetInstance().IsConnected()) {
+        esp_timer_start_once(reconnect_timer_, MQTT_RECONNECT_INTERVAL_MS * 1000);
+        return;
+    }
+    auto& app = Application::GetInstance();
+    const auto state = app.GetDeviceState();
+    if (state == kDeviceStateUpgrading || state == kDeviceStateWifiConfiguring) {
+        esp_timer_start_once(reconnect_timer_, MQTT_RECONNECT_INTERVAL_MS * 1000);
+        return;
+    }
+    ESP_LOGI(TAG, "Reconnecting to MQTT server");
+    app.Schedule([this]() {
+        StartMqttClient(false);
+    });
+}
+
 bool MqttProtocol::StartMqttClient(bool report_error) {
     if (mqtt_ != nullptr) {
         ESP_LOGW(TAG, "Mqtt client already started");
@@ -60,7 +71,10 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     auto client_id = settings.GetString("client_id");
     auto username = settings.GetString("username");
     auto password = settings.GetString("password");
-    int keepalive_interval = settings.GetInt("keepalive", 240);
+    int keepalive_interval = settings.GetInt("keepalive", MQTT_PING_INTERVAL_SECONDS);
+    if (keepalive_interval <= 0 || keepalive_interval > MQTT_PING_INTERVAL_SECONDS) {
+        keepalive_interval = MQTT_PING_INTERVAL_SECONDS;
+    }
     publish_topic_ = settings.GetString("publish_topic");
 
     if (endpoint.empty()) {
@@ -81,6 +95,10 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
         }
         ESP_LOGI(TAG, "MQTT disconnected, schedule reconnect in %d seconds", MQTT_RECONNECT_INTERVAL_MS / 1000);
         esp_timer_start_once(reconnect_timer_, MQTT_RECONNECT_INTERVAL_MS * 1000);
+        // 延后销毁，避免在 esp_mqtt 事件回调里析构客户端；同时阻止其自动重连刷屏。
+        Application::GetInstance().Schedule([this]() {
+            mqtt_.reset();
+        });
     });
 
     mqtt_->OnConnected([this]() {

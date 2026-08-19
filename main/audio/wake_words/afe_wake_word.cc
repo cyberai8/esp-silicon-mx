@@ -142,8 +142,8 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     }
     afe_config->aec_init = codec_->input_reference();
     afe_config->aec_mode = AEC_MODE_SR_HIGH_PERF;
-    // LVGL/EAF 动画跑在 core 1；AFE 放到 core 0 与 audio_input 同侧，减少 fetch 饿死。
-    afe_config->afe_perferred_core = 0;
+    // WiFi 在 core 0；AFE 推理放到 core 1，避免长时间占核导致 bcn_timeout。
+    afe_config->afe_perferred_core = 1;
     afe_config->afe_perferred_priority = 5;
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
     
