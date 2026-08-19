@@ -98,12 +98,13 @@ private:
     TaskHandle_t main_event_loop_task_handle_ = nullptr;
 
     void OnWakeWordDetected();
-    void CheckNewVersion(Ota& ota);
+    void CheckNewVersion(Ota& ota, bool pause_lvgl = true);
     void CheckAssetsVersion();
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);
     bool InitializeProtocol(Ota& ota);
     void StartNetworkAndProtocol();
+    bool SpawnNetBootTask();
 };
 
 

@@ -13,10 +13,14 @@
 #include <cstring>
 #include <esp_log.h>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 #include <font_awesome.h>
+#if defined(ESP_PLATFORM)
+#include "freertos/idf_additions.h"
+#endif
 
 #include <ssid_manager.h>
 #include <inttypes.h>
@@ -190,7 +194,7 @@ void Application::CheckAssetsVersion() {
     display->SetEmotion("microchip_ai");
 }
 
-void Application::CheckNewVersion(Ota& ota) {
+void Application::CheckNewVersion(Ota& ota, bool pause_lvgl) {
     const int MAX_RETRY = 10;
     int retry_count = 0;
     int retry_delay = 10; // 初始重试延迟为10秒
@@ -206,7 +210,7 @@ void Application::CheckNewVersion(Ota& ota) {
             }
         }
 
-        esp_err_t err = ota.CheckVersion();
+        esp_err_t err = ota.CheckVersion(pause_lvgl);
         if (err != ESP_OK) {
             retry_count++;
             if (retry_count >= MAX_RETRY) {
@@ -435,7 +439,10 @@ void Application::ToggleChatState() {
     }
 
     if (!protocol_) {
-        ESP_LOGE(TAG, "Protocol not initialized");
+        ESP_LOGW(TAG, "Protocol not initialized");
+        if (auto* display = Board::GetInstance().GetDisplay()) {
+            display->ShowNotification(Lang::Strings::CONNECTING, 3000);
+        }
         return;
     }
 
@@ -472,7 +479,10 @@ void Application::StartListening() {
     }
 
     if (!protocol_) {
-        ESP_LOGE(TAG, "Protocol not initialized");
+        ESP_LOGW(TAG, "Protocol not initialized");
+        if (auto* display = Board::GetInstance().GetDisplay()) {
+            display->ShowNotification(Lang::Strings::CONNECTING, 3000);
+        }
         return;
     }
     
@@ -679,24 +689,70 @@ bool Application::InitializeProtocol(Ota& ota) {
 }
 
 void Application::StartNetworkAndProtocol() {
-    auto& board = Board::GetInstance();
-    ESP_LOGI(TAG, "Background network/OTA/protocol start");
+    ESP_LOGI(TAG, "Background network/OTA/protocol start (heap=%u internal=%u)",
+             static_cast<unsigned>(esp_get_free_heap_size()),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
 #if !CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B
-    board.StartNetwork();
+    Board::GetInstance().StartNetwork();
 #endif
 
 #if CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B
     ESP_LOGI(TAG, "Waiting for WiFi in background (UI already on home)");
-    while (!WifiStation::GetInstance().IsConnected()) {
+    constexpr int kWifiWaitSec = 120;
+    for (int i = 0; i < kWifiWaitSec && !WifiStation::GetInstance().IsConnected(); ++i) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
-    ESP_LOGI(TAG, "WiFi connected, continue OTA/protocol");
+    if (!WifiStation::GetInstance().IsConnected()) {
+        ESP_LOGW(TAG, "WiFi not connected after %d s, continue OTA/protocol", kWifiWaitSec);
+    } else {
+        ESP_LOGI(TAG, "WiFi connected, continue OTA/protocol");
+    }
 #endif
 
+    // 任务可能在 SetDeviceState(idle) 之前就跑起来；等 idle 以免 CheckNewVersion
+    // 把前台打回 activating。
+    for (int i = 0; i < 200 && device_state_ != kDeviceStateIdle; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
     Ota ota;
-    CheckNewVersion(ota);
-    InitializeProtocol(ota);
-    ESP_LOGI(TAG, "Background network/OTA/protocol done");
+    CheckNewVersion(ota, /*pause_lvgl=*/false);
+    if (InitializeProtocol(ota)) {
+        ESP_LOGI(TAG, "Protocol ready");
+    } else {
+        ESP_LOGW(TAG, "Protocol start failed");
+    }
+    ESP_LOGI(TAG, "Background network/OTA/protocol done (protocol=%s)",
+             protocol_ ? "ready" : "missing");
+}
+
+bool Application::SpawnNetBootTask() {
+    auto fn = [](void* arg) {
+        static_cast<Application*>(arg)->StartNetworkAndProtocol();
+        vTaskDelete(NULL);
+    };
+    // OTA 写 NVS / SPI flash 会关 cache。栈若在 PSRAM，会触发
+    // esp_task_stack_is_sane_cache_disabled 重启。必须用内部 DRAM。
+    // 本函数在 AFE 之前调用，此时 internal 约 70KB，16~20KB 栈分得出来。
+    // 也不要用普通 xTaskCreate：SPIRAM_USE_MALLOC 时栈可能被分到 PSRAM。
+    static constexpr uint32_t kStackBytes[] = {20 * 1024, 16 * 1024, 12 * 1024};
+    for (uint32_t bytes : kStackBytes) {
+        if (xTaskCreateWithCaps(fn, "net_boot", bytes, this, 3,
+                                &check_new_version_task_handle_,
+                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) == pdPASS) {
+            ESP_LOGI(TAG, "net_boot started (internal stack=%u, internal_free=%u)",
+                     static_cast<unsigned>(bytes),
+                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+            return true;
+        }
+    }
+    ESP_LOGE(TAG,
+             "net_boot create failed heap=%u internal=%u largest_int=%u spiram=%u",
+             static_cast<unsigned>(esp_get_free_heap_size()),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+    return false;
 }
 
 void Application::Start() {
@@ -780,6 +836,10 @@ void Application::Start() {
         display = board.GetDisplay();
     }
     board.RestoreAfterNetworkOta();
+    // 必须在 AFE 吃掉内部 DRAM 之前拉起；栈走 PSRAM，避免 xTaskCreate 失败。
+    if (!SpawnNetBootTask()) {
+        ESP_LOGE(TAG, "net_boot unavailable; wake/chat will stay offline until reboot");
+    }
     audio_service_.Start();
 #if CONFIG_USE_AFE_WAKE_WORD || CONFIG_USE_CUSTOM_WAKE_WORD || CONFIG_USE_ESP_WAKE_WORD
     GetAudioService().SetModelsList(esp_srmodel_init("model"));
@@ -794,11 +854,6 @@ void Application::Start() {
     esp_timer_start_periodic(clock_timer_handle_, 1000000);
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
-
-    xTaskCreate([](void* arg) {
-        static_cast<Application*>(arg)->StartNetworkAndProtocol();
-        vTaskDelete(NULL);
-    }, "net_boot", 4096 * 4, this, 3, &check_new_version_task_handle_);
 #else
     board.PrepareForNetworkOta();
     board.StartNetwork();
@@ -904,6 +959,7 @@ void Application::MainEventLoop() {
 
 void Application::OnWakeWordDetected() {
     if (!protocol_) {
+        ESP_LOGW(TAG, "Wake word ignored: protocol not ready");
         return;
     }
 
