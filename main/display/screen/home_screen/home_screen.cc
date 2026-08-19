@@ -61,6 +61,8 @@ extern "C" void board_release_power_hold_if_supported();
 #include "sd_card_screen/sd_card_screen.h"
 #include "info_screen/info_screen.h"
 #include "wifi_required_dialog.h"
+#include "badge_screen/badge_screen.h"
+#include "bagclip_screen/bagclip_screen.h"
 
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_puhui_30_4);
@@ -242,7 +244,27 @@ void sd_card_lifecycle_cb(screen_lifecycle_event_t event) {
     SdCardScreen::LifecycleCallback(event);
 }
 
-// ????????????????UNLOAD ????????/ ???? timer??// ??????????? log??
+// 像章/背包扣：UNLOAD 时由各自屏幕释放图片缓冲和定时器，此处只记日志。
+void badge_lifecycle_cb(screen_lifecycle_event_t event) {
+    PwrKey_OnScreenLifecycle("badge", event);
+    if (event == SCREEN_LIFECYCLE_LOAD) {
+        ESP_LOGI(TAG_HOME, "load: badge_screen");
+    } else {
+        ESP_LOGI(TAG_HOME, "unload: badge_screen");
+    }
+    BadgeScreen::LifecycleCallback(event);
+}
+
+void bagclip_lifecycle_cb(screen_lifecycle_event_t event) {
+    PwrKey_OnScreenLifecycle("bagclip", event);
+    if (event == SCREEN_LIFECYCLE_LOAD) {
+        ESP_LOGI(TAG_HOME, "load: bagclip_screen");
+    } else {
+        ESP_LOGI(TAG_HOME, "unload: bagclip_screen");
+    }
+    BagclipScreen::LifecycleCallback(event);
+}
+
 void pin_test_lifecycle_cb(screen_lifecycle_event_t event) {
     PwrKey_OnScreenLifecycle("pin_test", event);
     if (event == SCREEN_LIFECYCLE_LOAD) {
@@ -571,6 +593,26 @@ void LaunchSdCard(screen_lifecycle_cb_t lifecycle_cb) {
     }
 }
 
+void LaunchBadge(screen_lifecycle_cb_t lifecycle_cb) {
+    lv_obj_t* old_scr = lv_screen_active();
+    lv_obj_t* app = BadgeScreen::Create();
+    screen_attach_lifecycle(app, lifecycle_cb);
+    lv_screen_load(app);
+    if (old_scr != nullptr && old_scr != app) {
+        lv_obj_delete_async(old_scr);
+    }
+}
+
+void LaunchBagclip(screen_lifecycle_cb_t lifecycle_cb) {
+    lv_obj_t* old_scr = lv_screen_active();
+    lv_obj_t* app = BagclipScreen::Create();
+    screen_attach_lifecycle(app, lifecycle_cb);
+    lv_screen_load(app);
+    if (old_scr != nullptr && old_scr != app) {
+        lv_obj_delete_async(old_scr);
+    }
+}
+
 void LaunchPinTest(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* old_scr = lv_screen_active();
     lv_obj_t* app = PinTestScreen::Create();
@@ -811,6 +853,8 @@ constexpr AppEntry kApps[] = {
     {"calculator",     "计算器",   LaunchCalculator,    calculator_lifecycle_cb,    false},
     {"weather",        "天气",     LaunchWeather,       weather_lifecycle_cb,       true},
     {"sd",             "SD卡",     LaunchSdCard,        sd_card_lifecycle_cb,       false},
+    {"badge",          "像章",     LaunchBadge,         badge_lifecycle_cb,         false},
+    {"bagclip",        "背包扣",   LaunchBagclip,       bagclip_lifecycle_cb,       false},
 #if !defined(BOARD_ESP_VOCAT)
     {"pin",            "引脚测试", LaunchPinTest,       pin_test_lifecycle_cb,      false},
 #endif

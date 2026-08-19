@@ -83,10 +83,10 @@ constexpr int32_t kTimeW = 52;
 constexpr int32_t kTimeGap = 6;
 constexpr int32_t kCtrlRowY = 268;
 constexpr int32_t kCtrlRowW = 272;
-constexpr int32_t kCtrlRowH = 42;
-constexpr int32_t kSideBtn = 28;
-constexpr int32_t kStepBtn = 34;
-constexpr int32_t kPlayBtn = 42;
+constexpr int32_t kCtrlRowH = 44;
+constexpr int32_t kSideBtn = 28;   // 音量加减，保持原尺寸避免被圆屏边缘裁切
+constexpr int32_t kStepBtn = 38;   // 上一首/下一首，适当放大
+constexpr int32_t kPlayBtn = 44;   // 播放/暂停，适当放大
 constexpr int32_t kBottomRowY = 318;
 constexpr int32_t kModeBtnW = 68;
 constexpr int32_t kModeBtnH = 28;
@@ -759,9 +759,9 @@ lv_obj_t* CreateRoundButton(lv_obj_t* parent, int32_t size, uint32_t bg_color,
     lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
     lv_obj_set_ext_click_area(btn, 10);
 
-    int32_t icon_box = (size * 11) / 20;
-    if (icon_box < 12) {
-        icon_box = 12;
+    int32_t icon_box = (size * 13) / 20;
+    if (icon_box < 14) {
+        icon_box = 14;
     }
     lv_obj_t* img = lv_image_create(btn);
     lv_obj_set_size(img, icon_box, icon_box);
