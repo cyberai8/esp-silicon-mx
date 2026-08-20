@@ -108,9 +108,6 @@ NAME_ALIASES: dict[str, str] = {
     # 录音
     "recording": "recording",
     "录音": "recording",
-    # 翻译
-    "translate": "translate",
-    "翻译": "translate",
     # 主题 / claw（历史资源）
     "theme": "theme",
     "主题": "theme",

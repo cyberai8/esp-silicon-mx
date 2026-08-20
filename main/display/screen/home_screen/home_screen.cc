@@ -47,7 +47,6 @@ extern "C" void board_release_power_hold_if_supported();
 #include "music_screen/music_screen.h"
 #include "radio_screen/radio_screen.h"
 #include "recording_screen/recording_screen.h"
-#include "translate_screen/translate_screen.h"
 #include "pwr_key_handler.h"
 #include "screen_util.h"
 #include "idle_power_policy.h"
@@ -299,16 +298,6 @@ void magnet_lifecycle_cb(screen_lifecycle_event_t event) {
         ESP_LOGI(TAG_HOME, "unload: magnet_screen");
     }
     MagnetScreen::LifecycleCallback(event);
-}
-
-void translate_lifecycle_cb(screen_lifecycle_event_t event) {
-    PwrKey_OnScreenLifecycle("translate", event);
-    if (event == SCREEN_LIFECYCLE_LOAD) {
-        ESP_LOGI(TAG_HOME, "load: translate_screen");
-    } else {
-        ESP_LOGI(TAG_HOME, "unload: translate_screen");
-    }
-    TranslateScreen::LifecycleCallback(event);
 }
 
 constexpr int kPanelW = DISPLAY_WIDTH;
@@ -601,16 +590,6 @@ void LaunchTest(screen_lifecycle_cb_t lifecycle_cb) {
     TestScreen::LaunchFromHome(lifecycle_cb);
 }
 
-void LaunchTranslate(screen_lifecycle_cb_t lifecycle_cb) {
-    lv_obj_t* old_scr = lv_screen_active();
-    lv_obj_t* app = TranslateScreen::Create();
-    screen_attach_lifecycle(app, lifecycle_cb);
-    lv_screen_load(app);
-    if (old_scr != nullptr && old_scr != app) {
-        lv_obj_delete_async(old_scr);
-    }
-}
-
 // ESPClaw???? ??????????ota_1 ?????? edge_agent??
 bool s_espclaw_switching = false;
 lv_obj_t* s_espclaw_overlay = nullptr;
@@ -829,7 +808,6 @@ constexpr AppEntry kApps[] = {
     {"settings",       "设置",     LaunchSettings,      settings_lifecycle_cb,      false},
     {"radio",          "电台",     LaunchRadio,         radio_lifecycle_cb,         true},
     {"recording",      "录音",     LaunchRecording,     recording_lifecycle_cb,     false},
-    {"translate",      "翻译",     LaunchTranslate,     translate_lifecycle_cb,     true},
 };
 
 constexpr int kTotalApps = static_cast<int>(sizeof(kApps) / sizeof(kApps[0]));

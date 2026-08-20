@@ -329,21 +329,6 @@ def icon_theme(cr):
     fill(cr)
 
 
-def icon_translate(cr):
-    rounded_rect(cr, 40, 72, 100, 80, 18)
-    stroke(cr)
-    cr.move_to(72, 152)
-    cr.line_to(56, 184)
-    cr.line_to(96, 158)
-    stroke(cr)
-    rounded_rect(cr, 116, 104, 100, 80, 18)
-    stroke(cr)
-    cr.move_to(188, 184)
-    cr.line_to(204, 216)
-    cr.line_to(164, 190)
-    stroke(cr)
-
-
 def icon_gps(cr):
     cx, cy = 128, 108
     cr.new_path()
@@ -496,8 +481,49 @@ def icon_album(cr):
     stroke(cr)
 
 
+def icon_badge(cr):
+    # 像章：圆形徽章/胸章，表达 /sdcard/badge 下的全屏图片展示。
+    circle(cr, 128, 116, 62)
+    cr.new_sub_path()
+    cr.arc(128, 116, 30, 0, 2 * math.pi)
+    stroke(cr)
+    cr.move_to(98, 168)
+    cr.line_to(82, 214)
+    cr.line_to(128, 190)
+    cr.line_to(174, 214)
+    cr.line_to(158, 168)
+    stroke(cr)
+    cr.new_sub_path()
+    cr.arc(128, 116, 9, 0, 2 * math.pi)
+    fill(cr)
+
+
+def icon_bagclip(cr):
+    # 背包扣：挂扣 + 圆形图片牌，和自动轮播图片应用语义对应。
+    cr.new_path()
+    cr.arc(128, 70, 28, math.pi * 0.18, math.pi * 0.82)
+    stroke(cr)
+    cr.move_to(100, 70)
+    cr.line_to(100, 94)
+    stroke(cr)
+    cr.move_to(156, 70)
+    cr.line_to(156, 94)
+    stroke(cr)
+    rounded_rect(cr, 92, 86, 72, 34, 16)
+    stroke(cr)
+    circle(cr, 128, 158, 54)
+    cr.move_to(94, 178)
+    cr.line_to(118, 148)
+    cr.line_to(134, 166)
+    cr.line_to(150, 146)
+    cr.line_to(166, 178)
+    stroke(cr)
+
+
 ICONS = {
     "album": icon_album,
+    "badge": icon_badge,
+    "bagclip": icon_bagclip,
     "chat": icon_chat,
     "wifi": icon_wifi,
     "recording": icon_recording,
@@ -511,7 +537,6 @@ ICONS = {
     "2048": icon_2048,
     "info": icon_info,
     "theme": icon_theme,
-    "translate": icon_translate,
     "gps": icon_gps,
     "call": icon_call,
     "spirit_level": icon_spirit_level,
