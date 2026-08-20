@@ -54,9 +54,11 @@ constexpr size_t kExifProbeBytes = 72u * 1024;
 // PNG 先按整数倍抽行抽列降到这块预算以内，再盒式缩到目标尺寸。
 constexpr size_t kPngDecodeMaxBytes = 2u * 1024u * 1024u;
 constexpr int kPngMaxSide = 8192;
-// progressive 要把整图 DCT 系数摊在内存里，大约 3 字节/像素。超过这个上限
-// 让 libjpeg 自己失败，避免把 8MB PSRAM 吃光。
-constexpr size_t kJpegSoftMaxBytes = 6u * 1024u * 1024u;
+// progressive 要把整图 DCT 系数摊在内存里，大约 3 字节/像素。预算按 PSRAM
+// 最大连续块动态给，超了再走 DC 扫描 1/8 预览，避免直接放弃显示。
+constexpr size_t kJpegSoftMinBytes = 4u * 1024u * 1024u;
+constexpr size_t kJpegSoftMaxBytes = 16u * 1024u * 1024u;
+constexpr size_t kJpegSoftKeepBytes = 2u * 1024u * 1024u;
 
 constexpr uint32_t kColorBg = 0x0B0D10;
 constexpr uint32_t kColorBgGrad = 0x14171C;
@@ -765,6 +767,8 @@ bool DecodeJpegSoftIo(const uint8_t* data, size_t len, FILE* fp, int min_w, int 
 bool DecodeJpegSoftFromFile(const char* path, int min_w, int min_h, bool cover, uint8_t** out,
                             int* out_w, int* out_h, int* out_stride_px, int* orig_w,
                             int* orig_h);
+bool DecodeJpegDcPreview(const uint8_t* data, size_t len, FILE* fp, uint8_t** out, int* out_w,
+                         int* out_h, int* out_stride_px, int* orig_w, int* orig_h);
 
 // 解出「不小于 min_w×min_h」的最小一档（1、1/2、1/4、1/8）。
 // cover=true 时按长边贴合，用于方形缩略图；false 按短边贴合，用于整图铺满。
@@ -774,8 +778,13 @@ bool DecodeJpegScaled(const uint8_t* data, size_t len, int min_w, int min_h, boo
     *out = nullptr;
     const JpegSof sof = ParseJpegSof(data, len);
     if (JpegCanSoftDecode(sof)) {
-        return DecodeJpegSoftIo(data, len, nullptr, min_w, min_h, cover, out, out_w, out_h,
-                                out_stride_px, orig_w, orig_h);
+        if (DecodeJpegSoftIo(data, len, nullptr, min_w, min_h, cover, out, out_w, out_h,
+                             out_stride_px, orig_w, orig_h)) {
+            return true;
+        }
+        ESP_LOGW(TAG, "libjpeg progressive failed, try DC preview");
+        return DecodeJpegDcPreview(data, len, nullptr, out, out_w, out_h, out_stride_px,
+                                   orig_w, orig_h);
     }
     if (!JpegCanHwDecode(sof)) {
         return false;
@@ -869,6 +878,531 @@ uint16_t PackRgb565(uint32_t r, uint32_t g, uint32_t b) {
     return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
 }
 
+size_t JpegSoftBudget() {
+    const size_t largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    size_t budget = (largest > kJpegSoftKeepBytes) ? (largest - kJpegSoftKeepBytes)
+                                                   : kJpegSoftMinBytes;
+    if (budget < kJpegSoftMinBytes) {
+        budget = kJpegSoftMinBytes;
+    }
+    if (budget > kJpegSoftMaxBytes) {
+        budget = kJpegSoftMaxBytes;
+    }
+    return budget;
+}
+
+// Progressive JPEG 太大时 libjpeg 会把整图 DCT 摊开。第一段 SOS 通常是 DC
+// 扫描（Ss=Se=0），只解 DC 就能得到约 1/8 分辨率的预览，内存只要几百 KB。
+struct JpegByteSrc {
+    FILE* fp = nullptr;
+    const uint8_t* mem = nullptr;
+    size_t len = 0;
+    size_t pos = 0;
+};
+
+int JpegSrcGet(JpegByteSrc* src) {
+    if (src->fp != nullptr) {
+        return fgetc(src->fp);
+    }
+    if (src->pos >= src->len) {
+        return EOF;
+    }
+    return src->mem[src->pos++];
+}
+
+bool JpegSrcRead(JpegByteSrc* src, uint8_t* dst, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        const int b = JpegSrcGet(src);
+        if (b == EOF) {
+            return false;
+        }
+        dst[i] = static_cast<uint8_t>(b);
+    }
+    return true;
+}
+
+uint16_t JpegSrcU16(JpegByteSrc* src) {
+    const int a = JpegSrcGet(src);
+    const int b = JpegSrcGet(src);
+    if (a == EOF || b == EOF) {
+        return 0;
+    }
+    return static_cast<uint16_t>((a << 8) | b);
+}
+
+struct JpegBitIn {
+    JpegByteSrc* src = nullptr;
+    uint32_t acc = 0;
+    int nbits = 0;
+    int unread_marker = 0;
+};
+
+int JpegNextByte(JpegBitIn* in) {
+    for (;;) {
+        const int b = JpegSrcGet(in->src);
+        if (b != 0xFF) {
+            return b;
+        }
+        int n = JpegSrcGet(in->src);
+        while (n == 0xFF) {
+            n = JpegSrcGet(in->src);
+        }
+        if (n == 0x00) {
+            return 0xFF;
+        }
+        if (n == EOF) {
+            return EOF;
+        }
+        in->unread_marker = n;
+        return EOF;
+    }
+}
+
+int JpegGetBits(JpegBitIn* in, int n) {
+    while (in->nbits < n) {
+        const int b = JpegNextByte(in);
+        if (b == EOF) {
+            return -1;
+        }
+        in->acc = (in->acc << 8) | static_cast<uint32_t>(b);
+        in->nbits += 8;
+    }
+    in->nbits -= n;
+    return static_cast<int>((in->acc >> in->nbits) & ((1 << n) - 1));
+}
+
+struct JpegHuff {
+    int mincode[17];
+    int maxcode[17];
+    int valptr[17];
+    uint8_t huffval[256];
+    bool ok = false;
+};
+
+bool JpegBuildHuff(JpegHuff* t, const uint8_t bits[17], const uint8_t* vals, int nval) {
+    memset(t, 0, sizeof(*t));
+    if (nval < 0 || nval > 256) {
+        return false;
+    }
+    memcpy(t->huffval, vals, static_cast<size_t>(nval));
+    int code = 0;
+    int p = 0;
+    for (int l = 1; l <= 16; ++l) {
+        t->valptr[l] = p;
+        t->mincode[l] = code;
+        p += bits[l];
+        if (p > nval) {
+            return false;
+        }
+        t->maxcode[l] = (bits[l] != 0) ? (code + bits[l] - 1) : -1;
+        code = (code + bits[l]) << 1;
+    }
+    t->ok = true;
+    return true;
+}
+
+int JpegDecodeHuff(JpegBitIn* in, const JpegHuff* t) {
+    if (!t->ok) {
+        return -1;
+    }
+    int code = JpegGetBits(in, 1);
+    if (code < 0) {
+        return -1;
+    }
+    for (int l = 1; l <= 16; ++l) {
+        if (t->maxcode[l] >= 0 && code <= t->maxcode[l]) {
+            return t->huffval[t->valptr[l] + (code - t->mincode[l])];
+        }
+        const int b = JpegGetBits(in, 1);
+        if (b < 0) {
+            return -1;
+        }
+        code = (code << 1) | b;
+    }
+    return -1;
+}
+
+int JpegReceiveExtend(JpegBitIn* in, int ssss) {
+    if (ssss <= 0) {
+        return 0;
+    }
+    const int v = JpegGetBits(in, ssss);
+    if (v < 0) {
+        return 0;
+    }
+    const int vt = 1 << (ssss - 1);
+    if (v < vt) {
+        return v + ((-1) << ssss) + 1;
+    }
+    return v;
+}
+
+int JpegClamp8(int v) {
+    if (v < 0) {
+        return 0;
+    }
+    if (v > 255) {
+        return 255;
+    }
+    return v;
+}
+
+bool DecodeJpegDcPreview(const uint8_t* data, size_t len, FILE* fp, uint8_t** out, int* out_w,
+                         int* out_h, int* out_stride_px, int* orig_w, int* orig_h) {
+    *out = nullptr;
+    JpegByteSrc src;
+    src.fp = fp;
+    src.mem = data;
+    src.len = len;
+    if (fp != nullptr) {
+        fseek(fp, 0, SEEK_SET);
+    }
+
+    JpegHuff dc_huff[4];
+    int qt_dc[4] = {16, 16, 16, 16};
+    int width = 0;
+    int height = 0;
+    int nf = 0;
+    int cid[4] = {};
+    int ch[4] = {};
+    int cv[4] = {};
+    int ctq[4] = {};
+    int restart = 0;
+    bool sof2 = false;
+
+    if (JpegSrcGet(&src) != 0xFF || JpegSrcGet(&src) != 0xD8) {
+        return false;
+    }
+
+    for (;;) {
+        int b = JpegSrcGet(&src);
+        while (b == 0xFF) {
+            b = JpegSrcGet(&src);
+        }
+        if (b == EOF) {
+            return false;
+        }
+        const int marker = b;
+        if (marker == 0xDA) {
+            break;
+        }
+        if (marker == 0xD9) {
+            return false;
+        }
+        if (marker == 0xD8 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
+            continue;
+        }
+        const uint16_t seglen = JpegSrcU16(&src);
+        if (seglen < 2) {
+            return false;
+        }
+        const int payload = static_cast<int>(seglen) - 2;
+        if (marker == 0xC2 || marker == 0xC0 || marker == 0xC1) {
+            sof2 = (marker == 0xC2);
+            uint8_t hdr[6];
+            if (payload < 6 || !JpegSrcRead(&src, hdr, 6)) {
+                return false;
+            }
+            if (hdr[0] != 8) {
+                return false;
+            }
+            height = (hdr[1] << 8) | hdr[2];
+            width = (hdr[3] << 8) | hdr[4];
+            nf = hdr[5];
+            if (nf < 1 || nf > 4 || width < 8 || height < 8) {
+                return false;
+            }
+            for (int i = 0; i < nf; ++i) {
+                uint8_t c[3];
+                if (!JpegSrcRead(&src, c, 3)) {
+                    return false;
+                }
+                cid[i] = c[0];
+                ch[i] = c[1] >> 4;
+                cv[i] = c[1] & 0x0F;
+                ctq[i] = c[2] & 0x0F;
+                if (ch[i] < 1 || cv[i] < 1) {
+                    return false;
+                }
+            }
+            continue;
+        }
+        if (marker == 0xDB) {
+            int left = payload;
+            while (left > 0) {
+                const int pq_tq = JpegSrcGet(&src);
+                if (pq_tq == EOF) {
+                    return false;
+                }
+                --left;
+                const int tq = pq_tq & 0x0F;
+                const int pq = pq_tq >> 4;
+                const int step = (pq != 0) ? 2 : 1;
+                for (int i = 0; i < 64; ++i) {
+                    int v = JpegSrcGet(&src);
+                    if (pq != 0) {
+                        const int v2 = JpegSrcGet(&src);
+                        v = (v << 8) | v2;
+                        left -= 2;
+                    } else {
+                        --left;
+                    }
+                    if (i == 0 && tq >= 0 && tq < 4) {
+                        qt_dc[tq] = (v > 0) ? v : 16;
+                    }
+                }
+            }
+            continue;
+        }
+        if (marker == 0xC4) {
+            int left = payload;
+            while (left > 0) {
+                const int tc_th = JpegSrcGet(&src);
+                if (tc_th == EOF) {
+                    return false;
+                }
+                --left;
+                uint8_t bits[17] = {};
+                int nval = 0;
+                for (int i = 1; i <= 16; ++i) {
+                    const int li = JpegSrcGet(&src);
+                    if (li == EOF) {
+                        return false;
+                    }
+                    bits[i] = static_cast<uint8_t>(li);
+                    nval += li;
+                    --left;
+                }
+                uint8_t vals[256];
+                if (nval < 0 || nval > 256 || left < nval) {
+                    return false;
+                }
+                if (!JpegSrcRead(&src, vals, static_cast<size_t>(nval))) {
+                    return false;
+                }
+                left -= nval;
+                const int tc = tc_th >> 4;
+                const int th = tc_th & 0x0F;
+                if (tc == 0 && th >= 0 && th < 4) {
+                    JpegBuildHuff(&dc_huff[th], bits, vals, nval);
+                }
+            }
+            continue;
+        }
+        if (marker == 0xDD && payload >= 2) {
+            restart = JpegSrcU16(&src);
+            for (int i = 2; i < payload; ++i) {
+                JpegSrcGet(&src);
+            }
+            continue;
+        }
+        for (int i = 0; i < payload; ++i) {
+            if (JpegSrcGet(&src) == EOF) {
+                return false;
+            }
+        }
+    }
+
+    if (!sof2 || width < 8 || height < 8) {
+        return false;
+    }
+
+    const uint16_t sos_len = JpegSrcU16(&src);
+    if (sos_len < 6) {
+        return false;
+    }
+    const int ns = JpegSrcGet(&src);
+    if (ns < 1 || ns > nf) {
+        return false;
+    }
+    int scan_i[4] = {};
+    int scan_td[4] = {};
+    for (int i = 0; i < ns; ++i) {
+        const int cs = JpegSrcGet(&src);
+        const int tdta = JpegSrcGet(&src);
+        int found = -1;
+        for (int c = 0; c < nf; ++c) {
+            if (cid[c] == cs) {
+                found = c;
+                break;
+            }
+        }
+        if (found < 0) {
+            return false;
+        }
+        scan_i[i] = found;
+        scan_td[i] = (tdta >> 4) & 0x0F;
+    }
+    const int ss = JpegSrcGet(&src);
+    const int se = JpegSrcGet(&src);
+    const int ah_al = JpegSrcGet(&src);
+    if (ss != 0 || se != 0) {
+        ESP_LOGW(TAG, "progressive first scan Ss=%d Se=%d, skip DC preview", ss, se);
+        return false;
+    }
+    const int al = ah_al & 0x0F;
+    (void)sos_len;
+
+    int hmax = 1;
+    int vmax = 1;
+    for (int i = 0; i < nf; ++i) {
+        if (ch[i] > hmax) {
+            hmax = ch[i];
+        }
+        if (cv[i] > vmax) {
+            vmax = cv[i];
+        }
+    }
+    const int mcu_x = (width + hmax * 8 - 1) / (hmax * 8);
+    const int mcu_y = (height + vmax * 8 - 1) / (vmax * 8);
+
+    int16_t* plane[4] = {};
+    int pbx[4] = {};
+    int pby[4] = {};
+    for (int i = 0; i < nf; ++i) {
+        pbx[i] = (width * ch[i] + hmax * 8 - 1) / (hmax * 8);
+        pby[i] = (height * cv[i] + vmax * 8 - 1) / (vmax * 8);
+        if (pbx[i] < 1) {
+            pbx[i] = 1;
+        }
+        if (pby[i] < 1) {
+            pby[i] = 1;
+        }
+        const size_t cells = static_cast<size_t>(pbx[i]) * static_cast<size_t>(pby[i]);
+        plane[i] = static_cast<int16_t*>(AllocBig(cells * sizeof(int16_t)));
+        if (plane[i] == nullptr) {
+            for (int j = 0; j < i; ++j) {
+                heap_caps_free(plane[j]);
+            }
+            return false;
+        }
+        memset(plane[i], 0, cells * sizeof(int16_t));
+    }
+
+    JpegBitIn bits;
+    bits.src = &src;
+    int last_dc[4] = {};
+    int mcu_count = 0;
+    bool ok = true;
+    for (int my = 0; my < mcu_y && ok; ++my) {
+        for (int mx = 0; mx < mcu_x && ok; ++mx) {
+            if (restart > 0 && mcu_count > 0 && (mcu_count % restart) == 0) {
+                bits.nbits = 0;
+                bits.acc = 0;
+                memset(last_dc, 0, sizeof(last_dc));
+                if (bits.unread_marker == 0) {
+                    while (bits.unread_marker == 0) {
+                        if (JpegNextByte(&bits) == EOF) {
+                            break;
+                        }
+                    }
+                }
+                if (bits.unread_marker >= 0xD0 && bits.unread_marker <= 0xD7) {
+                    bits.unread_marker = 0;
+                }
+            }
+            for (int s = 0; s < ns && ok; ++s) {
+                const int ci = scan_i[s];
+                const int td = scan_td[s];
+                if (td < 0 || td > 3 || !dc_huff[td].ok) {
+                    ok = false;
+                    break;
+                }
+                for (int iy = 0; iy < cv[ci] && ok; ++iy) {
+                    for (int ix = 0; ix < ch[ci]; ++ix) {
+                        const int bx = mx * ch[ci] + ix;
+                        const int by = my * cv[ci] + iy;
+                        const int ssss = JpegDecodeHuff(&bits, &dc_huff[td]);
+                        if (ssss < 0) {
+                            ok = false;
+                            break;
+                        }
+                        last_dc[ci] += JpegReceiveExtend(&bits, ssss);
+                        if (bx < pbx[ci] && by < pby[ci]) {
+                            plane[ci][by * pbx[ci] + bx] =
+                                static_cast<int16_t>(last_dc[ci] << al);
+                        }
+                    }
+                }
+            }
+            ++mcu_count;
+        }
+    }
+
+    const int dw = (width + 7) / 8;
+    const int dh = (height + 7) / 8;
+    uint8_t* rgb = nullptr;
+    if (ok) {
+        rgb = static_cast<uint8_t*>(AllocBig(static_cast<size_t>(dw) * dh * 2));
+        ok = rgb != nullptr;
+    }
+    if (ok) {
+        const int y_i = 0;
+        int cb_i = (nf > 1) ? 1 : 0;
+        int cr_i = (nf > 2) ? 2 : cb_i;
+        for (int i = 0; i < nf; ++i) {
+            if (cid[i] == 2) {
+                cb_i = i;
+            }
+            if (cid[i] == 3) {
+                cr_i = i;
+            }
+        }
+        for (int y = 0; y < dh; ++y) {
+            for (int x = 0; x < dw; ++x) {
+                const int yx = (x * pbx[y_i]) / dw;
+                const int yy = (y * pby[y_i]) / dh;
+                int yv = plane[y_i][yy * pbx[y_i] + yx] * qt_dc[ctq[y_i] & 3];
+                yv = JpegClamp8((yv / 8) + 128);
+                int cb = 128;
+                int cr = 128;
+                if (nf >= 3) {
+                    const int cx = (x * pbx[cb_i]) / dw;
+                    const int cy = (y * pby[cb_i]) / dh;
+                    const int rx = (x * pbx[cr_i]) / dw;
+                    const int ry = (y * pby[cr_i]) / dh;
+                    cb = JpegClamp8(
+                        (plane[cb_i][cy * pbx[cb_i] + cx] * qt_dc[ctq[cb_i] & 3] / 8) + 128);
+                    cr = JpegClamp8(
+                        (plane[cr_i][ry * pbx[cr_i] + rx] * qt_dc[ctq[cr_i] & 3] / 8) + 128);
+                }
+                const int cbr = cb - 128;
+                const int crr = cr - 128;
+                const int r = JpegClamp8(yv + crr + (crr >> 2) + (crr >> 3) + (crr >> 5));
+                const int g = JpegClamp8(yv - ((cbr >> 2) + (cbr >> 4) + (cbr >> 5)) -
+                                         ((crr >> 1) + (crr >> 3) + (crr >> 4) + (crr >> 5)));
+                const int b = JpegClamp8(yv + cbr + (cbr >> 1) + (cbr >> 2) + (cbr >> 6));
+                const uint16_t pix = PackRgb565(static_cast<uint32_t>(r), static_cast<uint32_t>(g),
+                                                static_cast<uint32_t>(b));
+                uint8_t* d = rgb + (static_cast<size_t>(y) * dw + x) * 2;
+                d[0] = static_cast<uint8_t>(pix & 0xFF);
+                d[1] = static_cast<uint8_t>(pix >> 8);
+            }
+        }
+    }
+
+    for (int i = 0; i < nf; ++i) {
+        heap_caps_free(plane[i]);
+    }
+    if (!ok) {
+        heap_caps_free(rgb);
+        return false;
+    }
+    if (orig_w != nullptr) {
+        *orig_w = width;
+    }
+    if (orig_h != nullptr) {
+        *orig_h = height;
+    }
+    *out = rgb;
+    *out_w = dw;
+    *out_h = dh;
+    *out_stride_px = dw;
+    ESP_LOGI(TAG, "progressive DC preview %dx%d -> %dx%d", width, height, dw, dh);
+    return true;
+}
+
 #if defined(ESP_PLATFORM)
 
 struct JpegErr {
@@ -912,7 +1446,7 @@ bool DecodeJpegSoftIo(const uint8_t* data, size_t len, FILE* fp, int min_w, int 
 
     jpeg_create_decompress(&cinfo);
     if (cinfo.mem != nullptr) {
-        cinfo.mem->max_memory_to_use = static_cast<long>(kJpegSoftMaxBytes);
+        cinfo.mem->max_memory_to_use = static_cast<long>(JpegSoftBudget());
     }
     if (fp != nullptr) {
         jpeg_stdio_src(&cinfo, fp);
@@ -941,7 +1475,14 @@ bool DecodeJpegSoftIo(const uint8_t* data, size_t len, FILE* fp, int min_w, int 
     const float fy = static_cast<float>(min_h) / static_cast<float>(sh);
     const float need = cover ? (fx > fy ? fx : fy) : (fx < fy ? fx : fy);
     int div = 1;
-    if (need <= 0.125f) {
+    if (cinfo.progressive_mode) {
+        div = 8;
+        if (need > 0.5f) {
+            div = 2;
+        } else if (need > 0.25f) {
+            div = 4;
+        }
+    } else if (need <= 0.125f) {
         div = 8;
     } else if (need <= 0.25f) {
         div = 4;
@@ -1027,8 +1568,15 @@ bool DecodeJpegSoftFromFile(const char* path, int min_w, int min_h, bool cover, 
     }
     const bool ok = DecodeJpegSoftIo(nullptr, 0, fp, min_w, min_h, cover, out, out_w, out_h,
                                      out_stride_px, orig_w, orig_h);
+    if (ok) {
+        fclose(fp);
+        return true;
+    }
+    ESP_LOGW(TAG, "libjpeg progressive failed, try DC preview");
+    const bool dc = DecodeJpegDcPreview(nullptr, 0, fp, out, out_w, out_h, out_stride_px, orig_w,
+                                        orig_h);
     fclose(fp);
-    return ok;
+    return dc;
 }
 
 #else
