@@ -2,7 +2,8 @@
 //
 // 从 SD 卡 /sdcard/badge/ 目录扫描 JPEG/PNG，全屏 cover 缩放铺满 360×360 圆屏。
 //   - 轻触：切换下一张
-//   - 长按（≥600ms）：退回首页
+//   - 长按：退回首页
+//   - 右滑：退回首页（与其他应用一致）
 //
 // 图片解码在后台 FreeRTOS task 中完成，decode 完成后通过 lv_async_call 上屏。
 // 内存全部走 heap_caps_malloc(MALLOC_CAP_SPIRAM) 以减少内部 SRAM 压力。
@@ -44,7 +45,6 @@ namespace {
 constexpr const char* TAG = "BadgeScreen";
 constexpr const char* kBadgeDir = "/sdcard/badge";
 constexpr int32_t kScreenSize = DISPLAY_WIDTH;  // 360
-constexpr uint32_t kLongPressMs = 600;
 constexpr size_t kMaxImages = 200;
 constexpr size_t kMaxFileBytes = 8u * 1024u * 1024u;
 
@@ -466,51 +466,29 @@ void StartDecode(int index) {
 }
 
 // ---------------------------------------------------------------------------
-// 手势处理
+// 导航 / 手势
 // ---------------------------------------------------------------------------
 
-constexpr int32_t kTapMaxPx = 16;
-int32_t s_press_x = 0;
-int32_t s_press_y = 0;
-uint32_t s_press_tick = 0;
-bool s_long_pressed = false;
-
-void OnPressed(lv_event_t* e) {
-    lv_indev_t* indev = lv_indev_get_act();
-    lv_point_t pt{};
-    lv_indev_get_point(indev, &pt);
-    s_press_x    = pt.x;
-    s_press_y    = pt.y;
-    s_press_tick = lv_tick_get();
-    s_long_pressed = false;
+void GoHome() {
+    lv_obj_t* old_scr = lv_screen_active();
+    lv_obj_t* home = HomeScreen::Create();
+    lv_screen_load(home);
+    if (old_scr != nullptr && old_scr != home) {
+        lv_obj_delete_async(old_scr);
+    }
 }
 
-void OnReleased(lv_event_t* e) {
+void OnSwipeBack() { GoHome(); }
+
+void OnLongPressed(lv_event_t* /*e*/) {
     if (!ScreenAlive()) return;
-    const uint32_t held = lv_tick_elaps(s_press_tick);
-    if (s_long_pressed) return;
+    GoHome();
+}
 
-    lv_indev_t* indev = lv_indev_get_act();
-    lv_point_t pt{};
-    lv_indev_get_point(indev, &pt);
-    const int32_t dx = pt.x - s_press_x;
-    const int32_t dy = pt.y - s_press_y;
-    const int32_t dist = dx * dx + dy * dy;
-
-    if (held >= kLongPressMs) {
-        // 长按：退出回首页
-        lv_obj_t* home = HomeScreen::Create();
-        lv_obj_t* old = lv_screen_active();
-        lv_screen_load(home);
-        if (old && old != home) lv_obj_delete_async(old);
-        return;
-    }
-    if (dist <= kTapMaxPx * kTapMaxPx) {
-        // 轻触：下一张
-        if (s_images.empty()) return;
-        s_current_index = (s_current_index + 1) % static_cast<int>(s_images.size());
-        StartDecode(s_current_index);
-    }
+void OnClicked(lv_event_t* /*e*/) {
+    if (!ScreenAlive() || s_images.empty()) return;
+    s_current_index = (s_current_index + 1) % static_cast<int>(s_images.size());
+    StartDecode(s_current_index);
 }
 
 // ---------------------------------------------------------------------------
@@ -536,7 +514,7 @@ lv_obj_t* BadgeScreen::Create() {
     lv_obj_set_size(img, kScreenSize, kScreenSize);
     lv_obj_center(img);
     lv_image_set_inner_align(img, LV_IMAGE_ALIGN_STRETCH);
-    lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
+    screen_make_input_passive(img);
     s_ui.img = img;
 
     // 空目录提示
@@ -546,16 +524,14 @@ lv_obj_t* BadgeScreen::Create() {
     lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_center(hint);
+    screen_make_input_passive(hint);
     s_ui.hint = hint;
 
-    // 手势响应区：铺满整个屏幕
-    lv_obj_t* touch = lv_obj_create(scr);
-    lv_obj_set_size(touch, kScreenSize, kScreenSize);
-    lv_obj_center(touch);
-    lv_obj_remove_style_all(touch);
-    lv_obj_set_style_bg_opa(touch, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_add_event_cb(touch, OnPressed,  LV_EVENT_PRESSED,  nullptr);
-    lv_obj_add_event_cb(touch, OnReleased, LV_EVENT_RELEASED, nullptr);
+    // 手势挂在 scr 上（子控件已 passive），右滑/长按退出，轻触切图。
+    lv_obj_add_flag(scr, LV_OBJ_FLAG_CLICKABLE);
+    screen_attach_swipe_back(scr, OnSwipeBack);
+    lv_obj_add_event_cb(scr, OnLongPressed, LV_EVENT_LONG_PRESSED, nullptr);
+    lv_obj_add_event_cb(scr, OnClicked, LV_EVENT_CLICKED, nullptr);
 
     // 扫描图片目录
     s_images.clear();

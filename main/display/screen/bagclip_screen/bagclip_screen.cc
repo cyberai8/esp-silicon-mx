@@ -40,7 +40,6 @@ namespace {
 constexpr const char* TAG = "BagclipScreen";
 constexpr const char* kBagclipDir = "/sdcard/bagclip";
 constexpr int32_t kScreenSize = DISPLAY_WIDTH;   // 360
-constexpr uint32_t kLongPressMs    = 600;
 constexpr uint32_t kSlideIntervalMs = 3000;      // 3 秒自动翻页
 constexpr size_t kMaxImages = 200;
 constexpr size_t kMaxFileBytes = 8u * 1024u * 1024u;
@@ -352,45 +351,30 @@ void OnSlideTimer(lv_timer_t* /*t*/) {
 }
 
 // ---------------------------------------------------------------------------
-// 手势
+// 导航 / 手势
 // ---------------------------------------------------------------------------
 
-int32_t s_press_x = 0, s_press_y = 0;
-uint32_t s_press_tick = 0;
-bool s_long_pressed = false;
-constexpr int32_t kTapMaxPx = 16;
-
-void OnPressed(lv_event_t* /*e*/) {
-    lv_indev_t* indev = lv_indev_get_act();
-    lv_point_t pt{};
-    lv_indev_get_point(indev, &pt);
-    s_press_x = pt.x; s_press_y = pt.y;
-    s_press_tick = lv_tick_get(); s_long_pressed = false;
+void GoHome() {
+    lv_obj_t* old_scr = lv_screen_active();
+    lv_obj_t* home = HomeScreen::Create();
+    lv_screen_load(home);
+    if (old_scr != nullptr && old_scr != home) {
+        lv_obj_delete_async(old_scr);
+    }
 }
 
-void OnReleased(lv_event_t* /*e*/) {
+void OnSwipeBack() { GoHome(); }
+
+void OnLongPressed(lv_event_t* /*e*/) {
     if (!ScreenAlive()) return;
-    const uint32_t held = lv_tick_elaps(s_press_tick);
-    if (s_long_pressed) return;
-    lv_indev_t* indev = lv_indev_get_act();
-    lv_point_t pt{};
-    lv_indev_get_point(indev, &pt);
-    const int32_t dx = pt.x - s_press_x, dy = pt.y - s_press_y;
-    if (held >= kLongPressMs) {
-        // 长按：退出回首页
-        lv_obj_t* home = HomeScreen::Create();
-        lv_obj_t* old = lv_screen_active();
-        lv_screen_load(home);
-        if (old && old != home) lv_obj_delete_async(old);
-        return;
-    }
-    if (dx*dx + dy*dy <= kTapMaxPx * kTapMaxPx) {
-        if (s_images.empty()) return;
-        // 重置定时器，避免刚手动翻页后立刻自动翻
-        if (s_ui.slide_timer) lv_timer_reset(s_ui.slide_timer);
-        s_current_index = (s_current_index + 1) % static_cast<int>(s_images.size());
-        StartDecode(s_current_index);
-    }
+    GoHome();
+}
+
+void OnClicked(lv_event_t* /*e*/) {
+    if (!ScreenAlive() || s_images.empty()) return;
+    if (s_ui.slide_timer) lv_timer_reset(s_ui.slide_timer);
+    s_current_index = (s_current_index + 1) % static_cast<int>(s_images.size());
+    StartDecode(s_current_index);
 }
 
 }  // namespace
@@ -415,7 +399,7 @@ lv_obj_t* BagclipScreen::Create() {
     lv_obj_set_size(img, kScreenSize, kScreenSize);
     lv_obj_center(img);
     lv_image_set_inner_align(img, LV_IMAGE_ALIGN_STRETCH);
-    lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
+    screen_make_input_passive(img);
     s_ui.img = img;
 
     lv_obj_t* hint = lv_label_create(scr);
@@ -424,15 +408,13 @@ lv_obj_t* BagclipScreen::Create() {
     lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_center(hint);
+    screen_make_input_passive(hint);
     s_ui.hint = hint;
 
-    lv_obj_t* touch = lv_obj_create(scr);
-    lv_obj_set_size(touch, kScreenSize, kScreenSize);
-    lv_obj_center(touch);
-    lv_obj_remove_style_all(touch);
-    lv_obj_set_style_bg_opa(touch, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_add_event_cb(touch, OnPressed,  LV_EVENT_PRESSED,  nullptr);
-    lv_obj_add_event_cb(touch, OnReleased, LV_EVENT_RELEASED, nullptr);
+    lv_obj_add_flag(scr, LV_OBJ_FLAG_CLICKABLE);
+    screen_attach_swipe_back(scr, OnSwipeBack);
+    lv_obj_add_event_cb(scr, OnLongPressed, LV_EVENT_LONG_PRESSED, nullptr);
+    lv_obj_add_event_cb(scr, OnClicked, LV_EVENT_CLICKED, nullptr);
 
     s_images.clear();
     s_current_index = 0;
