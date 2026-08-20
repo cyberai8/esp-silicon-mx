@@ -56,10 +56,10 @@ struct Ringtone {
 };
 
 const Ringtone kRingtones[] = {
-    {"默认铃声", &Lang::Sounds::OGG_POPUP},
-    {"轻柔", &Lang::Sounds::OGG_SUCCESS},
-    {"鸟鸣", &Lang::Sounds::OGG_EXCLAMATION},
-    {"电子", &Lang::Sounds::OGG_WELCOME},
+    {"默认铃声", &Lang::Sounds::OGG_ALARM_DEFAULT},
+    {"轻柔", &Lang::Sounds::OGG_ALARM_GENTLE},
+    {"鸟鸣", &Lang::Sounds::OGG_ALARM_BIRD},
+    {"电子", &Lang::Sounds::OGG_ALARM_ELECTRONIC},
 };
 constexpr int kRingtoneCount = 4;
 
