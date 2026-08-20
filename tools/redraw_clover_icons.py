@@ -462,22 +462,15 @@ def icon_espclaw(cr):
 
 
 def icon_album(cr):
-    # 后景相框只画顶边+右边，透出「一叠照片」的层次
-    back_x, back_y, back_w, back_r = 72, 52, 140, 18
-    cr.move_to(back_x + back_r, back_y)
-    cr.line_to(back_x + back_w - back_r, back_y)
-    cr.arc(back_x + back_w - back_r, back_y + back_r, back_r, -math.pi / 2, 0)
-    cr.line_to(back_x + back_w, back_y + 50)
+    # 单一完整相框：不再叠加顶部横线和右侧竖线，避免出现多余十字结构。
+    rounded_rect(cr, 42, 54, 172, 156, 24)
     stroke(cr)
-
-    rounded_rect(cr, 44, 84, 160, 124, 20)
-    stroke(cr)
-    circle(cr, 84, 120, 12)
-    cr.move_to(56, 190)
-    cr.line_to(100, 142)
-    cr.line_to(126, 170)
-    cr.line_to(150, 148)
-    cr.line_to(196, 190)
+    circle(cr, 82, 96, 12)
+    cr.move_to(54, 190)
+    cr.line_to(102, 136)
+    cr.line_to(130, 166)
+    cr.line_to(154, 142)
+    cr.line_to(202, 190)
     stroke(cr)
 
 
@@ -499,24 +492,23 @@ def icon_badge(cr):
 
 
 def icon_bagclip(cr):
-    # 背包扣：挂扣 + 圆形图片牌，和自动轮播图片应用语义对应。
-    cr.new_path()
-    cr.arc(128, 70, 28, math.pi * 0.18, math.pi * 0.82)
+    # 背包扣：宽大的扣环 + 下方独立圆牌，避免顶部结构拥挤。
+    rounded_rect(cr, 46, 34, 164, 82, 26)
     stroke(cr)
-    cr.move_to(100, 70)
-    cr.line_to(100, 94)
+    rounded_rect(cr, 76, 52, 104, 44, 14)
     stroke(cr)
-    cr.move_to(156, 70)
-    cr.line_to(156, 94)
+
+    # 连接杆与圆牌之间保留清晰留白。
+    cr.move_to(128, 116)
+    cr.line_to(128, 136)
     stroke(cr)
-    rounded_rect(cr, 92, 86, 72, 34, 16)
-    stroke(cr)
-    circle(cr, 128, 158, 54)
+
+    circle(cr, 128, 184, 46)
     cr.move_to(94, 178)
-    cr.line_to(118, 148)
-    cr.line_to(134, 166)
-    cr.line_to(150, 146)
-    cr.line_to(166, 178)
+    cr.line_to(116, 154)
+    cr.line_to(132, 170)
+    cr.line_to(148, 152)
+    cr.line_to(162, 178)
     stroke(cr)
 
 
