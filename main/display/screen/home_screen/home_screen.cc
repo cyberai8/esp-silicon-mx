@@ -34,7 +34,6 @@ extern "C" void board_release_power_hold_if_supported();
 #endif
 #include "settings.h"
 #include "settings_screen/settings_screen.h"
-#include "calendar_screen/calendar_screen.h"
 #include "call_screen/call_screen.h"
 #include "chat_screen/chat_screen.h"
 #include "album_screen/album_screen.h"
@@ -105,15 +104,6 @@ void call_lifecycle_cb(screen_lifecycle_event_t event) {
     // ????CallScreen ????
 // PA_SWITCH ????????????
 CallScreen::LifecycleCallback(event);
-}
-
-void calendar_lifecycle_cb(screen_lifecycle_event_t event) {
-    PwrKey_OnScreenLifecycle("calendar", event);
-    if (event == SCREEN_LIFECYCLE_LOAD) {
-        ESP_LOGI(TAG_HOME, "load: calendar_screen");
-    } else {
-        ESP_LOGI(TAG_HOME, "unload: calendar_screen");
-    }
 }
 
 void clock_lifecycle_cb(screen_lifecycle_event_t event) {
@@ -395,16 +385,6 @@ void LaunchGame2048(screen_lifecycle_cb_t lifecycle_cb) {
 void LaunchCall(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* old_scr = lv_screen_active();
     lv_obj_t* app = CallScreen::Create();
-    screen_attach_lifecycle(app, lifecycle_cb);
-    lv_screen_load(app);
-    if (old_scr != nullptr && old_scr != app) {
-        lv_obj_delete_async(old_scr);
-    }
-}
-
-void LaunchCalendar(screen_lifecycle_cb_t lifecycle_cb) {
-    lv_obj_t* old_scr = lv_screen_active();
-    lv_obj_t* app = CalendarScreen::Create();
     screen_attach_lifecycle(app, lifecycle_cb);
     lv_screen_load(app);
     if (old_scr != nullptr && old_scr != app) {
@@ -784,7 +764,6 @@ constexpr AppEntry kApps[] = {
     {"call",           "电话",     LaunchCall,          call_lifecycle_cb,          false},
 #endif
     {"music",          "音乐",     LaunchMusic,         music_lifecycle_cb,         false},
-    {"calendar",       "日历",     LaunchCalendar,      calendar_lifecycle_cb,      false},
     {"alarm",          "闹钟",     LaunchClock,         clock_lifecycle_cb,         false},
     {"album",          "相册",     LaunchAlbum,         album_lifecycle_cb,         false},
 #if !defined(BOARD_ESP_VOCAT)

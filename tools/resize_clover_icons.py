@@ -66,9 +66,6 @@ NAME_ALIASES: dict[str, str] = {
     "music": "music",
     "音乐": "music",
     "音乐厅": "music",
-    # 日历
-    "calendar": "calendar",
-    "日历": "calendar",
     # 地图 / GPS
     "gps": "gps",
     "地图": "gps",

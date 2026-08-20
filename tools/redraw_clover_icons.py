@@ -202,23 +202,6 @@ def icon_camera(cr):
     circle(cr, 128, 142, 30)
 
 
-def icon_calendar(cr):
-    rounded_rect(cr, 52, 60, 152, 144, 18)
-    stroke(cr)
-    cr.move_to(52, 108)
-    cr.line_to(204, 108)
-    stroke(cr)
-    for x in (88, 128, 168):
-        cr.move_to(x, 48)
-        cr.line_to(x, 78)
-        stroke(cr)
-    for y in (136, 168):
-        for x in (84, 128, 172):
-            cr.new_sub_path()
-            cr.arc(x, y, 6, 0, 2 * math.pi)
-            fill(cr)
-
-
 def icon_weather(cr):
     sx, sy, sr = 96, 92, 30
     circle(cr, sx, sy, sr)
@@ -521,7 +504,6 @@ ICONS = {
     "recording": icon_recording,
     "music": icon_music,
     "camera": icon_camera,
-    "calendar": icon_calendar,
     "weather": icon_weather,
     "sd": icon_sd,
     "settings": icon_settings,
