@@ -219,17 +219,6 @@ def icon_calendar(cr):
             fill(cr)
 
 
-def icon_calculator(cr):
-    rounded_rect(cr, 56, 44, 144, 168, 20)
-    stroke(cr)
-    rounded_rect(cr, 76, 64, 104, 36, 10)
-    stroke(cr)
-    for i, (x, y) in enumerate(((84, 124), (128, 124), (172, 124), (84, 168), (128, 168), (172, 168))):
-        cr.new_sub_path()
-        cr.arc(x, y, 8, 0, 2 * math.pi)
-        fill(cr)
-
-
 def icon_weather(cr):
     sx, sy, sr = 96, 92, 30
     circle(cr, sx, sy, sr)
@@ -539,7 +528,6 @@ ICONS = {
     "music": icon_music,
     "camera": icon_camera,
     "calendar": icon_calendar,
-    "calculator": icon_calculator,
     "weather": icon_weather,
     "sd": icon_sd,
     "settings": icon_settings,

@@ -81,9 +81,6 @@ NAME_ALIASES: dict[str, str] = {
     # 震动
     "vibrate": "vibrate",
     "震动": "vibrate",
-    # 计算器
-    "calculator": "calculator",
-    "计算器": "calculator",
     # 天气
     "weather": "weather",
     "天气": "weather",

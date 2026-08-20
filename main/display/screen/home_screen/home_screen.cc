@@ -34,7 +34,6 @@ extern "C" void board_release_power_hold_if_supported();
 #endif
 #include "settings.h"
 #include "settings_screen/settings_screen.h"
-#include "calculator_screen/calculator_screen.h"
 #include "calendar_screen/calendar_screen.h"
 #include "call_screen/call_screen.h"
 #include "chat_screen/chat_screen.h"
@@ -95,15 +94,6 @@ void game_2048_lifecycle_cb(screen_lifecycle_event_t event) {
         ESP_LOGI(TAG_HOME, "load: game_2048");
     } else {
         ESP_LOGI(TAG_HOME, "unload: game_2048");
-    }
-}
-
-void calculator_lifecycle_cb(screen_lifecycle_event_t event) {
-    PwrKey_OnScreenLifecycle("calculator", event);
-    if (event == SCREEN_LIFECYCLE_LOAD) {
-        ESP_LOGI(TAG_HOME, "load: calculator");
-    } else {
-        ESP_LOGI(TAG_HOME, "unload: calculator");
     }
 }
 
@@ -415,16 +405,6 @@ void LaunchGame2048(screen_lifecycle_cb_t lifecycle_cb) {
     screen_attach_lifecycle(game, lifecycle_cb);
     lv_screen_load(game);
     if (old_scr != nullptr && old_scr != game) {
-        lv_obj_delete_async(old_scr);
-    }
-}
-
-void LaunchCalculator(screen_lifecycle_cb_t lifecycle_cb) {
-    lv_obj_t* old_scr = lv_screen_active();
-    lv_obj_t* app = Calculator::Create();
-    screen_attach_lifecycle(app, lifecycle_cb);
-    lv_screen_load(app);
-    if (old_scr != nullptr && old_scr != app) {
         lv_obj_delete_async(old_scr);
     }
 }
@@ -850,7 +830,6 @@ constexpr AppEntry kApps[] = {
     {"magnet",         "磁场",     LaunchMagnet,        magnet_lifecycle_cb,        false},
     {"vibrate",        "震动",     LaunchVibrate,       vibrate_lifecycle_cb,       false},
 #endif
-    {"calculator",     "计算器",   LaunchCalculator,    calculator_lifecycle_cb,    false},
     {"weather",        "天气",     LaunchWeather,       weather_lifecycle_cb,       true},
     {"sd",             "SD卡",     LaunchSdCard,        sd_card_lifecycle_cb,       false},
     {"badge",          "像章",     LaunchBadge,         badge_lifecycle_cb,         false},
