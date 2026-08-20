@@ -47,7 +47,6 @@ extern "C" void board_release_power_hold_if_supported();
 #include "music_screen/music_screen.h"
 #include "radio_screen/radio_screen.h"
 #include "recording_screen/recording_screen.h"
-#include "ai_image_gen_screen/ai_image_gen_screen.h"
 #include "translate_screen/translate_screen.h"
 #include "pwr_key_handler.h"
 #include "screen_util.h"
@@ -300,11 +299,6 @@ void magnet_lifecycle_cb(screen_lifecycle_event_t event) {
         ESP_LOGI(TAG_HOME, "unload: magnet_screen");
     }
     MagnetScreen::LifecycleCallback(event);
-}
-
-void ai_image_gen_lifecycle_cb(screen_lifecycle_event_t event) {
-    PwrKey_OnScreenLifecycle("ai_image_gen", event);
-    AiImageGenScreen::LifecycleCallback(event);
 }
 
 void translate_lifecycle_cb(screen_lifecycle_event_t event) {
@@ -607,16 +601,6 @@ void LaunchTest(screen_lifecycle_cb_t lifecycle_cb) {
     TestScreen::LaunchFromHome(lifecycle_cb);
 }
 
-void LaunchAiImageGen(screen_lifecycle_cb_t lifecycle_cb) {
-    lv_obj_t* old_scr = lv_screen_active();
-    lv_obj_t* app = AiImageGenScreen::Create();
-    screen_attach_lifecycle(app, lifecycle_cb);
-    lv_screen_load(app);
-    if (old_scr != nullptr && old_scr != app) {
-        lv_obj_delete_async(old_scr);
-    }
-}
-
 void LaunchTranslate(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* old_scr = lv_screen_active();
     lv_obj_t* app = TranslateScreen::Create();
@@ -845,7 +829,6 @@ constexpr AppEntry kApps[] = {
     {"settings",       "设置",     LaunchSettings,      settings_lifecycle_cb,      false},
     {"radio",          "电台",     LaunchRadio,         radio_lifecycle_cb,         true},
     {"recording",      "录音",     LaunchRecording,     recording_lifecycle_cb,     false},
-    {"ai_image_gen",   "AI生图",   LaunchAiImageGen,    ai_image_gen_lifecycle_cb,  true},
     {"translate",      "翻译",     LaunchTranslate,     translate_lifecycle_cb,     true},
 };
 

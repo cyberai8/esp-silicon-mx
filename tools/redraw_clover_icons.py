@@ -344,30 +344,6 @@ def icon_translate(cr):
     stroke(cr)
 
 
-def icon_ai_image_gen(cr):
-    rounded_rect(cr, 48, 64, 160, 128, 18)
-    stroke(cr)
-    cr.move_to(64, 168)
-    cr.line_to(108, 116)
-    cr.line_to(140, 148)
-    cr.line_to(168, 112)
-    cr.line_to(196, 168)
-    stroke(cr)
-    cr.new_sub_path()
-    cr.arc(88, 100, 12, 0, 2 * math.pi)
-    fill(cr)
-    # spark
-    cr.move_to(196, 56)
-    cr.line_to(210, 40)
-    stroke(cr)
-    cr.move_to(196, 48)
-    cr.line_to(216, 48)
-    stroke(cr)
-    cr.move_to(204, 56)
-    cr.line_to(204, 36)
-    stroke(cr)
-
-
 def icon_gps(cr):
     cx, cy = 128, 108
     cr.new_path()
@@ -536,7 +512,6 @@ ICONS = {
     "info": icon_info,
     "theme": icon_theme,
     "translate": icon_translate,
-    "ai_image_gen": icon_ai_image_gen,
     "gps": icon_gps,
     "call": icon_call,
     "spirit_level": icon_spirit_level,

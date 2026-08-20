@@ -108,10 +108,6 @@ NAME_ALIASES: dict[str, str] = {
     # 录音
     "recording": "recording",
     "录音": "recording",
-    # AI 生图
-    "ai_image_gen": "ai_image_gen",
-    "ai生图": "ai_image_gen",
-    "生图": "ai_image_gen",
     # 翻译
     "translate": "translate",
     "翻译": "translate",
