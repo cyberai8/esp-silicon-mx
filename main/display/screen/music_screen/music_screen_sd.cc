@@ -63,11 +63,13 @@ constexpr uint32_t kColorBarTrack = 0x2A2F3A;
 
 // 360 圆屏：可视区是内切圆，半径 180。下面每个 y 都按 sqrt(180²-dy²) 反推过
 // 可用宽度，改动布局时要一起复算，否则内容会被圆角切掉。
+// 返回键贴在 (36,28) 时左上角会落到圆外；沿圆弧内收到 (78,56)，
+// 四角距圆心约 160，留 ~20px 边距，整颗按钮都看得见。
 constexpr int32_t kPanel = DISPLAY_WIDTH;
-constexpr int32_t kBackBtnSize = 36;
-constexpr int32_t kBackBtnX = 36;
-constexpr int32_t kBackBtnY = 28;
-constexpr int32_t kTopLabelY = 24;
+constexpr int32_t kBackBtnSize = 40;
+constexpr int32_t kBackBtnX = 78;
+constexpr int32_t kBackBtnY = 56;
+constexpr int32_t kTopLabelY = 20;
 constexpr int32_t kAlbumSize = 126;
 constexpr int32_t kAlbumY = 56;
 constexpr int32_t kAlbumMaskShrink = 3;
@@ -77,10 +79,11 @@ constexpr int32_t kTitleY = 186;
 constexpr int32_t kSubY = 212;
 constexpr int32_t kTextW = 244;
 constexpr int32_t kProgressY = 250;
-constexpr int32_t kProgressW = 170;
+constexpr int32_t kProgressW = 156;
 constexpr int32_t kProgressH = 5;
-constexpr int32_t kTimeW = 52;
-constexpr int32_t kTimeGap = 6;
+// "00:00" / "--:--" 用 20pt 约需 60+px；原先 52 会折成两行。
+constexpr int32_t kTimeW = 68;
+constexpr int32_t kTimeGap = 4;
 constexpr int32_t kCtrlRowY = 268;
 constexpr int32_t kCtrlRowW = 272;
 constexpr int32_t kCtrlRowH = 42;
@@ -93,8 +96,9 @@ constexpr int32_t kModeBtnH = 28;
 constexpr int32_t kListBtnSize = 30;
 
 // 列表叠层：行宽 224 是按最下面一行（y≈312）的圆内宽度 244 留边算出来的。
-constexpr int32_t kListTop = 66;
-constexpr int32_t kListH = 246;
+// 顶边避开返回键底（56+40=96）。
+constexpr int32_t kListTop = 104;
+constexpr int32_t kListH = 208;
 constexpr int32_t kListBoxW = 236;
 constexpr int32_t kListRowW = 224;
 constexpr int32_t kListRowH = 44;
@@ -744,6 +748,34 @@ lv_obj_t* MakeLabel(lv_obj_t* parent, const char* text, uint32_t color,
     return lbl;
 }
 
+lv_obj_t* MakeBackButton(lv_obj_t* parent, lv_event_cb_t cb) {
+    lv_obj_t* btn = lv_button_create(parent);
+    lv_obj_remove_style_all(btn);
+    lv_obj_set_size(btn, kBackBtnSize, kBackBtnSize);
+    // 磨砂圆底 + 淡描边：圆屏深色底上看得出触控靶。
+    lv_obj_set_style_bg_color(btn, lv_color_hex(kColorRow), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0xFFFFFF),
+                              Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+    lv_obj_set_style_bg_opa(btn, LV_OPA_30, Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+    lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_border_opa(btn, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_align(btn, LV_ALIGN_TOP_LEFT, kBackBtnX, kBackBtnY);
+    lv_obj_set_ext_click_area(btn, 12);
+    screen_swipe_back_ignore(btn, true);
+
+    lv_obj_t* icon = lv_image_create(btn);
+    lv_image_set_src(icon, "A:ic_app_back.spng");
+    lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(icon);
+
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+    return btn;
+}
+
 lv_obj_t* CreateRoundButton(lv_obj_t* parent, int32_t size, uint32_t bg_color,
                             uint32_t bg_pressed, const char* icon_path,
                             lv_event_cb_t cb) {
@@ -1057,21 +1089,7 @@ void BuildListLayer(lv_obj_t* scr) {
     lv_obj_add_flag(layer, LV_OBJ_FLAG_HIDDEN);
     s_ui.list_layer = layer;
 
-    lv_obj_t* back = lv_button_create(layer);
-    lv_obj_remove_style_all(back);
-    lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
-    lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
-                              Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-    lv_obj_set_style_bg_opa(back, LV_OPA_20, Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-    lv_obj_align(back, LV_ALIGN_TOP_LEFT, kBackBtnX, kBackBtnY);
-    screen_swipe_back_ignore(back, true);
-    lv_obj_t* back_icon = lv_image_create(back);
-    lv_image_set_src(back_icon, "A:ic_app_back.spng");
-    lv_obj_center(back_icon);
-    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(back, [](lv_event_t*) { HideList(); }, LV_EVENT_CLICKED,
-                        nullptr);
+    MakeBackButton(layer, [](lv_event_t*) { HideList(); });
 
     s_ui.list_title = MakeLabel(layer, I18n::T("SD 卡音乐"), kColorText, 200);
     lv_obj_align(s_ui.list_title, LV_ALIGN_TOP_MID, 0, kTopLabelY + 4);
@@ -1160,6 +1178,9 @@ void BuildStateLayer(lv_obj_t* scr) {
     lv_obj_set_style_text_color(btn_lbl, lv_color_hex(kColorAccent), LV_PART_MAIN);
     lv_obj_center(btn_lbl);
     s_ui.state_btn = btn;
+
+    // 状态层盖住播放页返回键，自己再放一个。
+    MakeBackButton(layer, [](lv_event_t*) { GoHome(); });
 }
 
 // 扫描中和空态共用一层，靠显示/隐藏里面的元素切换。
@@ -1343,26 +1364,7 @@ void OnTick(lv_timer_t* /*t*/) {
 // ---------------------------------------------------------------------------
 
 void BuildBackButton(lv_obj_t* scr) {
-    lv_obj_t* back_btn = lv_button_create(scr);
-    lv_obj_remove_style_all(back_btn);
-    lv_obj_set_size(back_btn, kBackBtnSize, kBackBtnSize);
-    lv_obj_set_style_bg_opa(back_btn, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(back_btn, lv_color_hex(0xFFFFFF),
-                              Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-    lv_obj_set_style_bg_opa(back_btn, LV_OPA_20,
-                            Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-    lv_obj_set_style_radius(back_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(back_btn, 0, LV_PART_MAIN);
-    lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, kBackBtnX, kBackBtnY);
-    screen_swipe_back_ignore(back_btn, true);
-
-    lv_obj_t* back_icon = lv_image_create(back_btn);
-    lv_image_set_src(back_icon, "A:ic_app_back.spng");
-    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(back_icon);
-
-    lv_obj_add_event_cb(back_btn, [](lv_event_t*) { GoHome(); }, LV_EVENT_CLICKED,
-                        nullptr);
+    MakeBackButton(scr, [](lv_event_t*) { GoHome(); });
 }
 
 void BuildAlbum(lv_obj_t* scr) {
@@ -1401,12 +1403,26 @@ void BuildProgress(lv_obj_t* scr) {
     screen_make_input_passive(bar);
     s_ui.bar = bar;
 
-    const int32_t offset = kProgressW / 2 + kTimeGap + kTimeW / 2;
-    s_ui.lbl_elapsed = MakeLabel(scr, "00:00", kColorMuted, kTimeW);
-    lv_obj_align(s_ui.lbl_elapsed, LV_ALIGN_TOP_MID, -offset, kProgressY - 10);
-
-    s_ui.lbl_total = MakeLabel(scr, "--:--", kColorMuted, kTimeW);
-    lv_obj_align(s_ui.lbl_total, LV_ALIGN_TOP_MID, offset, kProgressY - 10);
+    auto make_time = [&](const char* text, bool left_of_bar) {
+        lv_obj_t* lbl = lv_label_create(scr);
+        lv_label_set_text(lbl, text);
+        lv_obj_set_style_text_font(lbl, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(kColorMuted), LV_PART_MAIN);
+        lv_obj_set_style_text_align(
+            lbl, left_of_bar ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT,
+            LV_PART_MAIN);
+        // 固定单行：加宽后仍 CLIP，避免再被折成两行。
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+        lv_obj_set_size(lbl, kTimeW, 22);
+        lv_obj_align_to(lbl, bar,
+                        left_of_bar ? LV_ALIGN_OUT_LEFT_MID
+                                    : LV_ALIGN_OUT_RIGHT_MID,
+                        left_of_bar ? -kTimeGap : kTimeGap, 0);
+        screen_make_input_passive(lbl);
+        return lbl;
+    };
+    s_ui.lbl_elapsed = make_time("00:00", true);
+    s_ui.lbl_total = make_time("--:--", false);
 }
 
 void BuildControls(lv_obj_t* scr) {

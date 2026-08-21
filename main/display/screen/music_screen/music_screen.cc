@@ -77,9 +77,10 @@ constexpr int32_t kAlbumInfoY = 66;
 // 实际可点热区仍有 ~50-56px，圆屏单指点按不会觉得难点。
 constexpr int32_t kCtrlSideBtnSize = 26;
 constexpr int32_t kCtrlPlayBtnSize = 32;
-constexpr int32_t kBackBtnSize = 36;
-constexpr int32_t kBackBtnX = 28;
-constexpr int32_t kBackBtnY = 28;
+// 与相册 / SD 音乐同一套圆屏安全区，避免返回键被圆边裁掉。
+constexpr int32_t kBackBtnSize = 40;
+constexpr int32_t kBackBtnX = 78;
+constexpr int32_t kBackBtnY = 56;
 #else
 constexpr bool kRoundLayout = false;
 constexpr int32_t kPanelSize = 720;
@@ -110,6 +111,7 @@ constexpr uint32_t kColorCtrlBtnBg = 0x232732;
 constexpr uint32_t kColorCtrlBtnBgPressed = 0x303644;
 constexpr uint32_t kColorPlayBtnBg = 0x3A4150;
 constexpr uint32_t kColorPlayBtnBgPressed = 0x4A5260;
+constexpr uint32_t kColorBackBtnBg = 0x1A1E26;
 
 constexpr int32_t kAlbumMaskSize = kAlbumSize - kAlbumMaskShrink * 2;
 constexpr uint32_t kAlbumFrameDelayMs = 180;
@@ -713,19 +715,29 @@ lv_obj_t* CreateRoundButton(lv_obj_t* parent, int32_t size, uint32_t bg_color,
 }
 
 void BuildBackButton(lv_obj_t* scr) {
-    // 透明圆形按钮 + ← 图标，按下时白色半透明叠加，
-    // 与 sd_card / network / vibrate / level 等页面保持同一视觉规范。
     lv_obj_t* back_btn = lv_button_create(scr);
     lv_obj_remove_style_all(back_btn);
     lv_obj_set_size(back_btn, kBackBtnSize, kBackBtnSize);
-    lv_obj_set_style_bg_opa(back_btn, LV_OPA_TRANSP, LV_PART_MAIN);
+    if constexpr (kRoundLayout) {
+        lv_obj_set_style_bg_color(back_btn, lv_color_hex(kColorBackBtnBg),
+                                  LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(back_btn, LV_OPA_70, LV_PART_MAIN);
+        lv_obj_set_style_border_width(back_btn, 1, LV_PART_MAIN);
+        lv_obj_set_style_border_color(back_btn, lv_color_hex(0xFFFFFF),
+                                      LV_PART_MAIN);
+        lv_obj_set_style_border_opa(back_btn, LV_OPA_30, LV_PART_MAIN);
+    } else {
+        lv_obj_set_style_bg_opa(back_btn, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_width(back_btn, 0, LV_PART_MAIN);
+    }
     lv_obj_set_style_bg_color(back_btn, lv_color_hex(0xFFFFFF),
                               Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-    lv_obj_set_style_bg_opa(back_btn, LV_OPA_20,
+    lv_obj_set_style_bg_opa(back_btn, LV_OPA_30,
                             Sel(LV_PART_MAIN, LV_STATE_PRESSED));
     lv_obj_set_style_radius(back_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(back_btn, 0, LV_PART_MAIN);
     lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, kBackBtnX, kBackBtnY);
+    lv_obj_set_ext_click_area(back_btn, 12);
     // 返回按钮自身的点击不应被全屏右滑手势拦截。
     screen_swipe_back_ignore(back_btn, true);
 
