@@ -1,14 +1,19 @@
-# 待机页：默认天气脸；再滑到时钟脸对照
+# 待机页：天气 → 时钟 → 相册 三脸循环
 
 wait 600
 shot 01_weather.png
 
-log 右滑切到时钟
+log 左滑到时钟
 swipe 280 180 80 180 280
 wait 500
 shot 02_clock.png
 
-log 左滑回天气
+log 左滑到相册
+swipe 280 180 80 180 280
+wait 500
+shot 03_gallery.png
+
+log 右滑回时钟
 swipe 80 180 280 180 280
 wait 500
-shot 03_weather_back.png
+shot 04_clock_back.png

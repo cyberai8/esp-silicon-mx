@@ -8,11 +8,12 @@
 enum class StandbyFace : uint8_t {
     Weather = 0,
     Clock = 1,
+    Gallery = 2,  // 背包扣同款：SD 图片全屏 cover + 自动翻页
 };
 
 class StandbyScreen {
 public:
-    // 全屏待机页：天气（默认）/ 翻页时钟，左右滑动切换；点击或侧面键短按返回首页。
+    // 全屏待机页：天气 / 翻页时钟 / 相册，左右滑动循环切换；点击返回首页。
     static lv_obj_t* Create();
     static void LifecycleCallback(screen_lifecycle_event_t event);
 

@@ -1,4 +1,5 @@
 #include "standby_screen.h"
+#include "standby_gallery.h"
 #include "config.h"
 #include "i18n.h"
 
@@ -140,6 +141,8 @@ struct UiState {
     lv_obj_t* face_dots = nullptr;
     lv_obj_t* face_dot_weather = nullptr;
     lv_obj_t* face_dot_clock = nullptr;
+    lv_obj_t* face_dot_gallery = nullptr;
+    lv_obj_t* gallery_panel = nullptr;
 
     lv_obj_t* charge_root = nullptr;
     lv_obj_t* charge_tip = nullptr;
@@ -166,8 +169,13 @@ std::atomic<uint32_t> s_weather_session{0};
 StandbyFace LoadPreferredFace() {
     Settings settings(kStandbyNvsNs, false);
     const int stored = settings.GetInt(kStandbyFaceKey, static_cast<int>(StandbyFace::Weather));
-    return stored == static_cast<int>(StandbyFace::Clock) ? StandbyFace::Clock
-                                                          : StandbyFace::Weather;
+    if (stored == static_cast<int>(StandbyFace::Clock)) {
+        return StandbyFace::Clock;
+    }
+    if (stored == static_cast<int>(StandbyFace::Gallery)) {
+        return StandbyFace::Gallery;
+    }
+    return StandbyFace::Weather;
 }
 
 void SavePreferredFace(StandbyFace face) {
@@ -567,9 +575,9 @@ void StyleFaceDot(lv_obj_t* dot, bool active) {
 }
 
 void UpdateFaceDots() {
-    const bool weather = s_ui.face == StandbyFace::Weather;
-    StyleFaceDot(s_ui.face_dot_weather, weather);
-    StyleFaceDot(s_ui.face_dot_clock, !weather);
+    StyleFaceDot(s_ui.face_dot_weather, s_ui.face == StandbyFace::Weather);
+    StyleFaceDot(s_ui.face_dot_clock, s_ui.face == StandbyFace::Clock);
+    StyleFaceDot(s_ui.face_dot_gallery, s_ui.face == StandbyFace::Gallery);
 }
 
 void ApplyFaceVisibility() {
@@ -589,6 +597,7 @@ void ApplyFaceVisibility() {
 
     const bool show_weather = !activating && s_ui.face == StandbyFace::Weather;
     const bool show_clock = !activating && s_ui.face == StandbyFace::Clock;
+    const bool show_gallery = !activating && s_ui.face == StandbyFace::Gallery;
     if (s_ui.weather_panel != nullptr) {
         if (show_weather) {
             lv_obj_remove_flag(s_ui.weather_panel, LV_OBJ_FLAG_HIDDEN);
@@ -603,6 +612,7 @@ void ApplyFaceVisibility() {
             lv_obj_add_flag(s_ui.clock_panel, LV_OBJ_FLAG_HIDDEN);
         }
     }
+    StandbyGallery_SetActive(show_gallery);
     if (s_ui.face_dots != nullptr) {
         if (activating || s_ui.charge_playing) {
             lv_obj_add_flag(s_ui.face_dots, LV_OBJ_FLAG_HIDDEN);
@@ -611,6 +621,30 @@ void ApplyFaceVisibility() {
         }
     }
     UpdateFaceDots();
+}
+
+StandbyFace NextStandbyFace(StandbyFace face) {
+    switch (face) {
+        case StandbyFace::Weather:
+            return StandbyFace::Clock;
+        case StandbyFace::Clock:
+            return StandbyFace::Gallery;
+        case StandbyFace::Gallery:
+        default:
+            return StandbyFace::Weather;
+    }
+}
+
+StandbyFace PrevStandbyFace(StandbyFace face) {
+    switch (face) {
+        case StandbyFace::Weather:
+            return StandbyFace::Gallery;
+        case StandbyFace::Clock:
+            return StandbyFace::Weather;
+        case StandbyFace::Gallery:
+        default:
+            return StandbyFace::Clock;
+    }
 }
 
 void SwitchStandbyFace(StandbyFace face) {
@@ -972,6 +1006,7 @@ lv_obj_t* CreateFaceDots(lv_obj_t* parent) {
     };
     s_ui.face_dot_weather = make_dot();
     s_ui.face_dot_clock = make_dot();
+    s_ui.face_dot_gallery = make_dot();
     return row;
 }
 
@@ -1281,6 +1316,7 @@ void OnScreenUnloaded(lv_event_t* /*e*/) {
     for (int i = 0; i < kDigitCount; ++i) {
         lv_anim_delete(&s_ui.digits[i], nullptr);
     }
+    StandbyGallery_Destroy();
     s_ui = UiState{};
 }
 
@@ -1311,9 +1347,9 @@ void OnStandbyPointer(lv_event_t* e) {
     if (adx > kSwipeFaceThreshold && adx > ady) {
         lv_indev_wait_release(indev);
         if (dx < 0) {
-            SwitchStandbyFace(StandbyFace::Clock);
+            SwitchStandbyFace(NextStandbyFace(s_ui.face));
         } else {
-            SwitchStandbyFace(StandbyFace::Weather);
+            SwitchStandbyFace(PrevStandbyFace(s_ui.face));
         }
         return;
     }
@@ -1343,6 +1379,7 @@ lv_obj_t* StandbyScreen::Create() {
     s_ui.screen = screen;
     s_ui.face = LoadPreferredFace();
 
+    s_ui.gallery_panel = StandbyGallery_Create(screen);
     s_ui.weather_panel = CreateWeatherPanel(screen);
 
     lv_obj_t* box = lv_obj_create(screen);

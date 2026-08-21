@@ -90,6 +90,7 @@ struct UiState {
     lv_obj_t* enter_standby_slider = nullptr;
     lv_obj_t* standby_face_weather = nullptr;
     lv_obj_t* standby_face_clock = nullptr;
+    lv_obj_t* standby_face_gallery = nullptr;
     lv_obj_t* charge_tab = nullptr;
     lv_obj_t* ota_tab = nullptr;
     lv_obj_t* ota_current_label = nullptr;
@@ -496,9 +497,10 @@ void StyleStandbyFaceBtn(lv_obj_t* btn, bool selected) {
 }
 
 void RefreshStandbyFaceButtons() {
-    const bool weather = StandbyScreen::GetPreferredFace() == StandbyFace::Weather;
-    StyleStandbyFaceBtn(s_ui.standby_face_weather, weather);
-    StyleStandbyFaceBtn(s_ui.standby_face_clock, !weather);
+    const StandbyFace face = StandbyScreen::GetPreferredFace();
+    StyleStandbyFaceBtn(s_ui.standby_face_weather, face == StandbyFace::Weather);
+    StyleStandbyFaceBtn(s_ui.standby_face_clock, face == StandbyFace::Clock);
+    StyleStandbyFaceBtn(s_ui.standby_face_gallery, face == StandbyFace::Gallery);
 }
 
 void OnStandbyFaceClicked(lv_event_t* e) {
@@ -566,6 +568,8 @@ void BuildStandbyTab(lv_obj_t* tab) {
         CreateStandbyFaceBtn(face_row, I18n::T("天气"), StandbyFace::Weather);
     s_ui.standby_face_clock =
         CreateStandbyFaceBtn(face_row, I18n::T("时钟"), StandbyFace::Clock);
+    s_ui.standby_face_gallery =
+        CreateStandbyFaceBtn(face_row, I18n::T("相册"), StandbyFace::Gallery);
     RefreshStandbyFaceButtons();
 
     lv_obj_t* face_hint = lv_label_create(tab);
@@ -1325,6 +1329,7 @@ void OnScreenUnloaded(lv_event_t* /*e*/) {
     s_ui.enter_standby_slider = nullptr;
     s_ui.standby_face_weather = nullptr;
     s_ui.standby_face_clock = nullptr;
+    s_ui.standby_face_gallery = nullptr;
     s_ui.charge_tab = nullptr;
     s_ui.ota_tab = nullptr;
     s_ui.ota_current_label = nullptr;

@@ -57,6 +57,7 @@ set(SCREEN_SOURCES
     ${REPO_ROOT}/main/display/screen/clock_screen/clock_screen.cc
     ${REPO_ROOT}/main/display/screen/settings_screen/settings_screen.cc
     ${REPO_ROOT}/main/display/screen/standby_screen/standby_screen.cc
+    ${REPO_ROOT}/main/display/screen/standby_screen/standby_gallery.cc
     ${REPO_ROOT}/main/display/screen/weather_screen/weather_icon_map.cc
     ${REPO_ROOT}/main/i18n/i18n.cc
 )
