@@ -1,11 +1,11 @@
-# 待机页：天气 → 时钟 → 相册 三脸循环
+# 待机页：天气 → 时钟 → 相册；轻触切脸，左右滑仍有效
 
 wait 600
 shot 01_weather.png
 
-log 左滑到时钟
-swipe 280 180 80 180 280
-wait 500
+log 轻触切到时钟
+tap 180 180
+wait 400
 shot 02_clock.png
 
 log 左滑到相册

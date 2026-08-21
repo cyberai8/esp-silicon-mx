@@ -573,7 +573,7 @@ void BuildStandbyTab(lv_obj_t* tab) {
     RefreshStandbyFaceButtons();
 
     lv_obj_t* face_hint = lv_label_create(tab);
-    lv_label_set_text(face_hint, I18n::T("左右滑动也可切换"));
+    lv_label_set_text(face_hint, I18n::T("轻触或左右滑切换，长按回主页"));
     lv_obj_set_style_text_color(face_hint, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(face_hint, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_align(face_hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);

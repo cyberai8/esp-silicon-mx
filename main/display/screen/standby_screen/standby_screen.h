@@ -13,7 +13,7 @@ enum class StandbyFace : uint8_t {
 
 class StandbyScreen {
 public:
-    // 全屏待机页：天气 / 翻页时钟 / 相册，左右滑动循环切换；点击返回首页。
+    // 全屏待机页：天气 / 翻页时钟 / 相册；轻触或左右滑切换，长按 1.5s 回主页。
     static lv_obj_t* Create();
     static void LifecycleCallback(screen_lifecycle_event_t event);
 

@@ -67,6 +67,7 @@ constexpr int32_t kFlipProgressMax = kDigitHalf * 2;
 constexpr uint32_t kFlipDurationMs = 480;
 constexpr int kSwipeFaceThreshold = kRoundSmall ? 48 : 80;
 constexpr int kTapSlop = 24;
+constexpr uint32_t kLongPressHomeMs = 1500;
 // 资源为 128×128。显示边长需与缩放一致；图标 PNG 自带黑底。
 constexpr int kWeatherIconSize = kRoundSmall ? 84 : 112;
 constexpr int kWeatherPanelW = kRoundSmall ? 292 : (kPanelSize - 64);
@@ -161,6 +162,8 @@ struct UiState {
     int16_t press_x = 0;
     int16_t press_y = 0;
     bool press_tracking = false;
+    bool long_press_home_fired = false;
+    lv_timer_t* long_press_timer = nullptr;
 };
 
 UiState s_ui;
@@ -1305,10 +1308,34 @@ void ScheduleInitialWeatherFetch() {
         500, ctx);
 }
 
+void CancelLongPressHomeTimer() {
+    if (s_ui.long_press_timer != nullptr) {
+        lv_timer_delete(s_ui.long_press_timer);
+        s_ui.long_press_timer = nullptr;
+    }
+}
+
+void OnLongPressHomeTimer(lv_timer_t* /*t*/) {
+    s_ui.long_press_timer = nullptr;
+    if (!s_ui.press_tracking || s_ui.long_press_home_fired) {
+        return;
+    }
+    s_ui.long_press_home_fired = true;
+    s_ui.press_tracking = false;
+    StandbyScreen::ReturnHome();
+}
+
+void ArmLongPressHomeTimer() {
+    CancelLongPressHomeTimer();
+    s_ui.long_press_timer = lv_timer_create(OnLongPressHomeTimer, kLongPressHomeMs, nullptr);
+    lv_timer_set_repeat_count(s_ui.long_press_timer, 1);
+}
+
 void OnScreenUnloaded(lv_event_t* /*e*/) {
     IdlePower_Detach(IdlePowerSession::Standby);
     s_weather_session.fetch_add(1, std::memory_order_relaxed);
     StopChargeEffect();
+    CancelLongPressHomeTimer();
     if (s_ui.update_timer != nullptr) {
         lv_timer_delete(s_ui.update_timer);
         s_ui.update_timer = nullptr;
@@ -1333,12 +1360,31 @@ void OnStandbyPointer(lv_event_t* e) {
         s_ui.press_x = point.x;
         s_ui.press_y = point.y;
         s_ui.press_tracking = true;
+        s_ui.long_press_home_fired = false;
+        ArmLongPressHomeTimer();
         return;
     }
+
+    if (code == LV_EVENT_PRESSING && s_ui.press_tracking) {
+        const int adx = point.x - s_ui.press_x;
+        const int ady = point.y - s_ui.press_y;
+        const int abs_x = adx < 0 ? -adx : adx;
+        const int abs_y = ady < 0 ? -ady : ady;
+        // 开始滑动后取消长按回主页，避免滑脸时误进首页。
+        if (abs_x > kTapSlop || abs_y > kTapSlop) {
+            CancelLongPressHomeTimer();
+        }
+        return;
+    }
+
     if (code != LV_EVENT_RELEASED || !s_ui.press_tracking) {
         return;
     }
     s_ui.press_tracking = false;
+    CancelLongPressHomeTimer();
+    if (s_ui.long_press_home_fired) {
+        return;
+    }
     const int dx = point.x - s_ui.press_x;
     const int dy = point.y - s_ui.press_y;
     const int adx = dx < 0 ? -dx : dx;
@@ -1354,7 +1400,7 @@ void OnStandbyPointer(lv_event_t* e) {
         return;
     }
     if (adx < kTapSlop && ady < kTapSlop) {
-        StandbyScreen::ReturnHome();
+        SwitchStandbyFace(NextStandbyFace(s_ui.face));
     }
 }
 
@@ -1375,6 +1421,7 @@ lv_obj_t* StandbyScreen::Create() {
     lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(screen, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(screen, OnStandbyPointer, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(screen, OnStandbyPointer, LV_EVENT_PRESSING, nullptr);
     lv_obj_add_event_cb(screen, OnStandbyPointer, LV_EVENT_RELEASED, nullptr);
     s_ui.screen = screen;
     s_ui.face = LoadPreferredFace();
