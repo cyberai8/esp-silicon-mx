@@ -157,6 +157,47 @@ inline int32_t JsonIntAny(const cJSON* obj, const char* a, const char* b = nullp
     return 0;
 }
 
+inline const char* MapWeaImgToIconCode(const std::string& wea_img) {
+    // /api/public/device/weather 返回 weaImg：qing/yun/yin/yu/... → 和风资源码
+    if (wea_img.empty()) {
+        return nullptr;
+    }
+    if (wea_img == "qing") {
+        return "100";
+    }
+    if (wea_img == "yun" || wea_img == "duoyun") {
+        return "101";
+    }
+    if (wea_img == "yin") {
+        return "104";
+    }
+    if (wea_img == "yu" || wea_img == "xiaoyu" || wea_img == "zhongyu" ||
+        wea_img == "dayu" || wea_img == "zhenyu" || wea_img == "baoyu") {
+        return "399";
+    }
+    if (wea_img == "lei" || wea_img == "leizhenyu") {
+        return "302";
+    }
+    if (wea_img == "bingbao") {
+        return "304";
+    }
+    if (wea_img == "xue" || wea_img == "xiaoxue" || wea_img == "zhongxue" ||
+        wea_img == "daxue" || wea_img == "baoxue") {
+        return "499";
+    }
+    if (wea_img == "wu" || wea_img == "dawu") {
+        return "501";
+    }
+    if (wea_img == "mai") {
+        return "502";
+    }
+    if (wea_img == "shachen" || wea_img == "yangsha" || wea_img == "shachenbao" ||
+        wea_img == "fuchen") {
+        return "503";
+    }
+    return nullptr;
+}
+
 inline void FillNowFields(const cJSON* obj, WeatherDistrictData& out) {
     if (obj == nullptr) {
         return;
@@ -165,6 +206,9 @@ inline void FillNowFields(const cJSON* obj, WeatherDistrictData& out) {
         out.text = JsonStrAny(obj, "text", "weather", "condition");
         if (out.text.empty()) {
             out.text = JsonStrAny(obj, "textDay", "weatherText");
+        }
+        if (out.text.empty()) {
+            out.text = JsonStr(obj, "wea");  // device/weather 简版字段
         }
     }
     if (!JsonHas(obj, "temp") && !JsonHas(obj, "temperature") && !JsonHas(obj, "tempFc")) {
@@ -192,6 +236,12 @@ inline void FillNowFields(const cJSON* obj, WeatherDistrictData& out) {
             char buf[12];
             std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(JsonInt(obj, "icon")));
             out.icon = buf;
+        }
+        if (out.icon.empty()) {
+            const char* mapped = MapWeaImgToIconCode(JsonStr(obj, "weaImg"));
+            if (mapped != nullptr) {
+                out.icon = mapped;
+            }
         }
     }
 }
@@ -284,6 +334,9 @@ inline bool ParseDistrictResponse(const std::string& json, WeatherDistrictData& 
     out.district = JsonStr(data, "district");
     out.district_id = JsonStr(data, "districtId");
     out.text = JsonStrAny(data, "text", "weather", "condition");
+    if (out.text.empty()) {
+        out.text = JsonStr(data, "wea");  // device/weather：wea=阴/晴/...
+    }
     out.temp = JsonIntAny(data, "temp", "temperature");
     out.feels_like = JsonInt(data, "feelsLike");
     out.rh = JsonIntAny(data, "rh", "humidity");
@@ -305,6 +358,17 @@ inline bool ParseDistrictResponse(const std::string& json, WeatherDistrictData& 
     out.dpt = JsonInt(data, "dpt");
     out.uptime = JsonStrAny(data, "uptime", "updatedAt");
     out.icon = JsonStr(data, "icon");
+    if (out.icon.empty() && JsonHas(data, "icon")) {
+        char buf[12];
+        std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(JsonInt(data, "icon")));
+        out.icon = buf;
+    }
+    if (out.icon.empty()) {
+        const char* mapped = MapWeaImgToIconCode(JsonStr(data, "weaImg"));
+        if (mapped != nullptr) {
+            out.icon = mapped;
+        }
+    }
     out.air = JsonStr(data, "air");
     if (out.city.empty()) {
         out.city = JsonStrAny(data, "cityName", "name", "location");
@@ -340,6 +404,10 @@ inline bool ParseDistrictResponse(const std::string& json, WeatherDistrictData& 
         }
     }
 
+    if (out.text.empty() && !out.forecasts.empty()) {
+        out.text = out.forecasts.front().text_day;
+    }
+
     const cJSON* hours = cJSON_GetObjectItem(data, "forecastHours");
     if (cJSON_IsArray(hours)) {
         const int n = cJSON_GetArraySize(hours);
@@ -353,6 +421,10 @@ inline bool ParseDistrictResponse(const std::string& json, WeatherDistrictData& 
             ParseForecastHour(item, hour);
             out.forecast_hours.push_back(std::move(hour));
         }
+    }
+
+    if (out.text.empty() && !out.forecast_hours.empty()) {
+        out.text = out.forecast_hours.front().text;
     }
 
     const cJSON* indexes = cJSON_GetObjectItem(data, "indexes");
@@ -502,8 +574,9 @@ private:
             return ESP_ERR_INVALID_RESPONSE;
         }
 
-        ESP_LOGI(weather_detail::TAG, "OK %s %s %d°C days=%u hours=%u",
+        ESP_LOGI(weather_detail::TAG, "OK %s %s %d°C text=%s icon=%s days=%u hours=%u",
                  out.province.c_str(), out.district.c_str(), out.temp,
+                 out.text.c_str(), out.icon.c_str(),
                  static_cast<unsigned>(out.forecasts.size()),
                  static_cast<unsigned>(out.forecast_hours.size()));
         return ESP_OK;

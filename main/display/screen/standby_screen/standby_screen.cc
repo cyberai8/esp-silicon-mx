@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 
 #include <esp_heap_caps.h>
@@ -65,8 +66,13 @@ constexpr int32_t kFlipProgressMax = kDigitHalf * 2;
 constexpr uint32_t kFlipDurationMs = 480;
 constexpr int kSwipeFaceThreshold = kRoundSmall ? 48 : 80;
 constexpr int kTapSlop = 24;
-constexpr int kWeatherIconSize = 128;
-constexpr int kWeatherPanelW = kRoundSmall ? 260 : (kPanelSize - 80);
+// 资源为 128×128。显示边长需与缩放一致；图标 PNG 自带黑底。
+constexpr int kWeatherIconSize = kRoundSmall ? 84 : 112;
+constexpr int kWeatherPanelW = kRoundSmall ? 292 : (kPanelSize - 64);
+constexpr int kWeatherCardW = kRoundSmall ? 276 : (kPanelSize - 96);
+constexpr int kWeatherChipH = kRoundSmall ? 58 : 68;
+constexpr uint32_t kWeatherCardBg = 0x171C24;
+constexpr uint32_t kWeatherChipBg = 0x222833;
 constexpr uint32_t kWeatherRefreshOkSec = 15 * 60;
 constexpr uint32_t kWeatherRefreshFailSec = 60;
 constexpr const char* kStandbyNvsNs = "standby";
@@ -122,11 +128,15 @@ struct UiState {
     lv_timer_t* update_timer = nullptr;
 
     lv_obj_t* weather_panel = nullptr;
+    lv_obj_t* weather_card = nullptr;
     lv_obj_t* weather_icon = nullptr;
     lv_obj_t* weather_temp_lbl = nullptr;
     lv_obj_t* weather_text_lbl = nullptr;
     lv_obj_t* weather_loc_lbl = nullptr;
-    lv_obj_t* weather_extra_lbl = nullptr;
+    lv_obj_t* weather_chip_low_val = nullptr;
+    lv_obj_t* weather_chip_high_val = nullptr;
+    lv_obj_t* weather_chip_meta_title = nullptr;
+    lv_obj_t* weather_chip_meta_val = nullptr;
     lv_obj_t* face_dots = nullptr;
     lv_obj_t* face_dot_weather = nullptr;
     lv_obj_t* face_dot_clock = nullptr;
@@ -474,22 +484,79 @@ void SetStandbyWeatherIcon(lv_obj_t* icon, const WeatherDistrictData& data) {
     if (icon == nullptr) {
         return;
     }
+
+    auto remap_missing = [](const std::string& raw) -> const char* {
+        if (raw.empty()) {
+            return nullptr;
+        }
+        // 资源包无 102/103/夜码等，映射到最接近的已有图。
+        if (raw == "102" || raw == "151" || raw == "152") {
+            return "101";
+        }
+        if (raw == "103" || raw == "153") {
+            // 无「晴间多云」专图；104 资源实为日+云，比纯晴 100 更贴切。
+            return "104";
+        }
+        if (raw == "150") {
+            return "100";
+        }
+        if (raw == "154") {
+            return "104";
+        }
+        return raw.c_str();
+    };
+
+    auto has_asset = [](const char* code) -> bool {
+        if (code == nullptr || code[0] == '\0') {
+            return false;
+        }
+        // 与 main/xingzhi-assets/ic_s_weather_*.png 对齐的常用码。
+        static constexpr const char* kCodes[] = {
+            "100", "101", "104", "300", "302", "304", "305", "306", "307",
+            "310", "311", "312", "313", "314", "315", "316", "317", "318",
+            "399", "400", "401", "402", "403", "404", "407", "408", "409",
+            "410", "499", "500", "501", "502", "503", "504", "507", "508",
+            "509", "510", "511", "512", "513", "514", "515",
+        };
+        for (const char* c : kCodes) {
+            if (std::strcmp(c, code) == 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     const char* code = nullptr;
-    if (!data.icon.empty()) {
-        code = data.icon.c_str();
-    }
-    if (code == nullptr || code[0] == '\0') {
+    // 优先中文实况（device/weather 的 wea 比粗粒度 weaImg 更准，如 阴 vs yun）
+    if (!data.text.empty()) {
         code = WeatherIconCodeForText(data.text);
     }
-    if (code == nullptr || code[0] == '\0') {
-        code = "104";
+    // 其次接口 icon / 已映射的 weaImg 码
+    if ((code == nullptr || !has_asset(code)) && !data.icon.empty()) {
+        const char* mapped = remap_missing(data.icon);
+        if (has_asset(mapped)) {
+            code = mapped;
+        }
     }
+    // 今日预报文案
+    if ((code == nullptr || !has_asset(code)) && !data.forecasts.empty() &&
+        !data.forecasts.front().text_day.empty()) {
+        code = WeatherIconCodeForText(data.forecasts.front().text_day);
+    }
+    if (code == nullptr || !has_asset(code)) {
+        code = "100";
+    }
+
     char path[48];
     std::snprintf(path, sizeof(path), "A:ic_s_weather_%s.spng", code);
+    // 与天气页一致：不 set_scale。圆屏缓冲偏小，变换层常画不出导致「空框」。
     lv_obj_set_size(icon, kWeatherIconSize, kWeatherIconSize);
     lv_image_set_src(icon, path);
     lv_image_set_inner_align(icon, LV_IMAGE_ALIGN_CENTER);
+    lv_obj_center(icon);
     lv_obj_remove_flag(icon, LV_OBJ_FLAG_HIDDEN);
+    ESP_LOGI(TAG, "weather icon code=%s text=%s api_icon=%s path=%s", code,
+             data.text.c_str(), data.icon.c_str(), path);
 }
 
 void StyleFaceDot(lv_obj_t* dot, bool active) {
@@ -567,19 +634,31 @@ void ApplyWeatherData(const WeatherDistrictData& data, bool ok) {
         lv_label_set_text(s_ui.weather_temp_lbl, "--°");
         lv_label_set_text(s_ui.weather_text_lbl, I18n::T("暂无天气数据"));
         lv_label_set_text(s_ui.weather_loc_lbl, "");
-        lv_label_set_text(s_ui.weather_extra_lbl, I18n::T("稍后自动刷新"));
+        lv_label_set_text(s_ui.weather_chip_low_val, "--");
+        lv_label_set_text(s_ui.weather_chip_high_val, "--");
+        lv_label_set_text(s_ui.weather_chip_meta_title, I18n::T("状态"));
+        lv_label_set_text(s_ui.weather_chip_meta_val, I18n::T("刷新中"));
         return;
     }
 
     char temp[24];
     std::snprintf(temp, sizeof(temp), "%d°", static_cast<int>(data.temp));
     lv_label_set_text(s_ui.weather_temp_lbl, temp);
+
+    const char* weather_text = data.text.c_str();
+    if (data.text.empty() && !data.forecasts.empty() &&
+        !data.forecasts.front().text_day.empty()) {
+        weather_text = data.forecasts.front().text_day.c_str();
+    }
     lv_label_set_text(s_ui.weather_text_lbl,
-                      data.text.empty() ? I18n::T("天气") : data.text.c_str());
+                      (weather_text == nullptr || weather_text[0] == '\0')
+                          ? I18n::T("天气")
+                          : weather_text);
 
     char loc[96];
     if (!data.district.empty() && !data.city.empty() && data.district != data.city) {
-        std::snprintf(loc, sizeof(loc), "%s %s", data.city.c_str(), data.district.c_str());
+        std::snprintf(loc, sizeof(loc), "%s · %s", data.city.c_str(),
+                      data.district.c_str());
     } else if (!data.city.empty()) {
         std::snprintf(loc, sizeof(loc), "%s", data.city.c_str());
     } else if (!data.district.empty()) {
@@ -589,37 +668,35 @@ void ApplyWeatherData(const WeatherDistrictData& data, bool ok) {
     }
     lv_label_set_text(s_ui.weather_loc_lbl, loc);
 
-    char extra[96];
-    extra[0] = '\0';
     if (!data.forecasts.empty()) {
         const WeatherForecastDay& today = data.forecasts.front();
-        if (data.rh > 0 && !data.air.empty()) {
-            std::snprintf(extra, sizeof(extra), "%d° / %d°  %s%d%%  %s",
-                          static_cast<int>(today.high), static_cast<int>(today.low),
-                          I18n::T("湿度"), static_cast<int>(data.rh),
-                          data.air.c_str());
-        } else if (data.rh > 0) {
-            std::snprintf(extra, sizeof(extra), "%d° / %d°  %s %d%%",
-                          static_cast<int>(today.high), static_cast<int>(today.low),
-                          I18n::T("湿度"), static_cast<int>(data.rh));
-        } else if (!data.air.empty()) {
-            std::snprintf(extra, sizeof(extra), "%d° / %d°  %s",
-                          static_cast<int>(today.high), static_cast<int>(today.low),
-                          data.air.c_str());
-        } else {
-            std::snprintf(extra, sizeof(extra), "%d° / %d°",
-                          static_cast<int>(today.high), static_cast<int>(today.low));
-        }
-    } else if (data.rh > 0) {
-        std::snprintf(extra, sizeof(extra), I18n::T("湿度 %d%%"),
-                      static_cast<int>(data.rh));
-    } else if (!data.air.empty()) {
-        std::snprintf(extra, sizeof(extra), "%s", data.air.c_str());
-    } else if (!data.wind_dir.empty()) {
-        std::snprintf(extra, sizeof(extra), "%s %s", I18n::T(data.wind_dir.c_str()),
-                      I18n::T(data.wind_class.c_str()));
+        char low[16];
+        char high[16];
+        std::snprintf(low, sizeof(low), "%d°", static_cast<int>(today.low));
+        std::snprintf(high, sizeof(high), "%d°", static_cast<int>(today.high));
+        lv_label_set_text(s_ui.weather_chip_low_val, low);
+        lv_label_set_text(s_ui.weather_chip_high_val, high);
+    } else {
+        lv_label_set_text(s_ui.weather_chip_low_val, "--");
+        lv_label_set_text(s_ui.weather_chip_high_val, "--");
     }
-    lv_label_set_text(s_ui.weather_extra_lbl, extra);
+
+    if (data.rh > 0) {
+        lv_label_set_text(s_ui.weather_chip_meta_title, I18n::T("湿度"));
+        char rh[16];
+        std::snprintf(rh, sizeof(rh), "%d%%", static_cast<int>(data.rh));
+        lv_label_set_text(s_ui.weather_chip_meta_val, rh);
+    } else if (!data.air.empty()) {
+        lv_label_set_text(s_ui.weather_chip_meta_title, I18n::T("空气"));
+        lv_label_set_text(s_ui.weather_chip_meta_val, data.air.c_str());
+    } else if (!data.wind_dir.empty()) {
+        lv_label_set_text(s_ui.weather_chip_meta_title, I18n::T("风向"));
+        lv_label_set_text(s_ui.weather_chip_meta_val,
+                          I18n::T(data.wind_dir.c_str()));
+    } else {
+        lv_label_set_text(s_ui.weather_chip_meta_title, I18n::T("空气"));
+        lv_label_set_text(s_ui.weather_chip_meta_val, "--");
+    }
 }
 
 void WeatherFetchTask(void* arg) {
@@ -741,41 +818,133 @@ void TriggerWeatherFetch() {
     }
 }
 
+lv_obj_t* MakeMetricChip(lv_obj_t* parent, const char* title, lv_obj_t** out_val) {
+    lv_obj_t* chip = lv_obj_create(parent);
+    lv_obj_remove_style_all(chip);
+    lv_obj_set_flex_grow(chip, 1);
+    lv_obj_set_height(chip, kWeatherChipH);
+    lv_obj_set_style_radius(chip, kRoundSmall ? 12 : 14, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(chip, lv_color_hex(kWeatherChipBg), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(chip, kRoundSmall ? 4 : 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(chip, 4, LV_PART_MAIN);
+    lv_obj_set_flex_flow(chip, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(chip, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(chip, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(chip, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t* title_lbl =
+        MakeStandbyLabel(chip, title, &font_puhui_20_4, 0x8B95A8);
+    lv_obj_set_style_text_opa(title_lbl, LV_OPA_80, LV_PART_MAIN);
+
+    // 中文可用字体仅到 30；数值尽量用大号。
+    lv_obj_t* val_lbl = MakeStandbyLabel(chip, "--", &font_puhui_30_4, 0xF8FAFC);
+    if (out_val != nullptr) {
+        *out_val = val_lbl;
+    }
+    return chip;
+}
+
 lv_obj_t* CreateWeatherPanel(lv_obj_t* parent) {
     lv_obj_t* box = lv_obj_create(parent);
     lv_obj_remove_style_all(box);
     lv_obj_set_size(box, kWeatherPanelW, LV_SIZE_CONTENT);
-    // 圆屏略上移，给底部充电提示留空，图标顶在原先时间的位置。
-    lv_obj_align(box, LV_ALIGN_CENTER, 0, kRoundSmall ? -8 : 0);
+    lv_obj_align(box, LV_ALIGN_CENTER, 0, kRoundSmall ? -10 : -2);
     lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(box, kRoundSmall ? 8 : 14, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(box, kRoundSmall ? 10 : 14, LV_PART_MAIN);
     lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(box, LV_OBJ_FLAG_CLICKABLE);
 
-    s_ui.weather_icon = lv_image_create(box);
+    // 主信息卡：左图标框 + 右温度/天气/地点
+    s_ui.weather_card = lv_obj_create(box);
+    lv_obj_remove_style_all(s_ui.weather_card);
+    lv_obj_set_size(s_ui.weather_card, kWeatherCardW, LV_SIZE_CONTENT);
+    lv_obj_set_style_radius(s_ui.weather_card, kRoundSmall ? 18 : 22, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_ui.weather_card, lv_color_hex(kWeatherCardBg),
+                              LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_ui.weather_card, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_clip_corner(s_ui.weather_card, false, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_ui.weather_card, kRoundSmall ? 10 : 14, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(s_ui.weather_card, kRoundSmall ? 10 : 14,
+                                LV_PART_MAIN);
+    lv_obj_set_flex_flow(s_ui.weather_card, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_ui.weather_card, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_flag(s_ui.weather_card, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_remove_flag(s_ui.weather_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(s_ui.weather_card, LV_OBJ_FLAG_CLICKABLE);
+
+    // 图标框：控件与框同尺寸，图案 STRETCH 后正好居中铺满。
+    lv_obj_t* icon_wrap = lv_obj_create(s_ui.weather_card);
+    lv_obj_remove_style_all(icon_wrap);
+    lv_obj_set_size(icon_wrap, kWeatherIconSize, kWeatherIconSize);
+    lv_obj_set_style_radius(icon_wrap, kRoundSmall ? 14 : 16, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(icon_wrap, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(icon_wrap, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_clip_corner(icon_wrap, true, LV_PART_MAIN);
+    lv_obj_remove_flag(icon_wrap, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(icon_wrap, LV_OBJ_FLAG_CLICKABLE);
+
+    s_ui.weather_icon = lv_image_create(icon_wrap);
     lv_obj_set_size(s_ui.weather_icon, kWeatherIconSize, kWeatherIconSize);
+    lv_obj_center(s_ui.weather_icon);
     lv_image_set_inner_align(s_ui.weather_icon, LV_IMAGE_ALIGN_CENTER);
     lv_obj_remove_flag(s_ui.weather_icon, LV_OBJ_FLAG_CLICKABLE);
     SetStandbyWeatherIcon(s_ui.weather_icon, WeatherDistrictData{});
 
-    s_ui.weather_temp_lbl =
-        MakeStandbyLabel(box, "--°", &font_puhui_30_4, 0xFFFFFF);
-    s_ui.weather_text_lbl =
-        MakeStandbyLabel(box, I18n::T("加载中..."), &font_puhui_20_4, 0xE5E7EB);
-    s_ui.weather_loc_lbl = MakeStandbyLabel(box, "", &font_puhui_20_4, 0x9AA3B2);
-    s_ui.weather_extra_lbl = MakeStandbyLabel(box, "", &font_puhui_20_4, 0x9AA3B2);
+    lv_obj_t* info_col = lv_obj_create(s_ui.weather_card);
+    lv_obj_remove_style_all(info_col);
+    lv_obj_set_flex_grow(info_col, 1);
+    lv_obj_set_height(info_col, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(info_col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(info_col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(info_col, kRoundSmall ? 2 : 4, LV_PART_MAIN);
+    lv_obj_remove_flag(info_col, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(info_col, LV_OBJ_FLAG_CLICKABLE);
 
-    lv_obj_set_style_pad_top(s_ui.weather_temp_lbl, kRoundSmall ? -2 : 0, LV_PART_MAIN);
+    s_ui.weather_temp_lbl =
+        MakeStandbyLabel(info_col, "--°", &font_puhui_30_4, 0xFFFFFF);
+    lv_obj_set_style_text_align(s_ui.weather_temp_lbl, LV_TEXT_ALIGN_LEFT,
+                                LV_PART_MAIN);
+    s_ui.weather_text_lbl =
+        MakeStandbyLabel(info_col, I18n::T("加载中..."), &font_puhui_30_4,
+                         0xE5E7EB);
+    lv_obj_set_style_text_align(s_ui.weather_text_lbl, LV_TEXT_ALIGN_LEFT,
+                                LV_PART_MAIN);
+    s_ui.weather_loc_lbl =
+        MakeStandbyLabel(info_col, "", &font_puhui_20_4, 0x9CA3AF);
+    lv_obj_set_style_text_align(s_ui.weather_loc_lbl, LV_TEXT_ALIGN_LEFT,
+                                LV_PART_MAIN);
     lv_obj_set_width(s_ui.weather_temp_lbl, LV_PCT(100));
     lv_obj_set_width(s_ui.weather_text_lbl, LV_PCT(100));
     lv_obj_set_width(s_ui.weather_loc_lbl, LV_PCT(100));
-    lv_obj_set_width(s_ui.weather_extra_lbl, LV_PCT(100));
     lv_label_set_long_mode(s_ui.weather_text_lbl, LV_LABEL_LONG_CLIP);
     lv_label_set_long_mode(s_ui.weather_loc_lbl, LV_LABEL_LONG_DOT);
-    lv_label_set_long_mode(s_ui.weather_extra_lbl, LV_LABEL_LONG_CLIP);
+
+    // 底部三枚指标卡：最低 / 最高 / 湿度(或空气)
+    lv_obj_t* metrics = lv_obj_create(box);
+    lv_obj_remove_style_all(metrics);
+    lv_obj_set_size(metrics, kWeatherCardW, kWeatherChipH);
+    lv_obj_set_flex_flow(metrics, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(metrics, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(metrics, kRoundSmall ? 8 : 10, LV_PART_MAIN);
+    lv_obj_remove_flag(metrics, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(metrics, LV_OBJ_FLAG_CLICKABLE);
+
+    MakeMetricChip(metrics, I18n::T("最低"), &s_ui.weather_chip_low_val);
+    MakeMetricChip(metrics, I18n::T("最高"), &s_ui.weather_chip_high_val);
+    lv_obj_t* meta_chip =
+        MakeMetricChip(metrics, I18n::T("湿度"), &s_ui.weather_chip_meta_val);
+    // 取芯片里第一个 label 作为可改标题（湿度/空气/风向）
+    s_ui.weather_chip_meta_title = lv_obj_get_child(meta_chip, 0);
+
     return box;
 }
 
@@ -1068,7 +1237,7 @@ void ScheduleInitialWeatherFetch() {
     //  2) 否则尝试 TriggerWeatherFetch() 自行拉取
     // 最多重试 40 次（2 分钟），成功后停止。
     struct RetryCtx { int remaining; };
-    auto* ctx = new RetryCtx{40};
+    auto* ctx = new RetryCtx{240};  // 500ms × 240 ≈ 2 分钟
     lv_timer_t* timer = lv_timer_create(
         [](lv_timer_t* timer) {
             auto* c = static_cast<RetryCtx*>(lv_timer_get_user_data(timer));
@@ -1098,7 +1267,7 @@ void ScheduleInitialWeatherFetch() {
                 lv_timer_delete(timer);
             }
         },
-        3000, ctx);
+        500, ctx);
 }
 
 void OnScreenUnloaded(lv_event_t* /*e*/) {

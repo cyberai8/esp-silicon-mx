@@ -1,0 +1,14 @@
+# 待机页：默认天气脸；再滑到时钟脸对照
+
+wait 600
+shot 01_weather.png
+
+log 右滑切到时钟
+swipe 280 180 80 180 280
+wait 500
+shot 02_clock.png
+
+log 左滑回天气
+swipe 80 180 280 180 280
+wait 500
+shot 03_weather_back.png

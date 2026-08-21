@@ -50,7 +50,9 @@ extern "C" void board_release_power_hold_if_supported();
 #include "screen_util.h"
 #include "idle_power_policy.h"
 #include "vibrate_screen/vibrate_screen.h"
+#if !defined(BOARD_ESP_SHOW)
 #include "weather_screen/weather_screen.h"
+#endif
 #include "network_screen/network_screen.h"
 #include "pin_test_screen/pin_test_screen.h"
 #include "test_screen/test_screen.h"
@@ -158,6 +160,7 @@ void recording_lifecycle_cb(screen_lifecycle_event_t event) {
     RecordingScreen::LifecycleCallback(event);
 }
 
+#if !defined(BOARD_ESP_SHOW)
 void weather_lifecycle_cb(screen_lifecycle_event_t event) {
     PwrKey_OnScreenLifecycle("weather", event);
     if (event == SCREEN_LIFECYCLE_LOAD) {
@@ -166,6 +169,7 @@ void weather_lifecycle_cb(screen_lifecycle_event_t event) {
         ESP_LOGI(TAG_HOME, "unload: weather_screen");
     }
 }
+#endif
 
 // GPS ????GPS_POWER ???????GpsScreen::LifecycleCallback????// ??????+ ???? vibrate / bluetooth ??????????
 void gps_lifecycle_cb(screen_lifecycle_event_t event) {
@@ -442,6 +446,7 @@ void LaunchRecording(screen_lifecycle_cb_t lifecycle_cb) {
     }
 }
 
+#if !defined(BOARD_ESP_SHOW)
 void LaunchWeather(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* old_scr = lv_screen_active();
     lv_obj_t* app = WeatherScreen::Create();
@@ -451,6 +456,7 @@ void LaunchWeather(screen_lifecycle_cb_t lifecycle_cb) {
         lv_obj_delete_async(old_scr);
     }
 }
+#endif
 
 void LaunchGps(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* old_scr = lv_screen_active();
@@ -772,7 +778,9 @@ constexpr AppEntry kApps[] = {
     {"magnet",         "磁场",     LaunchMagnet,        magnet_lifecycle_cb,        false},
     {"vibrate",        "震动",     LaunchVibrate,       vibrate_lifecycle_cb,       false},
 #endif
+#if !defined(BOARD_ESP_SHOW)
     {"weather",        "天气",     LaunchWeather,       weather_lifecycle_cb,       true},
+#endif
     {"sd",             "SD卡",     LaunchSdCard,        sd_card_lifecycle_cb,       false},
     {"badge",          "像章",     LaunchBadge,         badge_lifecycle_cb,         false},
     {"bagclip",        "背包扣",   LaunchBagclip,       bagclip_lifecycle_cb,       false},

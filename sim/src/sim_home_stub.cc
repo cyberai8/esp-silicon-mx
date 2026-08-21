@@ -1,11 +1,9 @@
 // 主界面的仿真占位。真实 home_screen.cc 会把 27 个子屏、网络、电量、
 // 电源键策略全链进来，仿真里暂时不需要，只要「返回键有地方去」。
 #include "home_screen/home_screen.h"
-#include "standby_screen/standby_screen.h"
 
 namespace {
 int s_idle_standby_minutes = 5;
-StandbyFace s_preferred_face = StandbyFace::Weather;
 }  // namespace
 
 lv_obj_t* HomeScreen::Create() {
@@ -33,12 +31,4 @@ int HomeScreen::GetIdleStandbyMinutes() {
 }
 void HomeScreen::SetIdleStandbyMinutes(int minutes) {
     s_idle_standby_minutes = minutes;
-}
-
-StandbyFace StandbyScreen::GetPreferredFace() {
-    return s_preferred_face;
-}
-
-void StandbyScreen::SetPreferredFace(StandbyFace face) {
-    s_preferred_face = face;
 }

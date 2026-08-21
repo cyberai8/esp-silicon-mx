@@ -1,8 +1,7 @@
 #pragma once
 
+#include "audio_codec.h"
 #include "backlight.h"
-
-class AudioCodec;
 
 class Board {
 public:
@@ -10,6 +9,13 @@ public:
 
     Backlight* GetBacklight() { return &backlight_; }
     AudioCodec* GetAudioCodec() { return &codec_; }
+
+    bool GetBatteryLevel(int& level, bool& charging, bool& discharging) {
+        level = 78;
+        charging = false;
+        discharging = true;
+        return true;
+    }
 
 private:
     Board() = default;

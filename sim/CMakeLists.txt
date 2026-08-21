@@ -56,6 +56,8 @@ set(SCREEN_SOURCES
     ${REPO_ROOT}/main/display/screen/album_screen/album_screen.cc
     ${REPO_ROOT}/main/display/screen/clock_screen/clock_screen.cc
     ${REPO_ROOT}/main/display/screen/settings_screen/settings_screen.cc
+    ${REPO_ROOT}/main/display/screen/standby_screen/standby_screen.cc
+    ${REPO_ROOT}/main/display/screen/weather_screen/weather_icon_map.cc
     ${REPO_ROOT}/main/i18n/i18n.cc
 )
 
@@ -109,6 +111,7 @@ target_include_directories(sim PRIVATE
     ${REPO_ROOT}/main/i18n
     ${REPO_ROOT}/main/display
     ${REPO_ROOT}/main/display/screen
+    ${REPO_ROOT}/main/display/screen/weather_screen
     ${REPO_ROOT}/managed_components/espressif__esp_new_jpeg/include
     ${FONTS_DIR}/include
     ${LVGL_DIR}
@@ -125,6 +128,7 @@ target_compile_options(sim PRIVATE -Wall -Wextra -Wno-unused-parameter -g)
 
 # 字体：设备上来自 78/xiaozhi-fonts 组件，源码就是普通 .c，PC 上直接编
 file(GLOB FONT_SOURCES ${FONTS_DIR}/src/font_puhui_20_4.c ${FONTS_DIR}/src/font_puhui_30_4.c
+     ${REPO_ROOT}/main/display/font/font_puhui_number_120_4.c
      ${FONTS_DIR}/src/font_awesome_20_4.c ${FONTS_DIR}/src/font_awesome_30_4.c)
 add_library(sim_fonts STATIC ${FONT_SOURCES})
 target_link_libraries(sim_fonts PRIVATE lvgl)
