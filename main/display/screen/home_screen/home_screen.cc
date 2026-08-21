@@ -1152,6 +1152,31 @@ struct PagerState {
 // CreateIndicator ??????
 // HighlightDot(state, 0) ???????
 int s_last_home_page = 0;
+PagerState* s_active_home_pager = nullptr;
+
+void RememberHomePage(const PagerState* state) {
+    if (state == nullptr || state->page_count <= 0) {
+        return;
+    }
+    int page = state->current_page;
+    if (state->clover && state->clover_busy) {
+        page = state->clover_pending_page;
+    }
+    if (page < 0 || page >= state->page_count) {
+        page = 0;
+    }
+    s_last_home_page = page;
+}
+
+int ClampHomePage(int page, int page_count) {
+    if (page_count <= 0) {
+        return 0;
+    }
+    if (page < 0 || page >= page_count) {
+        return 0;
+    }
+    return page;
+}
 
 struct HomeStatusState {
     lv_obj_t* bar = nullptr;
@@ -2473,6 +2498,9 @@ void OnHomeReleased(lv_event_t* e) {
             const HomeTouchKind kind =
                 elapsed < kHomeLongPressMs ? HomeTouchKind::Click
                                            : HomeTouchKind::LongPress;
+            if (kind == HomeTouchKind::Click) {
+                RememberHomePage(state);
+            }
             HomeTouchDispatchTapLike(kind);
         } else {
             const HomeTouchKind kind = HomeTouchClassifySwipe(dx, dy);
@@ -2524,10 +2552,7 @@ void OnHomeScreenLoaded(lv_event_t* e) {
 
     auto* state = static_cast<PagerState*>(lv_event_get_user_data(e));
     if (state != nullptr && state->clover) {
-        int page = s_last_home_page;
-        if (page < 0 || page >= state->page_count) {
-            page = 0;
-        }
+        int page = ClampHomePage(s_last_home_page, state->page_count);
         lv_anim_delete(state, nullptr);
         state->clover_busy = false;
         state->clover_queued_step = 0;
@@ -2539,10 +2564,7 @@ void OnHomeScreenLoaded(lv_event_t* e) {
         HighlightDot(state, page);
     } else if (state != nullptr && state->pager != nullptr) {
         lv_obj_update_layout(state->pager);
-        int page = s_last_home_page;
-        if (page < 0 || page >= state->page_count) {
-            page = 0;
-        }
+        int page = ClampHomePage(s_last_home_page, state->page_count);
         lv_obj_scroll_to_x(state->pager, PagerScrollXForPage(state, page),
                            LV_ANIM_OFF);
         HighlightDot(state, page);
@@ -2552,15 +2574,19 @@ void OnHomeScreenLoaded(lv_event_t* e) {
     StartHomeIdleTimer();
 }
 
-void OnHomeScreenUnloaded(lv_event_t* /*e*/) {
-    // ????????????Test????????UNLOAD ?????? home??    // ???????????????????????
-PwrKey_OnScreenLifecycle("home", SCREEN_LIFECYCLE_UNLOAD);
+void OnHomeScreenUnloaded(lv_event_t* e) {
+    RememberHomePage(static_cast<PagerState*>(lv_event_get_user_data(e)));
+    PwrKey_OnScreenLifecycle("home", SCREEN_LIFECYCLE_UNLOAD);
 }
 
 void OnScreenDeleted(lv_event_t* e) {
     CancelCellScaleTimer();
     StopHomeIdleTimer();
     auto* state = static_cast<PagerState*>(lv_event_get_user_data(e));
+    RememberHomePage(state);
+    if (s_active_home_pager == state) {
+        s_active_home_pager = nullptr;
+    }
     // 翻页动画的 var 是 state，先撤动画再释放，否则回调会踩野指针。
     lv_anim_delete(state, nullptr);
     delete state;
@@ -2700,8 +2726,8 @@ void PwrShutdownPulseTask(void* /*arg*/) {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
-#elif defined(BOARD_WAVESHARE_S3_TOUCH_LCD_1_85B)
-    ESP_LOGW(TAG_HOME, "Waveshare 1.85B has no software power-off IO");
+#elif defined(BOARD_ESP_SHOW)
+    ESP_LOGW(TAG_HOME, "ESP-Show has no software power-off IO");
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -2724,7 +2750,7 @@ void PwrShutdownPulseTask(void* /*arg*/) {
 
 void BeginSystemShutdown(const char* reason) {
 #if (defined(CONFIG_IDF_TARGET_ESP32S31) && !defined(BOARD_ESP_VOCAT)) || \
-    defined(BOARD_WAVESHARE_S3_TOUCH_LCD_1_85B)
+    defined(BOARD_ESP_SHOW)
     ESP_LOGW(TAG_HOME, "board has no IOExpander/software power-off");
     IdlePower_Stop();
     ShowShutdownScreen(ShutdownScreenMode::kUnsupported, reason);
@@ -3090,6 +3116,9 @@ lv_obj_t* CreateRoundCloverHome() {
     for (int i = 0; i < order_count; ++i) {
         state->clover_order[i] = order[i];
     }
+    s_active_home_pager = state;
+
+    const int restore_page = ClampHomePage(s_last_home_page, page_count);
 
     lv_obj_t* chrome = lv_image_create(screen);
     lv_image_set_src(chrome, CloverChromeSrc());
@@ -3153,7 +3182,7 @@ lv_obj_t* CreateRoundCloverHome() {
         state->clover_hs[s] = hs;
     }
 
-    CloverApplyPage(state, 0);
+    CloverApplyPage(state, restore_page);
     lv_obj_set_style_opa(layer, LV_OPA_COVER, LV_PART_MAIN);
     StartCloverPrefetch(order, order_count);
 
@@ -3171,6 +3200,7 @@ lv_obj_t* CreateRoundCloverHome() {
             lv_obj_set_style_pad_ver(state->indicator, 2, LV_PART_MAIN);
             lv_obj_align(state->indicator, LV_ALIGN_BOTTOM_MID, 0, -4);
         }
+        HighlightDot(state, restore_page);
     }
 
     lv_obj_add_flag(screen, LV_OBJ_FLAG_CLICKABLE);
@@ -3180,7 +3210,7 @@ lv_obj_t* CreateRoundCloverHome() {
     lv_obj_add_event_cb(screen, OnHomeScreenLoaded, LV_EVENT_SCREEN_LOADED,
                         state);
     lv_obj_add_event_cb(screen, OnHomeScreenUnloaded, LV_EVENT_SCREEN_UNLOADED,
-                        nullptr);
+                        state);
     lv_obj_add_event_cb(screen, OnScreenDeleted, LV_EVENT_DELETE, state);
 
     if (status->bar != nullptr) {
@@ -3218,6 +3248,7 @@ int page_count = (kTotalApps + kAppsPerPage - 1) / kAppsPerPage;
     auto* state = new PagerState{};
     state->page_count = page_count;
     state->current_page = 0;
+    s_active_home_pager = state;
 
     auto* status = new HomeStatusState{};
     CreateStatusBar(screen, status);
@@ -3268,7 +3299,7 @@ lv_obj_add_flag(screen, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(screen, OnHomeReleased, LV_EVENT_RELEASED, state);
     lv_obj_add_event_cb(screen, OnHomeScreenLoaded, LV_EVENT_SCREEN_LOADED, state);
     lv_obj_add_event_cb(screen, OnHomeScreenUnloaded, LV_EVENT_SCREEN_UNLOADED,
-                        nullptr);
+                        state);
     lv_obj_add_event_cb(screen, OnScreenDeleted, LV_EVENT_DELETE, state);
 
     CreateActivationOverlay(screen, status);

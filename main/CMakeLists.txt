@@ -107,8 +107,8 @@ if(CONFIG_BOARD_TYPE_ESP_VOCAT)
     # VoCat：无 NT26；启用 DualNetwork + ML307 UART 4G
     list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/nt26_board\\.cc$")
     list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/uart_eth_modem\\.cc$")
-elseif(CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
-    # Waveshare 1.85B：无 NT26 / 4G
+elseif(CONFIG_BOARD_TYPE_ESP_SHOW)
+    # ESP-Show：无 NT26 / 4G
     list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/nt26_board\\.cc$")
     list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/uart_eth_modem\\.cc$")
     list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/dual_network_board\\.cc$")
@@ -146,8 +146,8 @@ elseif(CONFIG_BOARD_TYPE_ESP_VOCAT)
     set(BUILTIN_TEXT_FONT font_puhui_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
-elseif(CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
-    set(BOARD_TYPE "waveshare-s3-touch-lcd-1.85b")
+elseif(CONFIG_BOARD_TYPE_ESP_SHOW)
+    set(BOARD_TYPE "esp-show")
     set(BUILTIN_TEXT_FONT font_puhui_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
@@ -337,14 +337,14 @@ target_compile_definitions(${COMPONENT_LIB}
                     PRIVATE BOARD_TYPE=\"${BOARD_TYPE}\" BOARD_NAME=\"${BOARD_NAME}\"
                     PRIVATE BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT} BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
                     )
-if(CONFIG_BOARD_TYPE_ESP_VOCAT OR CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+if(CONFIG_BOARD_TYPE_ESP_VOCAT OR CONFIG_BOARD_TYPE_ESP_SHOW)
     # 360 圆屏 UI 适配（home/radio 等）复用 VoCat 分支
     target_compile_definitions(${COMPONENT_LIB} PRIVATE BOARD_ESP_VOCAT=1)
     # OTA 上报 esp-show，服务端才会下发 viseme 口型轴
     target_compile_definitions(${COMPONENT_LIB} PRIVATE OTA_BOARD_TYPE=\"esp-show\")
 endif()
-if(CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE BOARD_WAVESHARE_S3_TOUCH_LCD_1_85B=1)
+if(CONFIG_BOARD_TYPE_ESP_SHOW)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE BOARD_ESP_SHOW=1)
 endif()
 
 # Add generation rules

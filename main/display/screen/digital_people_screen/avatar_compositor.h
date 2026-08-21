@@ -26,6 +26,8 @@ public:
     static void ArmUtterance(int index);
     static void LoadVisemeTimeline(int index, const VisemeEvent* events, size_t count);
     static void ResetLipSync();
+    // 首包 TTS PCM 写入 DAC 时调用，作为 viseme time_ms=0 的锚点。
+    static void NotifyPcmOutput(uint64_t pcm_start_played, uint32_t peak);
 
 private:
     AvatarCompositor() = delete;

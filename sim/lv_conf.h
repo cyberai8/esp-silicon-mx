@@ -13,7 +13,7 @@
 
 /* clang-format off */
 /* PC 仿真用的 LVGL 配置。
- * 下面这些值刻意和设备上的 Kconfig 对齐（sdkconfig.waveshare-s3-touch-lcd-1.85b），
+ * 下面这些值刻意和设备上的 Kconfig 对齐（sdkconfig.esp-show），
  * 只有「PC 上才有意义」的项才不一样（lodepng/tjpgd 用来替代板上的 esp_lv_decoder
  * 和 esp_new_jpeg，日志打到 stdout）。改板子配置时记得同步这里，否则仿真出来的
  * 效果和真机会有偏差。 */

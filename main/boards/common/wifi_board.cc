@@ -104,7 +104,7 @@ void WifiBoard::StartNetwork() {
 
     auto& ssid_manager = SsidManager::GetInstance();
     auto ssid_list = ssid_manager.GetSsidList();
-#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_ESP_SHOW)
     // 圆屏/VoCat：无 SSID 时不要卡在配网热点，直接进菜单，稍后在网络页配置。
     // 但仍要把 STA 驱动在 AFE 之前拉起：WiFi RX DMA 必须走内部 RAM，
     // 进网络页再 esp_wifi_init 会 malloc buffer fail。
@@ -123,7 +123,7 @@ void WifiBoard::StartNetwork() {
 #endif
 
     auto& wifi_station = WifiStation::GetInstance();
-#if !(CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+#if !(CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_ESP_SHOW)
     wifi_station.OnScanBegin([this]() {
         auto display = Board::GetInstance().GetDisplay();
         display->ShowNotification(Lang::Strings::SCANNING_WIFI, 30000);
@@ -144,7 +144,7 @@ void WifiBoard::StartNetwork() {
 #endif
     wifi_station.Start();
 
-#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_ESP_SHOW)
     // 不阻塞等待联网；失败也不进配网 AP。菜单已经（或即将）显示。
     ESP_LOGI(TAG, "WiFi station started (non-blocking)");
 #else

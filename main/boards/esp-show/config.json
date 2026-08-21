@@ -1,13 +1,13 @@
 {
     "manufacturer": "waveshare",
-    "type": "waveshare-s3-touch-lcd-1.85b",
+    "type": "esp-show",
     "target": "esp32s3",
     "preview": true,
     "builds": [
         {
-            "name": "waveshare-s3-touch-lcd-1.85b",
+            "name": "esp-show",
             "sdkconfig_append": [
-                "CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B=y",
+                "CONFIG_BOARD_TYPE_ESP_SHOW=y",
                 "# CONFIG_BOARD_TYPE_ESP_VOCAT is not set",
                 "CONFIG_PARTITION_TABLE_CUSTOM=y",
                 "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/v1/16m_claw4_s31.csv\"",

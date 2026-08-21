@@ -1,6 +1,7 @@
 #include "audio_codec.h"
 #include "board.h"
 #include "settings.h"
+#include "avatar_compositor.h"
 
 #include <esp_log.h>
 #include <cstring>
@@ -16,6 +17,8 @@ AudioCodec::~AudioCodec() {
 
 void AudioCodec::OutputData(std::vector<int16_t>& data) {
     std::lock_guard<std::mutex> lock(output_mutex_);
+    const uint64_t pcm_start =
+        played_samples_.load(std::memory_order_relaxed);
     Write(data.data(), data.size());
     const int channels = output_channels_ > 0 ? output_channels_ : 1;
     const size_t frames = data.size() / static_cast<size_t>(channels);
@@ -34,6 +37,10 @@ void AudioCodec::OutputData(std::vector<int16_t>& data) {
         }
     }
     last_output_peak_.store(peak, std::memory_order_relaxed);
+    if (frames > 0) {
+        // 口型锚点：首包 PCM（含句首静音）写入 DAC 的时刻。
+        AvatarCompositor::NotifyPcmOutput(pcm_start, peak);
+    }
 }
 
 bool AudioCodec::InputData(std::vector<int16_t>& data) {

@@ -12,7 +12,7 @@
 
 // 圆屏 + 这块板的功能开关，和 sdkconfig.esp-vocat 对齐。
 #define BOARD_ESP_VOCAT 1
-#define BOARD_WAVESHARE_S3_TOUCH_LCD_1_85B 1
+#define BOARD_ESP_SHOW 1
 #define BOARD_HAS_EXTERNAL_BT 0
 #define BOARD_HAS_NATIVE_BT 0
 #define BOARD_HAS_DUAL_SIM 0

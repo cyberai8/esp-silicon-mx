@@ -84,6 +84,69 @@ const char* ResetReasonName(esp_reset_reason_t reason) {
 }
 
 #ifdef HAVE_LVGL
+void LogVisemeDownlink(const cJSON* root, int sentence_index) {
+    const char* set_id = "-";
+    auto* set_item = cJSON_GetObjectItem(root, "viseme_set_id");
+    if (cJSON_IsString(set_item) && set_item->valuestring != nullptr) {
+        set_id = set_item->valuestring;
+    }
+
+    auto* visemes = cJSON_GetObjectItem(root, "visemes");
+    const int count = cJSON_IsArray(visemes) ? cJSON_GetArraySize(visemes) : 0;
+    ESP_LOGI(TAG, "<< viseme index=%d set=%s events=%d", sentence_index, set_id,
+             count);
+
+    char* raw = cJSON_PrintUnformatted(root);
+    if (raw != nullptr) {
+        constexpr size_t kPreview = 480;
+        const size_t len = std::strlen(raw);
+        if (len <= kPreview) {
+            ESP_LOGI(TAG, "<< viseme raw=%s", raw);
+        } else {
+            ESP_LOGI(TAG, "<< viseme raw(%u)=%.*s...", static_cast<unsigned>(len),
+                     static_cast<int>(kPreview), raw);
+        }
+        cJSON_free(raw);
+    }
+
+    if (!cJSON_IsArray(visemes)) {
+        ESP_LOGW(TAG, "<< viseme missing visemes[]");
+        return;
+    }
+
+    for (int i = 0; i < count; ++i) {
+        auto* item = cJSON_GetArrayItem(visemes, i);
+        if (!cJSON_IsObject(item)) {
+            ESP_LOGW(TAG, "  [%d] skip: not object", i);
+            continue;
+        }
+        int time_ms = -1;
+        int duration_ms = -1;
+        int id = -1;
+        int blend_ms = -1;
+        auto* t = cJSON_GetObjectItem(item, "time_ms");
+        auto* d = cJSON_GetObjectItem(item, "duration_ms");
+        auto* vid = cJSON_GetObjectItem(item, "id");
+        auto* blend = cJSON_GetObjectItem(item, "blend_ms");
+        if (cJSON_IsNumber(t)) {
+            time_ms = t->valueint;
+        }
+        if (cJSON_IsNumber(d)) {
+            duration_ms = d->valueint;
+        }
+        if (cJSON_IsNumber(vid)) {
+            id = vid->valueint;
+        }
+        if (cJSON_IsNumber(blend)) {
+            blend_ms = blend->valueint;
+        }
+        ESP_LOGI(TAG, "  viseme[%d] t=%d d=%d id=%d blend=%d", i, time_ms,
+                 duration_ms, id, blend_ms);
+    }
+}
+#endif
+
+#ifdef HAVE_LVGL
 void LeaveStandbyForWakeUi(void* /*arg*/) {
     if (StandbyScreen::IsActive()) {
         ESP_LOGI(TAG, "Wake: leave standby UI before listening");
@@ -589,16 +652,17 @@ bool Application::InitializeProtocol(Ota& ota) {
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
+                // 注意：服务端常先发 sentence_start/viseme，后发 tts.start。
+                // 这里不能 ResetLipSync，否则会清掉已加载的口型轴。
+                ESP_LOGI(TAG, "<< tts start");
                 Schedule([this]() {
                     aborted_ = false;
-#ifdef HAVE_LVGL
-                    DigitalPeopleScreen::ResetLipSync();
-#endif
                     if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
                         SetDeviceState(kDeviceStateSpeaking);
                     }
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
+                ESP_LOGI(TAG, "<< tts stop");
                 Schedule([this]() {
 #ifdef HAVE_LVGL
                     DigitalPeopleScreen::ResetLipSync();
@@ -619,7 +683,8 @@ bool Application::InitializeProtocol(Ota& ota) {
                     sentence_index = index_item->valueint;
                 }
                 if (cJSON_IsString(text)) {
-                    ESP_LOGI(TAG, "<< %s", text->valuestring);
+                    ESP_LOGI(TAG, "<< sentence_start index=%d text=%s",
+                             sentence_index, text->valuestring);
                     Schedule([this, message = std::string(text->valuestring)]() {
                         if (auto* disp = Board::GetInstance().GetDisplay()) {
                             disp->SetChatMessage("assistant", message.c_str());
@@ -627,9 +692,8 @@ bool Application::InitializeProtocol(Ota& ota) {
                     });
                 }
 #ifdef HAVE_LVGL
-                Schedule([sentence_index]() {
-                    DigitalPeopleScreen::ArmUtterance(sentence_index);
-                });
+                // 口型 Arm 必须同步：走 Schedule 会晚几百毫秒，嘴一直闭嘴。
+                DigitalPeopleScreen::ArmUtterance(sentence_index);
 #endif
             }
         } else if (strcmp(type->valuestring, "listen") == 0) {
@@ -647,6 +711,7 @@ bool Application::InitializeProtocol(Ota& ota) {
         } else if (strcmp(type->valuestring, "llm") == 0) {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
+                ESP_LOGI(TAG, "<< llm emotion=%s", emotion->valuestring);
                 Schedule([this, emotion_str = std::string(emotion->valuestring)]() {
                     if (auto* disp = Board::GetInstance().GetDisplay()) {
                         disp->SetEmotion(emotion_str.c_str());
@@ -660,6 +725,7 @@ bool Application::InitializeProtocol(Ota& ota) {
             if (cJSON_IsNumber(index_item)) {
                 sentence_index = index_item->valueint;
             }
+            LogVisemeDownlink(root, sentence_index);
             auto visemes = cJSON_GetObjectItem(root, "visemes");
             if (!cJSON_IsArray(visemes)) {
                 ESP_LOGW(TAG, "viseme message missing visemes[]");
@@ -687,10 +753,9 @@ bool Application::InitializeProtocol(Ota& ota) {
                     }
                     events.push_back(ev);
                 }
-                Schedule([sentence_index, events = std::move(events)]() {
-                    DigitalPeopleScreen::LoadVisemeTimeline(
-                        sentence_index, events.data(), events.size());
-                });
+                // 口型轴同步加载，避免 Schedule 排队导致开口偏晚。
+                DigitalPeopleScreen::LoadVisemeTimeline(
+                    sentence_index, events.data(), events.size());
             }
 #endif
         } else if (strcmp(type->valuestring, "mcp") == 0) {
@@ -752,11 +817,11 @@ void Application::StartNetworkAndProtocol() {
     ESP_LOGI(TAG, "Background network/OTA/protocol start (heap=%u internal=%u)",
              static_cast<unsigned>(esp_get_free_heap_size()),
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
-#if !CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B
+#if !CONFIG_BOARD_TYPE_ESP_SHOW
     Board::GetInstance().StartNetwork();
 #endif
 
-#if CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B
+#if CONFIG_BOARD_TYPE_ESP_SHOW
     ESP_LOGI(TAG, "Waiting for WiFi in background (UI already on home)");
     constexpr int kWifiWaitSec = 120;
     for (int i = 0; i < kWifiWaitSec && !WifiStation::GetInstance().IsConnected(); ++i) {
@@ -870,7 +935,7 @@ void Application::Start() {
 
     Display* display = board.GetDisplay();
 
-#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_ESP_SHOW)
     // VoCat 原先把音频推迟到 MQTT 之后；但无 WiFi 时 StartNetwork→配网会
     // Alert+PlaySound 并永久阻塞，必须先 Initialize，否则 codec_ 空指针崩溃。
     // Initialize 不启动 I2S（Start 才开），OTA/联网阶段仍可保持低功耗。
@@ -917,14 +982,14 @@ void Application::Start() {
     Ota ota;
     ota.MarkCurrentVersionValid();
 
-#if CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B
+#if CONFIG_BOARD_TYPE_ESP_SHOW
     // WiFi RX 缓冲必须走内部 DMA 内存，要在主屏/AFE 之前申请。
     board.StartNetwork();
 #endif
 
     /* Wait for the network to be ready */
 #ifdef HAVE_LVGL
-#if !(CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+#if !(CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_ESP_SHOW)
     // VoCat：保持开机动画播放，不要 pause LVGL。
     if (esp_lv_adapter_is_initialized() && esp_lv_adapter_pause(-1) != ESP_OK) {
         ESP_LOGW(TAG, "LVGL pause before network/OTA failed");
@@ -935,7 +1000,7 @@ void Application::Start() {
     BatteryAlert_Start();
 #endif
 
-#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+#if (CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_ESP_SHOW)
     // 开机动画结束后立刻进菜单；OTA/MQTT 在后台。WiFi STA 已在上面拉起。
     display = board.GetDisplay();
     if (display == nullptr) {

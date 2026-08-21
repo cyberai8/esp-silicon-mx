@@ -26,7 +26,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-#define TAG "WS-1.85B"
+#define TAG "EspShow"
 
 static i2c_master_bus_handle_t s_board_i2c_bus = nullptr;
 
@@ -464,10 +464,10 @@ public:
     }
 };
 
-class WaveshareS3TouchLcd185B : public WifiBoard {
+class EspShow : public WifiBoard {
 public:
-    WaveshareS3TouchLcd185B() : boot_button_(BOOT_BUTTON_GPIO) {
-        ESP_LOGI(TAG, "Boot Waveshare ESP32-S3-Touch-LCD-1.85B");
+    EspShow() : boot_button_(BOOT_BUTTON_GPIO) {
+        ESP_LOGI(TAG, "Boot ESP-Show");
         InitializeBacklightOff();
         InitializeButtons();
         InitializeI2c();
@@ -795,7 +795,7 @@ private:
             if (ProbeQmi8658(addr)) {
                 xTaskCreate(
                     [](void* arg) {
-                        auto* self = static_cast<WaveshareS3TouchLcd185B*>(arg);
+                        auto* self = static_cast<EspShow*>(arg);
                         uint8_t reg = 0x35;
                         int16_t prev_ax = 0;
                         for (;;) {
@@ -826,4 +826,4 @@ private:
     }
 };
 
-DECLARE_BOARD(WaveshareS3TouchLcd185B);
+DECLARE_BOARD(EspShow);

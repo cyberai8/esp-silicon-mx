@@ -1,6 +1,6 @@
-# Waveshare ESP32-S3-Touch-LCD-1.85B
+# ESP-Show (esp-show)
 
-硬件文档: https://docs.waveshare.net/ESP32-S3-Touch-LCD-1.85B/
+硬件基于 [Waveshare ESP32-S3-Touch-LCD-1.85B](https://docs.waveshare.net/ESP32-S3-Touch-LCD-1.85B/)。
 
 ## 规格摘要
 
@@ -16,11 +16,11 @@
 
 ## 内存
 
-8MB Octal PSRAM 已启用；`sdkconfig.waveshare-s3-touch-lcd-1.85b` 将 TLS/mbedTLS 堆、LVGL 线程栈、NVS 缓存放到 PSRAM，并关闭硬件 AES（避免 `esp-aes: Failed to allocate memory`）。详见 `sdkconfig.defaults.waveshare-s3-touch-lcd-1.85b`。
+8MB Octal PSRAM 已启用；`sdkconfig.esp-show` 将 TLS/mbedTLS 堆、LVGL 线程栈、NVS 缓存放到 PSRAM，并关闭硬件 AES（避免 `esp-aes: Failed to allocate memory`）。详见 `sdkconfig.defaults.esp-show`。
 
 ## 构建
 
 ```bash
-idf.py -B build-waveshare-1.85b -DSDKCONFIG=sdkconfig.waveshare-s3-touch-lcd-1.85b set-target esp32s3
-idf.py -B build-waveshare-1.85b -DSDKCONFIG=sdkconfig.waveshare-s3-touch-lcd-1.85b build
+idf.py -B build-esp-show -DSDKCONFIG=sdkconfig.esp-show set-target esp32s3
+idf.py -B build-esp-show -DSDKCONFIG=sdkconfig.esp-show build
 ```

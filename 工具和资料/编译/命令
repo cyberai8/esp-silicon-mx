@@ -6,7 +6,7 @@
 # --------------------------------  ----------  ----------------------------
 # metalio-claw-4                    esp32p4     v5.5.4（文档主推）
 # esp-vocat                         esp32s3     v5.5.x
-# waveshare-s3-touch-lcd-1.85b      esp32s3     v5.5.x
+# esp-show                           esp32s3     v5.5.x
 #
 # 原则：每块板用独立 -B build 目录 + 独立 SDKCONFIG，避免互相覆盖。
 # =============================================================================
@@ -68,23 +68,23 @@ idf.py -B build-esp-vocat \
 
 
 # =============================================================================
-# 3) Waveshare ESP32-S3-Touch-LCD-1.85B（S3 圆屏，仅 WiFi）
-#    板级: main/boards/waveshare-s3-touch-lcd-1.85b
+# 3) ESP-Show（S3 圆屏，仅 WiFi；硬件基于 Waveshare 1.85B）
+#    板级: main/boards/esp-show
 #    IDF:  v5.5.x
-#    配置: sdkconfig.waveshare-s3-touch-lcd-1.85b（仓库已有）
+#    配置: sdkconfig.esp-show（仓库已有）
 # =============================================================================
 source /home/qmx/esp/esp-idf/export.sh
 
-idf.py -B build-waveshare-1.85b \
-  -DSDKCONFIG=sdkconfig.waveshare-s3-touch-lcd-1.85b \
+idf.py -B build-esp-show \
+  -DSDKCONFIG=sdkconfig.esp-show \
   set-target esp32s3
 
-idf.py -B build-waveshare-1.85b \
-  -DSDKCONFIG=sdkconfig.waveshare-s3-touch-lcd-1.85b \
+idf.py -B build-esp-show \
+  -DSDKCONFIG=sdkconfig.esp-show \
   build
 
-idf.py -B build-waveshare-1.85b \
-  -DSDKCONFIG=sdkconfig.waveshare-s3-touch-lcd-1.85b \
+idf.py -B build-esp-show \
+  -DSDKCONFIG=sdkconfig.esp-show \
   -p /dev/ttyACM0 flash monitor
 
 
@@ -96,4 +96,4 @@ idf.py -B build-waveshare-1.85b \
 # grep CONFIG_BOARD_TYPE_ sdkconfig*
 #
 # 换板后若 CMake 缓存混乱：删对应 build-* 再 set-target / build
-# rm -rf build-waveshare-1.85b
+# rm -rf build-esp-show

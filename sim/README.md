@@ -4,7 +4,7 @@
 改一版 UI，几秒钟就能看到效果，不用每次刷机。
 
 - LVGL 用的是 `managed_components/lvgl__lvgl`，**和固件同一个版本（9.3.0）**；
-  `sim/lv_conf.h` 里的关键项也是照 `sdkconfig.waveshare-s3-touch-lcd-1.85b` 抄的，
+  `sim/lv_conf.h` 里的关键项也是照 `sdkconfig.esp-show` 抄的，
   所以字体、抗锯齿、图片缓存这些渲染行为和真机一致。
 - ESP-IDF 那部分（日志、堆、FreeRTOS、esp_timer、NVS、SD 卡、JPEG 解码）由
   `sim/stubs/` 顶替，屏幕代码本身**一行都不用改**。

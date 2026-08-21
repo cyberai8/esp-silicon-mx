@@ -4,7 +4,7 @@
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
 
-// Waveshare ESP32-S3-Touch-LCD-1.85B
+// ESP-Show（硬件基于 Waveshare ESP32-S3-Touch-LCD-1.85B）
 // 文档: https://docs.waveshare.net/ESP32-S3-Touch-LCD-1.85B/
 // 360x360 ST77916 QSPI + CST816S + ES8311/ES7210 + BQ27220 + SDMMC 4-bit
 
@@ -86,6 +86,6 @@
 
 // 与 VoCat 同为 360 圆屏；复用圆屏 UI 适配分支
 #define BOARD_ESP_VOCAT 1
-#define BOARD_WAVESHARE_S3_TOUCH_LCD_1_85B 1
+#define BOARD_ESP_SHOW 1
 
 #endif  // _BOARD_CONFIG_H_

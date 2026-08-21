@@ -34,7 +34,7 @@ LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
 #endif
 
     esp_lv_adapter_config_t adapter_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG();
-#if CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B || \
+#if CONFIG_BOARD_TYPE_ESP_VOCAT || CONFIG_BOARD_TYPE_ESP_SHOW || \
     (defined(DISPLAY_WIDTH) && defined(DISPLAY_HEIGHT) && DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
     // LVGL 任务栈若在 PSRAM，任务内读 NVS/Flash 会触发
     // esp_task_stack_is_sane_cache_disabled assert（主屏状态栏/主题都会读 NVS）。
@@ -128,7 +128,7 @@ LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
     // 360 圆屏图标页多，给足 1MB；大屏 Claw4：2MB。
 #if defined(CONFIG_IDF_TARGET_ESP32S31)
     lv_image_cache_resize(512 * 1024, true);
-#elif defined(CONFIG_BOARD_TYPE_ESP_VOCAT) || defined(CONFIG_BOARD_TYPE_WAVESHARE_S3_TOUCH_LCD_1_85B)
+#elif defined(CONFIG_BOARD_TYPE_ESP_VOCAT) || defined(CONFIG_BOARD_TYPE_ESP_SHOW)
     lv_image_cache_resize(1024 * 1024, true);
 #else
     lv_image_cache_resize(2 * 1024 * 1024, true);
