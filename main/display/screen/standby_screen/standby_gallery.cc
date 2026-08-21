@@ -319,9 +319,15 @@ struct GalleryUi {
 GalleryUi s_ui;
 std::vector<ImageEntry> s_images;
 int s_current_index = 0;
+int s_fail_streak = 0;
 std::atomic<bool> s_decode_busy{false};
 std::atomic<bool> s_alive{false};
 std::atomic<bool> s_active{false};
+#if defined(ESP_PLATFORM)
+std::atomic<bool> s_worker_stop{false};
+std::atomic<int> s_job_index{-1};
+TaskHandle_t s_worker = nullptr;
+#endif
 
 uint8_t* s_show_buf = nullptr;
 lv_image_dsc_t s_show_dsc{};
@@ -333,7 +339,14 @@ struct PendingFrame {
 };
 std::atomic<PendingFrame*> s_pending{nullptr};
 
+void StopSlideTimer();
+void StartSlideTimer();
+void StartDecode(int index);
+void ArmRetryTimer();
+
 #if defined(ESP_PLATFORM)
+
+constexpr uint32_t kRetryAfterFailMs = 10000;
 
 void FillDsc(lv_image_dsc_t* dsc, const uint8_t* data, int w, int h) {
     memset(dsc, 0, sizeof(*dsc));
@@ -347,8 +360,14 @@ void FillDsc(lv_image_dsc_t* dsc, const uint8_t* data, int w, int h) {
 }
 
 void ApplyPendingFrame(void* /*arg*/) {
+    s_decode_busy.store(false, std::memory_order_release);
     if (!s_alive.load(std::memory_order_relaxed) ||
         !s_active.load(std::memory_order_relaxed)) {
+        PendingFrame* drop = s_pending.exchange(nullptr, std::memory_order_acq_rel);
+        if (drop) {
+            heap_caps_free(drop->buf);
+            delete drop;
+        }
         return;
     }
     PendingFrame* pf = s_pending.exchange(nullptr, std::memory_order_acq_rel);
@@ -361,6 +380,7 @@ void ApplyPendingFrame(void* /*arg*/) {
     s_show_buf = pf->buf;
     FillDsc(&s_show_dsc, s_show_buf, pf->w, pf->h);
     delete pf;
+    s_fail_streak = 0;
     if (s_ui.img) {
         lv_image_set_src(s_ui.img, nullptr);
         lv_obj_set_size(s_ui.img, kScreenSize, kScreenSize);
@@ -370,43 +390,132 @@ void ApplyPendingFrame(void* /*arg*/) {
     if (s_ui.hint) {
         lv_obj_add_flag(s_ui.hint, LV_OBJ_FLAG_HIDDEN);
     }
+    if (s_ui.slide_timer) {
+        lv_timer_reset(s_ui.slide_timer);
+    } else if (s_active.load(std::memory_order_relaxed)) {
+        StartSlideTimer();
+    }
+    ESP_LOGI(TAG, "show ok idx=%d/%d", s_current_index,
+             static_cast<int>(s_images.size()));
 }
 
-void DecodeTask(void* arg) {
+// 仅在「目录有图但一张都没成功上过屏」时显示失败文案；已有画面则保留并稍后重试。
+void OnRoundAllFailed() {
+    StopSlideTimer();
+    if (s_show_buf != nullptr) {
+        ESP_LOGW(TAG,
+                 "round failed but keep last frame on screen, retry in %u ms",
+                 static_cast<unsigned>(kRetryAfterFailMs));
+        ArmRetryTimer();
+        return;
+    }
+    if (s_ui.img) {
+        lv_image_set_src(s_ui.img, nullptr);
+    }
+    if (s_ui.hint) {
+        if (s_images.empty()) {
+            lv_label_set_text(s_ui.hint, I18n::T("在 SD 卡\n/badge 或 /bagclip\n放入图片"));
+        } else {
+            lv_label_set_text(s_ui.hint, I18n::T("图片读取失败\n已跳过无法显示的文件"));
+        }
+        lv_obj_remove_flag(s_ui.hint, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+lv_timer_t* s_retry_timer = nullptr;
+
+void OnRetryTimer(lv_timer_t* t) {
+    if (s_retry_timer == t) {
+        s_retry_timer = nullptr;
+    }
+    if (!s_alive.load(std::memory_order_relaxed) ||
+        !s_active.load(std::memory_order_relaxed) || s_images.empty()) {
+        return;
+    }
+    s_fail_streak = 0;
+    ESP_LOGI(TAG, "retry slideshow from idx=%d", s_current_index);
+    StartDecode(s_current_index);
+    StartSlideTimer();
+}
+
+void ArmRetryTimer() {
+    if (s_retry_timer) {
+        lv_timer_delete(s_retry_timer);
+        s_retry_timer = nullptr;
+    }
+    s_retry_timer = lv_timer_create(OnRetryTimer, kRetryAfterFailMs, nullptr);
+    lv_timer_set_repeat_count(s_retry_timer, 1);
+}
+
+void CancelRetryTimer() {
+    if (s_retry_timer) {
+        lv_timer_delete(s_retry_timer);
+        s_retry_timer = nullptr;
+    }
+}
+
+// 读/解码失败：不删列表，只切到下一张继续轮播。
+void OnDecodeFailed(void* arg) {
     const int index = static_cast<int>(reinterpret_cast<intptr_t>(arg));
+    s_decode_busy.store(false, std::memory_order_release);
+    if (!s_alive.load(std::memory_order_relaxed) ||
+        !s_active.load(std::memory_order_relaxed) || s_images.empty()) {
+        return;
+    }
+    s_fail_streak++;
+    const int n = static_cast<int>(s_images.size());
+    if (s_fail_streak >= n) {
+        ESP_LOGW(TAG, "all %d images failed this round", n);
+        OnRoundAllFailed();
+        return;
+    }
+    s_current_index = (index + 1) % n;
+    ESP_LOGI(TAG, "try next after skip -> idx=%d/%d", s_current_index, n);
+    StartDecode(s_current_index);
+}
+
+void RequestSkipImage(int index, const char* reason, const char* path) {
+    ESP_LOGW(TAG, "%s, skip (keep switching): %s", reason, path ? path : "?");
+    if (s_alive.load(std::memory_order_relaxed)) {
+        lv_async_call(OnDecodeFailed,
+                      reinterpret_cast<void*>(static_cast<intptr_t>(index)));
+    } else {
+        s_decode_busy.store(false, std::memory_order_release);
+    }
+}
+
+void DecodeOne(int index) {
     if (index < 0 || index >= static_cast<int>(s_images.size())) {
         s_decode_busy.store(false, std::memory_order_release);
-        vTaskDelete(nullptr);
         return;
     }
     const ImageEntry& entry = s_images[static_cast<size_t>(index)];
+    const std::string path = entry.path;
+    const bool jpeg = entry.jpeg;
+    ESP_LOGI(TAG, "decode idx=%d/%d %s", index, static_cast<int>(s_images.size()),
+             path.c_str());
     uint8_t* fdata = nullptr;
     size_t flen = 0;
-    if (!LoadFile(entry.path, &fdata, &flen)) {
-        ESP_LOGW(TAG, "load failed: %s", entry.path.c_str());
-        s_decode_busy.store(false, std::memory_order_release);
-        vTaskDelete(nullptr);
+    if (!LoadFile(path, &fdata, &flen)) {
+        RequestSkipImage(index, "load failed", path.c_str());
         return;
     }
     uint8_t* raw = nullptr;
     int rw = 0, rh = 0, rs = 0;
-    const bool ok = entry.jpeg ? DecodeJpeg(fdata, flen, &raw, &rw, &rh, &rs)
-                               : DecodePng(fdata, flen, &raw, &rw, &rh, &rs);
+    const bool ok = jpeg ? DecodeJpeg(fdata, flen, &raw, &rw, &rh, &rs)
+                         : DecodePng(fdata, flen, &raw, &rw, &rh, &rs);
     heap_caps_free(fdata);
     if (!ok || !raw) {
-        ESP_LOGW(TAG, "decode failed: %s", entry.path.c_str());
         if (raw) {
             heap_caps_free(raw);
         }
-        s_decode_busy.store(false, std::memory_order_release);
-        vTaskDelete(nullptr);
+        RequestSkipImage(index, "decode failed", path.c_str());
         return;
     }
     uint8_t* cover = CoverScale(raw, rw, rh, rs, kScreenSize);
     heap_caps_free(raw);
     if (!cover) {
-        s_decode_busy.store(false, std::memory_order_release);
-        vTaskDelete(nullptr);
+        RequestSkipImage(index, "cover scale OOM", path.c_str());
         return;
     }
     auto* pf = new PendingFrame{cover, kScreenSize, kScreenSize};
@@ -424,23 +533,87 @@ void DecodeTask(void* arg) {
             heap_caps_free(stale->buf);
             delete stale;
         }
+        s_decode_busy.store(false, std::memory_order_release);
     }
-    s_decode_busy.store(false, std::memory_order_release);
+}
+
+void WorkerTask(void* /*arg*/) {
+    while (!s_worker_stop.load(std::memory_order_relaxed)) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (s_worker_stop.load(std::memory_order_relaxed)) {
+            break;
+        }
+        const int index = s_job_index.exchange(-1, std::memory_order_acq_rel);
+        if (index < 0) {
+            s_decode_busy.store(false, std::memory_order_release);
+            continue;
+        }
+        DecodeOne(index);
+    }
+    s_worker = nullptr;
     vTaskDelete(nullptr);
+}
+
+bool EnsureWorker() {
+    if (s_worker != nullptr) {
+        return true;
+    }
+    s_worker_stop.store(false, std::memory_order_release);
+    // 必须低于 LVGL（adapter task_priority=4），否则 JPEG/PNG 解码会饿死触摸，
+    // 表现为待机无法滑切换、长按也回不了主页。
+    static constexpr UBaseType_t kWorkerPrio = 2;
+    static constexpr uint32_t kStackBytes[] = {8 * 1024, 6 * 1024};
+    for (uint32_t bytes : kStackBytes) {
+        if (xTaskCreateWithCaps(WorkerTask, "stby_gal", bytes, nullptr, kWorkerPrio,
+                                &s_worker, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) ==
+            pdPASS) {
+            return true;
+        }
+        s_worker = nullptr;
+    }
+    ESP_LOGW(TAG, "worker create failed heap=%u internal=%u largest_int=%u",
+             static_cast<unsigned>(esp_get_free_heap_size()),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(
+                 heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+    return false;
+}
+
+void StopWorker() {
+    if (s_worker == nullptr) {
+        return;
+    }
+    s_worker_stop.store(true, std::memory_order_release);
+    xTaskNotifyGive(s_worker);
+    // worker 自删；给一点时间退出当前 decode
+    for (int i = 0; i < 50 && s_worker != nullptr; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    s_worker = nullptr;
 }
 
 void StartDecode(int index) {
     if (s_images.empty()) {
         return;
     }
+    if (index < 0 || index >= static_cast<int>(s_images.size())) {
+        index = 0;
+    }
     if (s_decode_busy.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
-    xTaskCreate(DecodeTask, "stby_gal", 1024 * 8, reinterpret_cast<void*>(index), 5,
-                nullptr);
+    if (!EnsureWorker()) {
+        lv_async_call(OnDecodeFailed,
+                      reinterpret_cast<void*>(static_cast<intptr_t>(index)));
+        return;
+    }
+    s_job_index.store(index, std::memory_order_release);
+    xTaskNotifyGive(s_worker);
 }
 #else
 void StartDecode(int /*index*/) {}
+void CancelRetryTimer() {}
+void StopWorker() {}
 #endif
 
 void OnSlideTimer(lv_timer_t* /*t*/) {
@@ -448,7 +621,13 @@ void OnSlideTimer(lv_timer_t* /*t*/) {
         !s_active.load(std::memory_order_relaxed) || s_images.empty()) {
         return;
     }
+    // 上一张还在解时跳过本拍，避免叠任务打爆内部 DMA。
+    if (s_decode_busy.load(std::memory_order_relaxed)) {
+        return;
+    }
     s_current_index = (s_current_index + 1) % static_cast<int>(s_images.size());
+    ESP_LOGI(TAG, "slide -> idx=%d/%d", s_current_index,
+             static_cast<int>(s_images.size()));
     StartDecode(s_current_index);
 }
 
@@ -480,6 +659,7 @@ lv_obj_t* StandbyGallery_Create(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(root, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(root, LV_OBJ_FLAG_CLICKABLE);
+    screen_make_input_passive(root);
     s_ui.root = root;
 
     lv_obj_t* img = lv_image_create(root);
@@ -490,7 +670,7 @@ lv_obj_t* StandbyGallery_Create(lv_obj_t* parent) {
     s_ui.img = img;
 
     lv_obj_t* hint = lv_label_create(root);
-    lv_label_set_text(hint, I18n::T("在 SD 卡\n/bagclip 或 /badge\n放入图片"));
+    lv_label_set_text(hint, I18n::T("在 SD 卡\n/badge 或 /bagclip\n放入图片"));
     lv_obj_set_style_text_color(hint, lv_color_hex(0xAAAAAA), LV_PART_MAIN);
     lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
@@ -500,17 +680,22 @@ lv_obj_t* StandbyGallery_Create(lv_obj_t* parent) {
 
     s_images.clear();
     s_current_index = 0;
-    ScanDir(kBagclipDir, 0, &s_images);
+    s_fail_streak = 0;
+    ScanDir(kBadgeDir, 0, &s_images);
     if (s_images.empty()) {
-        ScanDir(kBadgeDir, 0, &s_images);
+        ScanDir(kBagclipDir, 0, &s_images);
     }
-    ESP_LOGI(TAG, "gallery images=%d", static_cast<int>(s_images.size()));
+    ESP_LOGI(TAG, "gallery images=%d (prefer badge)", static_cast<int>(s_images.size()));
     if (!s_images.empty()) {
         lv_obj_add_flag(hint, LV_OBJ_FLAG_HIDDEN);
     }
 
     s_alive.store(true, std::memory_order_release);
     s_active.store(false, std::memory_order_release);
+#if defined(ESP_PLATFORM)
+    // 尽早建常驻 worker，避免运行中内部 DRAM 碎裂后建不了任务。
+    EnsureWorker();
+#endif
     lv_obj_add_flag(root, LV_OBJ_FLAG_HIDDEN);
     return root;
 }
@@ -519,18 +704,42 @@ void StandbyGallery_SetActive(bool active) {
     if (s_ui.root == nullptr) {
         return;
     }
+    const bool was_active = s_active.load(std::memory_order_relaxed);
+    // 待机页每秒 ApplyFaceVisibility 会再次进来；已激活时不要重解当前张。
+    if (was_active == active) {
+        if (active) {
+            lv_obj_remove_flag(s_ui.root, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_ui.root, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
     s_active.store(active, std::memory_order_release);
     if (active) {
         lv_obj_remove_flag(s_ui.root, LV_OBJ_FLAG_HIDDEN);
+        s_fail_streak = 0;
+#if defined(ESP_PLATFORM)
+        CancelRetryTimer();
+#endif
+        ESP_LOGI(TAG, "gallery face on, images=%d idx=%d",
+                 static_cast<int>(s_images.size()), s_current_index);
         if (!s_images.empty()) {
-            StartDecode(s_current_index);
+            // 已有画面时先保留，继续轮播；没有才开始解第一张。
+            if (s_show_buf == nullptr) {
+                StartDecode(s_current_index);
+            }
             StartSlideTimer();
         } else if (s_ui.hint) {
+            lv_label_set_text(s_ui.hint, I18n::T("在 SD 卡\n/badge 或 /bagclip\n放入图片"));
             lv_obj_remove_flag(s_ui.hint, LV_OBJ_FLAG_HIDDEN);
         }
     } else {
         lv_obj_add_flag(s_ui.root, LV_OBJ_FLAG_HIDDEN);
         StopSlideTimer();
+#if defined(ESP_PLATFORM)
+        CancelRetryTimer();
+#endif
+        ESP_LOGI(TAG, "gallery face off");
     }
 }
 
@@ -538,6 +747,10 @@ void StandbyGallery_Destroy() {
     s_alive.store(false, std::memory_order_release);
     s_active.store(false, std::memory_order_release);
     StopSlideTimer();
+#if defined(ESP_PLATFORM)
+    CancelRetryTimer();
+    StopWorker();
+#endif
 
     PendingFrame* pf = s_pending.exchange(nullptr, std::memory_order_acq_rel);
     if (pf) {
@@ -554,4 +767,6 @@ void StandbyGallery_Destroy() {
     s_ui = {};
     s_images.clear();
     s_current_index = 0;
+    s_fail_streak = 0;
+    s_decode_busy.store(false, std::memory_order_release);
 }
