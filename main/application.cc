@@ -692,8 +692,16 @@ bool Application::InitializeProtocol(Ota& ota) {
                     });
                 }
 #ifdef HAVE_LVGL
-                // 口型 Arm 必须同步：走 Schedule 会晚几百毫秒，嘴一直闭嘴。
-                DigitalPeopleScreen::ArmUtterance(sentence_index);
+                // 「演唱中」只是状态字，不是一句 TTS。Arm 会清掉口型轴并干等 DAC；
+                // 跳过状态句，歌词 viseme 自行 LoadVisemeTimeline。
+                const bool is_status =
+                    cJSON_IsString(text) && text->valuestring != nullptr &&
+                    (strcmp(text->valuestring, "演唱中") == 0 ||
+                     strcmp(text->valuestring, "播放中") == 0);
+                if (!is_status) {
+                    // 口型 Arm 必须同步：走 Schedule 会晚几百毫秒。
+                    DigitalPeopleScreen::ArmUtterance(sentence_index);
+                }
 #endif
             }
         } else if (strcmp(type->valuestring, "listen") == 0) {

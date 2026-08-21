@@ -24,13 +24,12 @@ constexpr int32_t kMouthX = 100;
 constexpr int32_t kMouthY = 210;
 constexpr uint32_t kTickMs = 40;
 constexpr uint32_t kVisemeSampleRate = 24000;
+constexpr int kVisemeSIL = 0;
 constexpr int kTransitionTicks = 1;  // ~40ms，接近现网 32ms
-// 补偿 I2S DMA/功放延迟：嘴型相对已写入采样略提前，避免“开口偏晚”。
-constexpr uint32_t kLipLeadMs = 80;
 constexpr size_t kPathMax = 40;
 constexpr size_t kMaxVisemes = 256;
-// 句首 SIL 也可能几乎无声，不能用峰值门槛挡住锚点。
-constexpr uint32_t kPcmAnchorPeakMin = 0;
+// 轴为 SIL 但 DAC 仍有声时走能量嘴。
+constexpr uint32_t kSpeechPeakFloor = 400;
 constexpr size_t kStateNameMax = 16;
 constexpr size_t kOverlayNameMax = 24;
 
@@ -173,17 +172,11 @@ int s_blink_step = -1;  // -1 = 不在眨眼
 char s_mouth_applied[kPathMax] = "";
 
 std::mutex s_lip_mu;
-int s_armed_index = 0;
-bool s_need_anchor = false;
-bool s_anchored = false;
+// 口型：单句 index + DAC 首包锚点。
+int s_utterance_index = -1;
+bool s_anchor_set = false;
 uint64_t s_anchor_samples = 0;
-bool s_utterance_anchor_valid = false;
-uint64_t s_utterance_anchor_samples = 0;
-bool s_await_pcm_anchor = false;
-bool s_utterance_armed = false;
-uint64_t s_speaking_started_played = 0;
-bool s_pending_pcm_valid = false;
-uint64_t s_pending_pcm_start = 0;
+bool s_pending_dac_anchor = false;  // Arm 后等首包 DAC
 AvatarCompositor::VisemeEvent s_events[kMaxVisemes];
 size_t s_event_count = 0;
 int s_current_viseme = -1;
@@ -192,25 +185,15 @@ uint32_t s_last_logged_now_ms = 0;
 int s_trans_left = 0;
 const char* s_trans_stem = nullptr;
 int s_energy_level = 0;
+bool s_fallback_active = false;
+float s_env_smooth = 0.0f;
+float s_env_peak = 0.0f;
+uint32_t s_fallback_hold_ms = 0;
 
 // audio_output 栈很小：NotifyPcmOutput 只能写原子量，禁止 mutex/日志。
 std::atomic<bool> s_pcm_want_first{false};
 std::atomic<bool> s_pcm_first_ready{false};
 std::atomic<uint64_t> s_pcm_first_start{0};
-std::atomic<uint32_t> s_pcm_first_peak{0};
-
-uint64_t CurrentPlayedSamples() {
-    AudioCodec* codec = Board::GetInstance().GetAudioCodec();
-    return codec != nullptr ? codec->GetPlayedSamples() : 0;
-}
-
-int CurrentOutputSampleRate() {
-    AudioCodec* codec = Board::GetInstance().GetAudioCodec();
-    if (codec != nullptr && codec->output_sample_rate() > 0) {
-        return codec->output_sample_rate();
-    }
-    return static_cast<int>(kVisemeSampleRate);
-}
 
 uint32_t PlayedToMs(uint64_t played, uint64_t anchor, int sample_rate) {
     if (sample_rate <= 0) {
@@ -219,63 +202,6 @@ uint32_t PlayedToMs(uint64_t played, uint64_t anchor, int sample_rate) {
     const uint64_t delta = played > anchor ? played - anchor : 0;
     return static_cast<uint32_t>((delta * 1000ULL) /
                                  static_cast<uint64_t>(sample_rate));
-}
-
-void ApplyUtteranceAnchorLocked() {
-    if (!s_utterance_anchor_valid || s_event_count == 0) {
-        return;
-    }
-    s_anchor_samples = s_utterance_anchor_samples;
-    s_anchored = true;
-    s_need_anchor = false;
-    s_await_pcm_anchor = false;
-    const uint64_t played = CurrentPlayedSamples();
-    const int sr = CurrentOutputSampleRate();
-    const uint32_t now_ms = PlayedToMs(played, s_anchor_samples, sr);
-    ESP_LOGI(TAG,
-             "lip anchor pcm=%llu played=%llu now_ms=%u events=%u",
-             static_cast<unsigned long long>(s_utterance_anchor_samples),
-             static_cast<unsigned long long>(played), now_ms,
-             static_cast<unsigned>(s_event_count));
-}
-
-bool TryAnchorOnPcmLocked(uint64_t pcm_start_played, uint32_t peak) {
-    // 说话期间先记下首包 PCM，Arm/Load 若晚到可直接用。
-    if (s_speaking && !s_pending_pcm_valid) {
-        s_pending_pcm_start = pcm_start_played;
-        s_pending_pcm_valid = true;
-        ESP_LOGI(TAG, "lip pcm first speak_pcm=%llu peak=%u",
-                 static_cast<unsigned long long>(pcm_start_played), peak);
-    }
-
-    if (!s_await_pcm_anchor || !s_utterance_armed) {
-        return false;
-    }
-    if (peak < kPcmAnchorPeakMin) {
-        return false;
-    }
-    s_utterance_anchor_samples = pcm_start_played;
-    s_utterance_anchor_valid = true;
-    s_await_pcm_anchor = false;
-    s_anchored = false;
-    if (s_event_count > 0) {
-        ApplyUtteranceAnchorLocked();
-    } else {
-        ESP_LOGI(TAG, "lip pcm pending viseme pcm=%llu peak=%u",
-                 static_cast<unsigned long long>(pcm_start_played), peak);
-    }
-    return true;
-}
-
-// 在 LVGL tick 里消费 audio_output 丢过来的原子通知。
-void DrainPcmNotifyLocked() {
-    if (!s_pcm_first_ready.load(std::memory_order_acquire)) {
-        return;
-    }
-    const uint64_t pcm_start =
-        s_pcm_first_start.load(std::memory_order_relaxed);
-    const uint32_t peak = s_pcm_first_peak.load(std::memory_order_relaxed);
-    TryAnchorOnPcmLocked(pcm_start, peak);
 }
 
 void ArmPcmCaptureWindow() {
@@ -288,37 +214,101 @@ void ClearPcmCaptureWindow() {
     s_pcm_first_ready.store(false, std::memory_order_relaxed);
 }
 
-// Arm/Load 晚于音频时：用已记下的首包，或当前播放位置追赶。
-void TryCatchUpAnchorLocked() {
-    if (s_anchored || !s_await_pcm_anchor || !s_utterance_armed) {
+// Arm 后的首包写入前采样数作为 time_ms=0。
+void MarkAnchorIfArmedLocked(uint64_t played_before) {
+    if (!s_pending_dac_anchor) {
         return;
     }
-    if (s_pending_pcm_valid) {
-        s_utterance_anchor_samples = s_pending_pcm_start;
-        s_utterance_anchor_valid = true;
-        s_await_pcm_anchor = false;
-        if (s_event_count > 0) {
-            ApplyUtteranceAnchorLocked();
-        }
-        return;
-    }
-    if (!s_speaking) {
-        return;
-    }
-    const uint64_t played = CurrentPlayedSamples();
-    if (played <= s_speaking_started_played) {
-        return;
-    }
-    // 没有首包记录时，把“现在”当作 t=0，至少嘴能动起来。
-    s_utterance_anchor_samples = played;
-    s_utterance_anchor_valid = true;
-    s_await_pcm_anchor = false;
-    if (s_event_count > 0) {
-        ApplyUtteranceAnchorLocked();
-        ESP_LOGW(TAG, "lip anchor catch-up played=%llu (arm late)",
-                 static_cast<unsigned long long>(played));
-    }
+    s_pending_dac_anchor = false;
+    s_anchor_samples = played_before;
+    s_anchor_set = true;
+    ESP_LOGI(TAG, "lip MarkAnchorIfArmed samples=%llu",
+             static_cast<unsigned long long>(played_before));
 }
+
+void DrainPcmNotifyLocked() {
+    if (!s_pcm_first_ready.exchange(false, std::memory_order_acq_rel)) {
+        return;
+    }
+    const uint64_t pcm_start =
+        s_pcm_first_start.load(std::memory_order_relaxed);
+    MarkAnchorIfArmedLocked(pcm_start);
+}
+
+// 最后一个 time_ms <= now_ms 的事件（不按 duration 截断）。
+int LookupVisemeIdLocked(uint32_t now_ms) {
+    if (s_event_count == 0) {
+        return kVisemeSIL;
+    }
+    int result_id = s_events[0].id;
+    for (size_t i = 0; i < s_event_count; ++i) {
+        if (s_events[i].time_ms > now_ms) {
+            break;
+        }
+        result_id = s_events[i].id;
+    }
+    return result_id;
+}
+
+void ResetFallbackEnvelope() {
+    s_env_smooth = 0.0f;
+    s_env_peak = 0.0f;
+    s_energy_level = 0;
+    s_fallback_hold_ms = 0;
+    s_fallback_active = false;
+}
+
+// 能量假嘴：平滑包络分档，避免抖动。
+int NextFallbackLevel(uint32_t peak) {
+    const float x = static_cast<float>(peak);
+    constexpr float kAttack = 0.55f;
+    constexpr float kRelease = 0.30f;
+    s_env_smooth +=
+        (x > s_env_smooth ? kAttack : kRelease) * (x - s_env_smooth);
+
+    constexpr float kMinPeak = 900.0f;
+    s_env_peak = x > s_env_peak ? x : s_env_peak * 0.988f;
+    if (s_env_peak < kMinPeak) {
+        s_env_peak = kMinPeak;
+    }
+
+    int want_level = 0;
+    constexpr float kSilenceAbs = 400.0f;  // peak 静音门限
+    if (s_env_smooth >= kSilenceAbs) {
+        const float ratio = s_env_smooth / s_env_peak;
+        if (ratio < 0.32f) {
+            want_level = 1;
+        } else if (ratio < 0.62f) {
+            want_level = 2;
+        } else {
+            want_level = 3;
+        }
+        const int cur = s_energy_level;
+        if (cur == 1 && ratio < 0.40f) {
+            want_level = 1;
+        } else if (cur == 2 && ratio >= 0.24f && ratio < 0.72f) {
+            want_level = 2;
+        } else if (cur == 3 && ratio >= 0.52f) {
+            want_level = 3;
+        }
+    }
+
+    s_fallback_hold_ms += kTickMs;
+    if (want_level == s_energy_level) {
+        return s_energy_level;
+    }
+    const int gap = want_level > s_energy_level ? want_level - s_energy_level
+                                                : s_energy_level - want_level;
+    const uint32_t need_ms = (gap >= 2) ? kTickMs : 80;
+    if (s_fallback_hold_ms < need_ms) {
+        return s_energy_level;
+    }
+    s_energy_level += (want_level > s_energy_level) ? 1 : -1;
+    s_fallback_hold_ms = 0;
+    return s_energy_level;
+}
+
+void ApplyMouthStem(const char* stem);
 
 void FillAssetPath(char* buf, size_t n, const char* stem) {
     std::snprintf(buf, n, "A:%s.spng", stem);
@@ -424,19 +414,6 @@ void ApplyOverlay() {
     lv_obj_remove_flag(s_ui.overlay, LV_OBJ_FLAG_HIDDEN);
 }
 
-int EnergyLevelFromPeak(uint32_t peak) {
-    if (peak < 800) {
-        return 0;
-    }
-    if (peak < 3000) {
-        return 1;
-    }
-    if (peak < 8000) {
-        return 2;
-    }
-    return 3;
-}
-
 void ScheduleNextBlink() {
     s_blink_next = static_cast<int>(50 + (esp_random() % 31));
     s_blink_idle = 0;
@@ -463,30 +440,38 @@ void TickBlink() {
     }
 }
 
+void ApplyFallbackMouth(uint32_t peak) {
+    if (!s_fallback_active) {
+        ResetFallbackEnvelope();
+        s_fallback_active = true;
+    }
+    const int level = NextFallbackLevel(peak);
+    s_current_viseme = -1;
+    s_trans_left = 0;
+    s_trans_stem = nullptr;
+    ApplyMouthStem(kEnergyStems[level]);
+}
+
 int TickVisemeId(uint64_t played, int sample_rate) {
     std::lock_guard<std::mutex> lock(s_lip_mu);
-    if (s_event_count == 0 || !s_anchored) {
-        return -1;
+    DrainPcmNotifyLocked();
+    if (s_event_count == 0) {
+        return -1;  // 无轴 → 能量嘴
     }
     if (sample_rate <= 0) {
         sample_rate = static_cast<int>(kVisemeSampleRate);
     }
-    const uint32_t now_ms =
-        PlayedToMs(played, s_anchor_samples, sample_rate) + kLipLeadMs;
-    int id = 0;
-    for (size_t i = 0; i < s_event_count; ++i) {
-        const auto& e = s_events[i];
-        const uint32_t end = static_cast<uint32_t>(e.time_ms) + e.duration_ms;
-        if (now_ms >= e.time_ms && now_ms < end) {
-            id = e.id;
-            break;
-        }
-        if (now_ms >= e.time_ms) {
-            id = e.id;
-        }
+    // 有轴但未锚：按当前播放位置自动锚（唱歌跳过 Arm 时必需）
+    if (!s_anchor_set) {
+        s_pending_dac_anchor = false;
+        s_anchor_samples = played;
+        s_anchor_set = true;
+        ESP_LOGI(TAG, "lip Auto MarkAnchor samples=%llu",
+                 static_cast<unsigned long long>(played));
     }
-    if (id != s_last_logged_viseme ||
-        (now_ms > s_last_logged_now_ms + 200)) {
+    const uint32_t now_ms = PlayedToMs(played, s_anchor_samples, sample_rate);
+    const int id = LookupVisemeIdLocked(now_ms);
+    if (id != s_last_logged_viseme || now_ms > s_last_logged_now_ms + 200) {
         s_last_logged_viseme = id;
         s_last_logged_now_ms = now_ms;
         ESP_LOGI(TAG, "lip tick now_ms=%u id=%d played=%llu anchor=%llu",
@@ -496,34 +481,39 @@ int TickVisemeId(uint64_t played, int sample_rate) {
     return id;
 }
 
+void ApplyVisemeMouth(int viseme_id) {
+    s_fallback_active = false;
+    if (s_trans_left > 0 && s_trans_stem != nullptr) {
+        ApplyMouthStem(s_trans_stem);
+        s_trans_left--;
+        return;
+    }
+    if (s_current_viseme >= 0 && s_current_viseme != viseme_id) {
+        const char* trans = TransitionStem(s_current_viseme, viseme_id);
+        if (trans != nullptr) {
+            s_trans_stem = trans;
+            s_trans_left = kTransitionTicks;
+            s_current_viseme = viseme_id;
+            ApplyMouthStem(trans);
+            return;
+        }
+    }
+    s_current_viseme = viseme_id;
+    s_energy_level = 0;
+    ApplyMouthStem(VisemeStem(viseme_id));
+}
+
 void TickMouth() {
     AudioCodec* codec = Board::GetInstance().GetAudioCodec();
     const uint64_t played = codec != nullptr ? codec->GetPlayedSamples() : 0;
+    const uint32_t peak = codec != nullptr ? codec->GetLastOutputPeak() : 0;
     const int sample_rate =
         codec != nullptr && codec->output_sample_rate() > 0
             ? codec->output_sample_rate()
             : static_cast<int>(kVisemeSampleRate);
 
-    {
-        std::lock_guard<std::mutex> lock(s_lip_mu);
-        DrainPcmNotifyLocked();
-        if (!s_anchored) {
-            TryCatchUpAnchorLocked();
-        }
-    }
-
     if (!s_speaking) {
-        s_energy_level = 0;
-        s_current_viseme = -1;
-        s_trans_left = 0;
-        s_trans_stem = nullptr;
-        ApplyIdleMouth();
-        return;
-    }
-
-    // 已 arm 但首包 PCM 未到：保持情绪嘴，不提前张嘴。
-    if (!s_anchored || s_event_count == 0) {
-        s_energy_level = 0;
+        ResetFallbackEnvelope();
         s_current_viseme = -1;
         s_trans_left = 0;
         s_trans_stem = nullptr;
@@ -532,31 +522,17 @@ void TickMouth() {
     }
 
     const int viseme_id = TickVisemeId(played, sample_rate);
+    // 无轴（唱歌/轴未到）：能量嘴
     if (viseme_id < 0) {
-        ApplyIdleMouth();
+        ApplyFallbackMouth(peak);
         return;
     }
-    if (viseme_id >= 0) {
-        if (s_trans_left > 0 && s_trans_stem != nullptr) {
-            ApplyMouthStem(s_trans_stem);
-            s_trans_left--;
-            return;
-        }
-        if (s_current_viseme >= 0 && s_current_viseme != viseme_id) {
-            const char* trans = TransitionStem(s_current_viseme, viseme_id);
-            if (trans != nullptr) {
-                s_trans_stem = trans;
-                s_trans_left = kTransitionTicks;
-                s_current_viseme = viseme_id;
-                ApplyMouthStem(trans);
-                return;
-            }
-        }
-        s_current_viseme = viseme_id;
-        s_energy_level = 0;
-        ApplyMouthStem(VisemeStem(viseme_id));
+    // 轴为 SIL 但 DAC 仍有声：能量嘴（轴结束或句间锚偏）
+    if (viseme_id == kVisemeSIL && peak >= kSpeechPeakFloor) {
+        ApplyFallbackMouth(peak);
         return;
     }
+    ApplyVisemeMouth(viseme_id);
 }
 
 void OnTick(lv_timer_t* /*t*/) {
@@ -651,14 +627,9 @@ void AvatarCompositor::SetSpeaking(bool speaking) {
     }
     ESP_LOGI(TAG, "speaking %d -> %d (events=%u anchored=%d)",
              s_speaking ? 1 : 0, speaking ? 1 : 0,
-             static_cast<unsigned>(s_event_count), s_anchored ? 1 : 0);
+             static_cast<unsigned>(s_event_count), s_anchor_set ? 1 : 0);
     s_speaking = speaking;
-    if (speaking) {
-        s_speaking_started_played = CurrentPlayedSamples();
-        s_pending_pcm_valid = false;
-        s_pending_pcm_start = 0;
-        ArmPcmCaptureWindow();
-    } else {
+    if (!speaking) {
         ResetLipSync();
         if (IsCreated()) {
             ApplyIdleMouth();
@@ -671,107 +642,94 @@ void AvatarCompositor::SetSpeaking(bool speaking) {
 
 void AvatarCompositor::ArmUtterance(int index) {
     std::lock_guard<std::mutex> lock(s_lip_mu);
-    const bool same_index_reload =
-        s_event_count > 0 && index == s_armed_index && s_anchored;
-    if (same_index_reload) {
-        return;
-    }
-    const bool index_changed = (index != s_armed_index);
-    const bool keep_events = s_event_count > 0 && index == s_armed_index;
-    // 换句才清 pending；首句保留 speaking 期间已记下的首包。
-    if (index_changed && s_utterance_armed) {
-        s_pending_pcm_valid = false;
-        s_pending_pcm_start = 0;
-        ArmPcmCaptureWindow();
-    }
-    s_armed_index = index;
-    s_utterance_armed = true;
-    s_await_pcm_anchor = true;
-    s_utterance_anchor_valid = false;
-    s_anchored = false;
-    s_need_anchor = true;
-    if (!keep_events) {
+    // 换句清轴，等本句首包 DAC；同句只重武装锚点。
+    if (index != s_utterance_index) {
         s_event_count = 0;
+        s_utterance_index = index;
         s_current_viseme = -1;
         s_last_logged_viseme = -1;
         s_last_logged_now_ms = 0;
         s_trans_left = 0;
         s_trans_stem = nullptr;
     }
-    ESP_LOGI(TAG, "arm utterance index=%d keep_events=%d pending_pcm=%d",
-             index, keep_events ? 1 : 0, s_pending_pcm_valid ? 1 : 0);
-    TryCatchUpAnchorLocked();
+    s_pending_dac_anchor = true;
+    s_anchor_set = false;
+    s_anchor_samples = 0;
+    ArmPcmCaptureWindow();
+    ESP_LOGI(TAG, "arm utterance index=%d (wait DAC)", index);
 }
 
-void AvatarCompositor::NotifyPcmOutput(uint64_t pcm_start_played, uint32_t peak) {
+void AvatarCompositor::NotifyPcmOutput(uint64_t pcm_start_played, uint32_t /*peak*/) {
     // 仅原子写入；禁止在 audio_output 任务里拿锁/打日志（栈只有 2~4KB）。
     if (!s_pcm_want_first.exchange(false, std::memory_order_acq_rel)) {
         return;
     }
     s_pcm_first_start.store(pcm_start_played, std::memory_order_relaxed);
-    s_pcm_first_peak.store(peak, std::memory_order_relaxed);
     s_pcm_first_ready.store(true, std::memory_order_release);
 }
 
 void AvatarCompositor::LoadVisemeTimeline(int index, const VisemeEvent* events,
                                           size_t count) {
     std::lock_guard<std::mutex> lock(s_lip_mu);
-    if (index < s_armed_index && s_armed_index != 0) {
-        ESP_LOGW(TAG, "drop stale viseme index=%d armed=%d", index, s_armed_index);
-        return;
-    }
     if (events == nullptr || count == 0) {
         s_event_count = 0;
         return;
     }
-    if (index == s_armed_index && count <= s_event_count && s_event_count > 0 &&
-        s_anchored) {
-        ESP_LOGI(TAG, "skip duplicate viseme index=%d events=%u (have %u)",
-                 index, static_cast<unsigned>(count),
-                 static_cast<unsigned>(s_event_count));
+    if (s_utterance_index >= 0 && index < s_utterance_index && index != -1) {
+        ESP_LOGW(TAG, "drop stale viseme index=%d (current=%d)", index,
+                 s_utterance_index);
         return;
     }
-    const size_t incoming = count;
-    if (count > kMaxVisemes) {
+
+    size_t n = count;
+    if (n > kMaxVisemes - 1) {
         ESP_LOGW(TAG, "viseme trunc %u -> %u", static_cast<unsigned>(count),
-                 static_cast<unsigned>(kMaxVisemes));
-        count = kMaxVisemes;
+                 static_cast<unsigned>(kMaxVisemes - 1));
+        n = kMaxVisemes - 1;
     }
-    std::memcpy(s_events, events, count * sizeof(VisemeEvent));
-    s_event_count = count;
-    s_armed_index = index;
-    s_utterance_armed = true;
-    s_current_viseme = -1;
-    s_last_logged_viseme = -1;
-    s_last_logged_now_ms = 0;
-    s_trans_left = 0;
-    s_trans_stem = nullptr;
-    if (!s_anchored) {
-        s_await_pcm_anchor = true;
-        s_need_anchor = true;
+    std::memcpy(s_events, events, n * sizeof(VisemeEvent));
+    // 保证末尾 SIL 收嘴
+    if (n == 0 || s_events[n - 1].id != kVisemeSIL) {
+        const uint16_t last_t =
+            n == 0 ? 0
+                   : static_cast<uint16_t>(s_events[n - 1].time_ms +
+                                           s_events[n - 1].duration_ms);
+        s_events[n] = VisemeEvent{last_t, 120, static_cast<uint8_t>(kVisemeSIL)};
+        n++;
     }
-    if (s_utterance_anchor_valid) {
-        ApplyUtteranceAnchorLocked();
-    } else {
-        TryCatchUpAnchorLocked();
+
+    const bool same_utterance =
+        index == s_utterance_index && s_utterance_index != -1;
+    const bool keep_dac_anchor =
+        same_utterance && s_anchor_set && !s_pending_dac_anchor;
+
+    s_utterance_index = index;
+    s_event_count = n;
+    if (!same_utterance) {
+        s_anchor_samples = 0;
+        s_anchor_set = false;
+        s_pending_dac_anchor = false;
+        s_current_viseme = -1;
+        s_last_logged_viseme = -1;
+        s_last_logged_now_ms = 0;
+        s_trans_left = 0;
+        s_trans_stem = nullptr;
+    } else if (!keep_dac_anchor && !s_pending_dac_anchor) {
+        s_anchor_samples = 0;
+        s_anchor_set = false;
     }
-    ESP_LOGI(TAG, "viseme timeline index=%d events=%u/%u anchored=%d await=%d",
-             index, static_cast<unsigned>(count), static_cast<unsigned>(incoming),
-             s_anchored ? 1 : 0, s_await_pcm_anchor ? 1 : 0);
+
+    ESP_LOGI(TAG, "LoadTimeline index=%d events=%u replace=%d keep_dac=%d",
+             s_utterance_index, static_cast<unsigned>(s_event_count),
+             same_utterance ? 1 : 0, keep_dac_anchor ? 1 : 0);
 }
 
 void AvatarCompositor::ResetLipSync() {
     std::lock_guard<std::mutex> lock(s_lip_mu);
-    s_armed_index = 0;
-    s_need_anchor = false;
-    s_anchored = false;
+    s_utterance_index = -1;
+    s_anchor_set = false;
     s_anchor_samples = 0;
-    s_utterance_anchor_valid = false;
-    s_utterance_anchor_samples = 0;
-    s_await_pcm_anchor = false;
-    s_utterance_armed = false;
-    s_pending_pcm_valid = false;
-    s_pending_pcm_start = 0;
+    s_pending_dac_anchor = false;
     ClearPcmCaptureWindow();
     s_event_count = 0;
     s_current_viseme = -1;
@@ -779,5 +737,5 @@ void AvatarCompositor::ResetLipSync() {
     s_last_logged_now_ms = 0;
     s_trans_left = 0;
     s_trans_stem = nullptr;
-    s_energy_level = 0;
+    ResetFallbackEnvelope();
 }
