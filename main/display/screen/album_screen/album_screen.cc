@@ -70,19 +70,22 @@ constexpr uint32_t kColorCellPressed = 0x252A34;
 
 // 360 圆屏：可视区是内切圆，半径 180。下面每个 y 都按 sqrt(180²-dy²) 反推过可用
 // 宽度，改布局要一起复算，否则内容会被圆角切掉。
+// 返回键贴在 (36,28) 时左上角会落到圆外，只剩一角；沿圆弧内收到
+// (78,56)，四角距圆心约 160，留 ~20px 边距，整颗按钮（含圆底）都看得见。
 constexpr int32_t kPanel = DISPLAY_WIDTH;
-constexpr int32_t kBackBtnSize = 36;
-constexpr int32_t kBackBtnX = 36;
-constexpr int32_t kBackBtnY = 28;
-constexpr int32_t kTopLabelY = 24;
+constexpr int32_t kBackBtnSize = 40;
+constexpr int32_t kBackBtnX = 78;
+constexpr int32_t kBackBtnY = 56;
+constexpr int32_t kTopLabelY = 20;
 
 constexpr int32_t kThumb = 68;
 constexpr int32_t kGridCols = 3;
 constexpr int32_t kGridGap = 6;
 constexpr int32_t kGridPad = 4;
 constexpr int32_t kGridBoxW = kThumb * kGridCols + kGridGap * (kGridCols - 1) + kGridPad * 2;
-constexpr int32_t kGridTop = 56;
-constexpr int32_t kGridH = 258;
+// 网格顶边要避开返回键底（56+40=96），再留一点空隙。
+constexpr int32_t kGridTop = 104;
+constexpr int32_t kGridH = 210;
 constexpr int32_t kRowStride = kThumb + kGridGap;
 constexpr size_t kThumbBytes = static_cast<size_t>(kThumb) * kThumb * 2;
 
@@ -2232,13 +2235,18 @@ lv_obj_t* MakeBackButton(lv_obj_t* parent, lv_event_cb_t cb) {
     lv_obj_t* btn = lv_button_create(parent);
     lv_obj_remove_style_all(btn);
     lv_obj_set_size(btn, kBackBtnSize, kBackBtnSize);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, LV_PART_MAIN);
+    // 磨砂圆底 + 淡描边：深色网格页能看出触控靶，看图页浅色图上也压得住。
+    lv_obj_set_style_bg_color(btn, lv_color_hex(kColorCell), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_70, LV_PART_MAIN);
     lv_obj_set_style_bg_color(btn, lv_color_hex(0xFFFFFF), Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-    lv_obj_set_style_bg_opa(btn, LV_OPA_20, Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+    lv_obj_set_style_bg_opa(btn, LV_OPA_30, Sel(LV_PART_MAIN, LV_STATE_PRESSED));
     lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_border_opa(btn, LV_OPA_30, LV_PART_MAIN);
     lv_obj_align(btn, LV_ALIGN_TOP_LEFT, kBackBtnX, kBackBtnY);
-    lv_obj_set_ext_click_area(btn, 10);
+    lv_obj_set_ext_click_area(btn, 12);
     screen_swipe_back_ignore(btn, true);
 
     lv_obj_t* icon = lv_image_create(btn);
