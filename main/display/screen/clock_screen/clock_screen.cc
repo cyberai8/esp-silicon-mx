@@ -25,9 +25,16 @@ constexpr const char* TAG = "ClockScreen";
 #if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
 constexpr bool kRound = true;
 constexpr int kPanel = DISPLAY_WIDTH;
+// 圆屏内切圆安全区：返回键贴在 (28,28) 会被裁掉，内收到 (78,56)。
+constexpr int32_t kBackBtnSize = 40;
+constexpr int32_t kBackBtnX = 78;
+constexpr int32_t kBackBtnY = 56;
 #else
 constexpr bool kRound = false;
 constexpr int kPanel = 720;
+constexpr int32_t kBackBtnSize = 44;
+constexpr int32_t kBackBtnX = 16;
+constexpr int32_t kBackBtnY = 16;
 #endif
 
 constexpr uint32_t kBg = 0x081C1C;
@@ -74,6 +81,8 @@ lv_obj_t* s_page_sw = nullptr;
 lv_obj_t* s_page_cd = nullptr;
 lv_obj_t* s_tab_btns[3] = {};
 lv_obj_t* s_overlay = nullptr;
+lv_obj_t* s_overlay_back = nullptr;
+lv_obj_t* s_overlay_title = nullptr;
 
 // alarm list page
 lv_obj_t* s_alarm_list = nullptr;
@@ -670,28 +679,72 @@ void HideOverlay() {
     ClearOverlay();
 }
 
+lv_obj_t* MakeOverlayBackButton(lv_obj_t* parent) {
+    lv_obj_t* back = lv_button_create(parent);
+    lv_obj_remove_style_all(back);
+    lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
+    if (kRound) {
+        lv_obj_set_style_bg_color(back, lv_color_hex(kRowBg), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(back, LV_OPA_70, LV_PART_MAIN);
+        lv_obj_set_style_border_width(back, 1, LV_PART_MAIN);
+        lv_obj_set_style_border_color(back, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+        lv_obj_set_style_border_opa(back, LV_OPA_30, LV_PART_MAIN);
+    } else {
+        lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_width(back, 0, LV_PART_MAIN);
+    }
+    lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
+                              static_cast<lv_style_selector_t>(LV_PART_MAIN |
+                                                               LV_STATE_PRESSED));
+    lv_obj_set_style_bg_opa(back, LV_OPA_30,
+                            static_cast<lv_style_selector_t>(LV_PART_MAIN |
+                                                             LV_STATE_PRESSED));
+    lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
+    lv_obj_align(back, LV_ALIGN_TOP_LEFT, kBackBtnX, kBackBtnY);
+    lv_obj_set_ext_click_area(back, 12);
+    screen_swipe_back_ignore(back, true);
+
+    if (kRound) {
+        lv_obj_t* icon = lv_image_create(back);
+        lv_image_set_src(icon, "A:ic_app_back.spng");
+        lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(icon);
+    } else {
+        lv_obj_t* bl = lv_label_create(back);
+        lv_label_set_text(bl, "<");
+        lv_obj_set_style_text_font(bl, FontBig(), LV_PART_MAIN);
+        lv_obj_set_style_text_color(bl, lv_color_hex(kText), LV_PART_MAIN);
+        lv_obj_center(bl);
+    }
+
+    lv_obj_add_event_cb(back, [](lv_event_t*) { HideOverlay(); }, LV_EVENT_CLICKED,
+                      nullptr);
+    s_overlay_back = back;
+    return back;
+}
+
+void RaiseOverlayChrome() {
+    if (s_overlay_title != nullptr) {
+        lv_obj_move_foreground(s_overlay_title);
+    }
+    if (s_overlay_back != nullptr) {
+        lv_obj_move_foreground(s_overlay_back);
+    }
+}
+
 lv_obj_t* BeginOverlay(const char* title) {
     if (s_overlay == nullptr) return nullptr;
     ClearOverlay();
+    s_overlay_back = nullptr;
+    s_overlay_title = nullptr;
     lv_obj_remove_flag(s_overlay, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_overlay);
 
-    lv_obj_t* back = lv_btn_create(s_overlay);
-    lv_obj_set_size(back, 44, 44);
-    lv_obj_align(back, LV_ALIGN_TOP_LEFT, kRound ? 28 : 16, kRound ? 28 : 16);
-    lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(back, 0, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
-    lv_obj_t* bl = lv_label_create(back);
-    lv_label_set_text(bl, "<");
-    lv_obj_set_style_text_font(bl, FontBig(), LV_PART_MAIN);
-    lv_obj_set_style_text_color(bl, lv_color_hex(kText), LV_PART_MAIN);
-    lv_obj_center(bl);
-    lv_obj_add_event_cb(back, [](lv_event_t*) { HideOverlay(); }, LV_EVENT_CLICKED,
-                        nullptr);
+    MakeOverlayBackButton(s_overlay);
 
-    lv_obj_t* title_lbl = MakeLabel(s_overlay, I18n::T(title), kText, FontSmall());
-    lv_obj_align(title_lbl, LV_ALIGN_TOP_MID, 0, kRound ? 36 : 24);
+    s_overlay_title = MakeLabel(s_overlay, I18n::T(title), kText, FontSmall());
+    lv_obj_align(s_overlay_title, LV_ALIGN_TOP_MID, 0, kRound ? 20 : 24);
     return s_overlay;
 }
 
@@ -813,14 +866,14 @@ void ShowAlarmEdit(int index) {
     const int roller_h = kRound ? 100 : 160;
     s_edit_hour = MakeRoller(ov, hour_opts.c_str(), draft.hour);
     lv_obj_set_size(s_edit_hour, roller_w, roller_h);
-    lv_obj_align(s_edit_hour, LV_ALIGN_TOP_MID, kRound ? -48 : -70, kRound ? 70 : 90);
+    lv_obj_align(s_edit_hour, LV_ALIGN_TOP_MID, kRound ? -40 : -70, kRound ? 82 : 90);
 
     auto colon = MakeLabel(ov, ":", kText, FontBig());
-    lv_obj_align(colon, LV_ALIGN_TOP_MID, 0, kRound ? 100 : 140);
+    lv_obj_align(colon, LV_ALIGN_TOP_MID, 0, kRound ? 112 : 140);
 
     s_edit_min = MakeRoller(ov, min_opts.c_str(), draft.minute);
     lv_obj_set_size(s_edit_min, roller_w, roller_h);
-    lv_obj_align(s_edit_min, LV_ALIGN_TOP_MID, kRound ? 48 : 70, kRound ? 70 : 90);
+    lv_obj_align(s_edit_min, LV_ALIGN_TOP_MID, kRound ? 40 : 70, kRound ? 82 : 90);
 
     // 单次 / 重复：两个独立胶囊，不要外套一层描边（会双边框、挤在一起）。
     lv_obj_t* seg = lv_obj_create(ov);
@@ -965,6 +1018,7 @@ void ShowAlarmEdit(int index) {
                         LV_EVENT_CLICKED, nullptr);
 
     SyncEditRepeatUi();
+    RaiseOverlayChrome();
 }
 
 void DeleteEditingAlarm() {
@@ -1056,6 +1110,7 @@ void ShowRingtonePicker() {
             },
             LV_EVENT_CLICKED, reinterpret_cast<void*>(static_cast<intptr_t>(i)));
     }
+    RaiseOverlayChrome();
 }
 
 void ShowCountdownCustom() {
@@ -1117,6 +1172,7 @@ void ShowCountdownCustom() {
             HideOverlay();
         },
         LV_EVENT_CLICKED, nullptr);
+    RaiseOverlayChrome();
 }
 
 // ---------- page builders ----------
