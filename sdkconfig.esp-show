@@ -599,7 +599,7 @@ CONFIG_PARTITION_TABLE_MD5=y
 #
 # Xiaozhi Assistant
 #
-CONFIG_OTA_URL="https://xiaozhi.cyberai.top/api/ota/"
+CONFIG_OTA_URL="http://192.168.50.52:8084/api/ota/"
 # CONFIG_FLASH_NONE_ASSETS is not set
 CONFIG_FLASH_DEFAULT_ASSETS=y
 # CONFIG_FLASH_CUSTOM_ASSETS is not set
