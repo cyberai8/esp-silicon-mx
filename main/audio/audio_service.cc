@@ -47,6 +47,10 @@ void AudioService::Initialize(AudioCodec* codec) {
     if (codec->input_sample_rate() != 16000) {
         input_resampler_.Configure(codec->input_sample_rate(), 16000);
         reference_resampler_.Configure(codec->input_sample_rate(), 16000);
+        if (!input_resampler_.IsConfigured() || !reference_resampler_.IsConfigured()) {
+            ESP_LOGE(TAG, "Failed to configure input resampler %d -> 16000",
+                     codec->input_sample_rate());
+        }
     }
 
 #if CONFIG_USE_AUDIO_PROCESSOR
@@ -179,6 +183,10 @@ bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, in
         if (!codec_->InputData(data)) {
             return false;
         }
+        if (!input_resampler_.IsConfigured() || !reference_resampler_.IsConfigured()) {
+            ESP_LOGE(TAG, "Input resampler unavailable, dropping mic frame");
+            return false;
+        }
         if (codec_->input_channels() == 2) {
             auto mic_channel = std::vector<int16_t>(data.size() / 2);
             auto reference_channel = std::vector<int16_t>(data.size() / 2);
@@ -186,8 +194,14 @@ bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, in
                 mic_channel[i] = data[j];
                 reference_channel[i] = data[j + 1];
             }
-            auto resampled_mic = std::vector<int16_t>(input_resampler_.GetOutputSamples(mic_channel.size()));
-            auto resampled_reference = std::vector<int16_t>(reference_resampler_.GetOutputSamples(reference_channel.size()));
+            const int mic_out = input_resampler_.GetOutputSamples(mic_channel.size());
+            const int ref_out = reference_resampler_.GetOutputSamples(reference_channel.size());
+            if (mic_out <= 0 || ref_out <= 0) {
+                ESP_LOGE(TAG, "Invalid resampler output size");
+                return false;
+            }
+            auto resampled_mic = std::vector<int16_t>(mic_out);
+            auto resampled_reference = std::vector<int16_t>(ref_out);
             input_resampler_.Process(mic_channel.data(), mic_channel.size(), resampled_mic.data());
             reference_resampler_.Process(reference_channel.data(), reference_channel.size(), resampled_reference.data());
             data.resize(resampled_mic.size() + resampled_reference.size());
@@ -196,7 +210,12 @@ bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, in
                 data[j + 1] = resampled_reference[i];
             }
         } else {
-            auto resampled = std::vector<int16_t>(input_resampler_.GetOutputSamples(data.size()));
+            const int out_samples = input_resampler_.GetOutputSamples(data.size());
+            if (out_samples <= 0) {
+                ESP_LOGE(TAG, "Invalid resampler output size");
+                return false;
+            }
+            auto resampled = std::vector<int16_t>(out_samples);
             input_resampler_.Process(data.data(), data.size(), resampled.data());
             data = std::move(resampled);
         }
@@ -364,9 +383,31 @@ void AudioService::OpusCodecTask() {
             if (opus_decoder_->Decode(std::move(packet->payload), task->pcm)) {
                 // Resample if the sample rate is different
                 if (opus_decoder_->sample_rate() != codec_->output_sample_rate()) {
-                    int target_size = output_resampler_.GetOutputSamples(task->pcm.size());
+                    if (!output_resampler_.IsConfigured() ||
+                        output_resampler_.input_sample_rate() !=
+                            opus_decoder_->sample_rate() ||
+                        output_resampler_.output_sample_rate() !=
+                            codec_->output_sample_rate()) {
+                        output_resampler_.Configure(opus_decoder_->sample_rate(),
+                                                    codec_->output_sample_rate());
+                    }
+                    if (!output_resampler_.IsConfigured()) {
+                        ESP_LOGW(TAG, "Skipping playback: resampler %d -> %d unavailable",
+                                 opus_decoder_->sample_rate(),
+                                 codec_->output_sample_rate());
+                        lock.lock();
+                        continue;
+                    }
+                    const int target_size =
+                        output_resampler_.GetOutputSamples(task->pcm.size());
+                    if (target_size <= 0) {
+                        ESP_LOGW(TAG, "Skipping playback: invalid resampler output size");
+                        lock.lock();
+                        continue;
+                    }
                     std::vector<int16_t> resampled(target_size);
-                    output_resampler_.Process(task->pcm.data(), task->pcm.size(), resampled.data());
+                    output_resampler_.Process(task->pcm.data(), task->pcm.size(),
+                                              resampled.data());
                     task->pcm = std::move(resampled);
                 }
 
@@ -427,8 +468,15 @@ void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
 
     auto codec = Board::GetInstance().GetAudioCodec();
     if (opus_decoder_->sample_rate() != codec->output_sample_rate()) {
-        ESP_LOGI(TAG, "Resampling audio from %d to %d", opus_decoder_->sample_rate(), codec->output_sample_rate());
+        ESP_LOGI(TAG, "Resampling audio from %d to %d", opus_decoder_->sample_rate(),
+                 codec->output_sample_rate());
         output_resampler_.Configure(opus_decoder_->sample_rate(), codec->output_sample_rate());
+        if (!output_resampler_.IsConfigured()) {
+            ESP_LOGE(TAG, "Failed to configure output resampler %d -> %d",
+                     opus_decoder_->sample_rate(), codec->output_sample_rate());
+        }
+    } else {
+        output_resampler_.Reset();
     }
 }
 
@@ -720,9 +768,15 @@ void AudioService::PlaySound(const std::string_view& ogg) {
                 continue;
             }
 
-            // Audio packet (Opus)
+            // Audio packet (Opus). OpusHead 里的 sample_rate 只是原始 PCM 提示；
+            // SILK 不支持 48000→24000，优先按扬声器采样率解码，避免无声。
             auto packet = std::make_unique<AudioStreamPacket>();
-            packet->sample_rate = sample_rate;
+            int decode_rate = codec_->output_sample_rate();
+            if (decode_rate != 8000 && decode_rate != 12000 && decode_rate != 16000 &&
+                decode_rate != 24000 && decode_rate != 48000) {
+                decode_rate = sample_rate;
+            }
+            packet->sample_rate = decode_rate;
             packet->frame_duration = 60;
             packet->payload.resize(pkt_len);
             std::memcpy(packet->payload.data(), pkt_ptr, pkt_len);
