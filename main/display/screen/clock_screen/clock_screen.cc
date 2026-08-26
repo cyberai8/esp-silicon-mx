@@ -8,12 +8,16 @@
 #include "settings.h"
 
 #include <cstdio>
+#include <atomic>
 #include <cstring>
 #include <ctime>
+#include <new>
 #include <string>
 
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_puhui_30_4);
@@ -69,6 +73,8 @@ const Ringtone kRingtones[] = {
     {"电子", &Lang::Sounds::OGG_ALARM_ELECTRONIC},
 };
 constexpr int kRingtoneCount = 4;
+constexpr int kAlarmRingRepeatCount = 3;
+constexpr uint32_t kAlarmRingRepeatGapMs = 1800;
 
 AlarmData s_alarms[kMaxAlarms];
 int s_alarm_count = 0;
@@ -126,9 +132,11 @@ lv_obj_t* s_cd_s = nullptr;
 
 esp_timer_handle_t s_alarm_poll = nullptr;
 int s_last_fired_minute = -1;
+std::atomic_bool s_alarm_ring_running{false};
 
 void ShowTab(Tab tab);
 void RefreshAlarmPage();
+void RequestAlarmPageRefresh();
 void HideOverlay();
 void ShowAlarmEdit(int index);
 void ShowRingtonePicker();
@@ -351,7 +359,63 @@ bool AnyAlarmEnabled() {
 
 void PlayRingtone(uint8_t idx) {
     if (idx >= kRingtoneCount) idx = 0;
-    Application::GetInstance().PlaySound(*kRingtones[idx].sound);
+    const std::string_view* sound = kRingtones[idx].sound;
+    Application::GetInstance().Schedule([sound]() {
+        Application::GetInstance().PlaySound(*sound);
+    });
+}
+
+struct AlarmRingRequest {
+    uint8_t ringtone;
+};
+
+void AlarmRingTask(void* arg) {
+    auto* request = static_cast<AlarmRingRequest*>(arg);
+    uint8_t ringtone = request->ringtone;
+    delete request;
+
+    for (int i = 0; i < kAlarmRingRepeatCount; ++i) {
+        PlayRingtone(ringtone);
+        if (i + 1 < kAlarmRingRepeatCount) {
+            vTaskDelay(pdMS_TO_TICKS(kAlarmRingRepeatGapMs));
+        }
+    }
+
+    s_alarm_ring_running.store(false, std::memory_order_release);
+    vTaskDelete(nullptr);
+}
+
+void PlayAlarmRingtone(uint8_t idx) {
+    if (idx >= kRingtoneCount) idx = 0;
+    if (s_alarm_ring_running.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    auto* request = new (std::nothrow) AlarmRingRequest{idx};
+    if (request == nullptr) {
+        s_alarm_ring_running.store(false, std::memory_order_release);
+        PlayRingtone(idx);
+        return;
+    }
+
+    BaseType_t ret = xTaskCreate(AlarmRingTask, "alarm_ring", 4096, request, 4, nullptr);
+    if (ret != pdPASS) {
+        delete request;
+        s_alarm_ring_running.store(false, std::memory_order_release);
+        ESP_LOGW(TAG, "failed to create alarm ring task");
+        PlayRingtone(idx);
+    }
+}
+
+void RefreshAlarmPageAsync(void* /*arg*/) {
+    if (s_scr != nullptr && lv_screen_active() == s_scr) {
+        RefreshAlarmPage();
+    }
+}
+
+void RequestAlarmPageRefresh() {
+    if (s_scr == nullptr) return;
+    lv_async_call(RefreshAlarmPageAsync, nullptr);
 }
 
 int LocalWeekdayMon0() {
@@ -383,20 +447,22 @@ void OnAlarmFired(int idx) {
     if (idx < 0 || idx >= s_alarm_count) return;
     AlarmData& a = s_alarms[idx];
     ESP_LOGI(TAG, "alarm[%d] fired %02u:%02u", idx, a.hour, a.minute);
-    PlayRingtone(a.ringtone);
+    PlayAlarmRingtone(a.ringtone);
     if (a.once) {
         a.enabled = false;
         PersistAlarms();
-        if (s_scr != nullptr && lv_screen_active() == s_scr) {
-            RefreshAlarmPage();
-        }
+        RequestAlarmPageRefresh();
         if (!AnyAlarmEnabled()) StopAlarmPoller();
     }
 }
 
 void AlarmPollCb(void* /*arg*/) {
     int idx = FindFiringAlarmIndex();
-    if (idx >= 0) OnAlarmFired(idx);
+    if (idx >= 0) {
+        Application::GetInstance().Schedule([idx]() {
+            OnAlarmFired(idx);
+        });
+    }
 }
 
 void EnsureAlarmPoller() {
