@@ -47,6 +47,9 @@ lv_obj_t* BootScreen::Create() {
     lv_eaf_set_src(eaf_anim, "A:ic_boot_animation.eaf");
     lv_eaf_set_frame_delay(eaf_anim, 30);
     lv_eaf_set_loop_count(eaf_anim, 0);  // 播一遍
+    // 资源原生约 225×150，略放大到约 1.25×，圆屏上更易看清
+    lv_obj_set_size(eaf_anim, 280, 187);
+    lv_image_set_inner_align(eaf_anim, LV_IMAGE_ALIGN_STRETCH);
     lv_obj_add_event_cb(eaf_anim, OnBootAnimationReady, LV_EVENT_READY, nullptr);
     lv_obj_center(eaf_anim);
     return screen;
