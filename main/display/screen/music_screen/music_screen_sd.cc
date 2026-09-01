@@ -25,7 +25,7 @@
 #include "board.h"
 #include "config.h"
 #include "home_screen/home_screen.h"
-#include "lv_eaf.h"
+#include "lvgl.h"
 #include "screen_util.h"
 #include "settings.h"
 #include "SdCardManager.hpp"
@@ -65,32 +65,39 @@ constexpr uint32_t kColorBarTrack = 0x2A2F3A;
 // 可用宽度，改动布局时要一起复算，否则内容会被圆角切掉。
 // 返回键贴在 (36,28) 时左上角会落到圆外；沿圆弧内收到 (78,56)，
 // 四角距圆心约 160，留 ~20px 边距，整颗按钮都看得见。
+//
+// 预览布局（去掉上方专辑旋转动画，控制键放大并放到中间偏下）：
+//   y=20   顶栏「本地音乐 · SD 卡」
+//   y=70   曲名
+//   y=96   副标题
+//   y=130  进度条
+//   y=188  大号控制键（占位）
+//   y=300  歌单 / 循环模式
 constexpr int32_t kPanel = DISPLAY_WIDTH;
 constexpr int32_t kBackBtnSize = 40;
 constexpr int32_t kBackBtnX = 78;
 constexpr int32_t kBackBtnY = 56;
 constexpr int32_t kTopLabelY = 20;
-constexpr int32_t kAlbumSize = 126;
-constexpr int32_t kAlbumY = 56;
-constexpr int32_t kAlbumMaskShrink = 3;
-constexpr int32_t kAlbumMaskSize = kAlbumSize - kAlbumMaskShrink * 2;
-constexpr uint32_t kAlbumFrameDelayMs = 180;
-constexpr int32_t kTitleY = 186;
-constexpr int32_t kSubY = 212;
+constexpr int32_t kTitleY = 100;
+constexpr int32_t kSubY = 126;
 constexpr int32_t kTextW = 244;
-constexpr int32_t kProgressY = 250;
+constexpr int32_t kProgressY = 160;
 constexpr int32_t kProgressW = 156;
 constexpr int32_t kProgressH = 5;
 // "00:00" / "--:--" 用 20pt 约需 60+px；原先 52 会折成两行。
 constexpr int32_t kTimeW = 68;
 constexpr int32_t kTimeGap = 4;
-constexpr int32_t kCtrlRowY = 268;
-constexpr int32_t kCtrlRowW = 272;
-constexpr int32_t kCtrlRowH = 42;
-constexpr int32_t kSideBtn = 36;   // 音量图标 32×32
-constexpr int32_t kStepBtn = 28;   // 上/下一首图标 18×18
-constexpr int32_t kPlayBtn = 36;   // 播放/暂停图标 24×24
-constexpr int32_t kBottomRowY = 318;
+constexpr int32_t kCtrlRowY = 188;
+constexpr int32_t kCtrlRowW = 320;
+constexpr int32_t kCtrlRowH = 72;
+constexpr int32_t kSideBtn = 56;
+constexpr int32_t kStepBtn = 56;
+constexpr int32_t kPlayBtn = 72;
+// 图标显示边长（与 tools/resize_player_icons.py 目标一致）
+constexpr int32_t kSideIcon = 34;
+constexpr int32_t kStepIcon = 34;
+constexpr int32_t kPlayIcon = 44;
+constexpr int32_t kBottomRowY = 300;
 constexpr int32_t kModeBtnW = 68;
 constexpr int32_t kModeBtnH = 28;
 constexpr int32_t kListBtnSize = 30;
@@ -126,7 +133,6 @@ struct MusicUi {
     lv_obj_t* lbl_elapsed = nullptr;
     lv_obj_t* lbl_total = nullptr;
     lv_obj_t* img_play_icon = nullptr;
-    lv_obj_t* album_eaf = nullptr;
     lv_obj_t* lbl_mode = nullptr;
     lv_obj_t* list_layer = nullptr;
     lv_obj_t* list_box = nullptr;
@@ -776,24 +782,25 @@ lv_obj_t* MakeBackButton(lv_obj_t* parent, lv_event_cb_t cb) {
     return btn;
 }
 
-lv_obj_t* CreateRoundButton(lv_obj_t* parent, int32_t size, uint32_t bg_color,
-                            uint32_t bg_pressed, const char* icon_path,
-                            lv_event_cb_t cb) {
+// 透明热区 + 居中图标。只显示你给的 png，不画外圈/内圈底。
+lv_obj_t* CreateIconButton(lv_obj_t* parent, int32_t hit_size, int32_t icon_size,
+                           const char* icon_path, lv_event_cb_t cb) {
     lv_obj_t* btn = lv_button_create(parent);
-    lv_obj_set_size(btn, size, size);
+    lv_obj_set_size(btn, hit_size, hit_size);
     lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(bg_color), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(bg_pressed),
+    lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0xFFFFFF),
                               Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+    lv_obj_set_style_bg_opa(btn, LV_OPA_20, Sel(LV_PART_MAIN, LV_STATE_PRESSED));
     lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(btn, 0, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
     lv_obj_set_ext_click_area(btn, 10);
 
     lv_obj_t* img = lv_image_create(btn);
+    lv_obj_set_size(img, icon_size, icon_size);
     lv_image_set_src(img, icon_path);
-    lv_obj_set_size(img, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_image_set_inner_align(img, LV_IMAGE_ALIGN_CONTAIN);
     lv_obj_center(img);
     lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
 
@@ -845,17 +852,6 @@ void OnSwipeBack() {
 // UI 刷新
 // ---------------------------------------------------------------------------
 
-void SyncAlbumEaf(bool playing) {
-    if (s_ui.album_eaf == nullptr) {
-        return;
-    }
-    if (playing) {
-        lv_eaf_resume(s_ui.album_eaf);
-    } else {
-        lv_eaf_pause(s_ui.album_eaf);
-    }
-}
-
 void ApplyPlayStateToUi(bool playing) {
     if (!s_screen_active || s_ui.img_play_icon == nullptr) {
         return;
@@ -863,7 +859,6 @@ void ApplyPlayStateToUi(bool playing) {
     s_ui.playing = playing;
     lv_image_set_src(s_ui.img_play_icon, playing ? "A:ic_s_player_pause.spng"
                                                  : "A:ic_s_player_play.spng");
-    SyncAlbumEaf(playing);
 }
 
 const char* RepeatModeText() {
@@ -1367,28 +1362,6 @@ void BuildBackButton(lv_obj_t* scr) {
     MakeBackButton(scr, [](lv_event_t*) { GoHome(); });
 }
 
-void BuildAlbum(lv_obj_t* scr) {
-    lv_obj_t* mask = lv_obj_create(scr);
-    lv_obj_set_size(mask, kAlbumMaskSize, kAlbumMaskSize);
-    lv_obj_align(mask, LV_ALIGN_TOP_MID, 0, kAlbumY + kAlbumMaskShrink);
-    screen_strip_obj_chrome(mask);
-    lv_obj_remove_flag(mask, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_radius(mask, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(mask, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(mask, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(mask, 0, LV_PART_MAIN);
-    lv_obj_set_style_clip_corner(mask, true, LV_PART_MAIN);
-
-    s_ui.album_eaf = lv_eaf_create(mask);
-    lv_eaf_set_src(s_ui.album_eaf, "A:ic_s_music_album.eaf");
-    lv_eaf_set_frame_delay(s_ui.album_eaf, kAlbumFrameDelayMs);
-    lv_obj_set_size(s_ui.album_eaf, kAlbumSize, kAlbumSize);
-    lv_image_set_inner_align(s_ui.album_eaf, LV_IMAGE_ALIGN_CONTAIN);
-    lv_obj_center(s_ui.album_eaf);
-    SyncAlbumEaf(false);
-    screen_make_input_passive(mask);
-}
-
 void BuildProgress(lv_obj_t* scr) {
     lv_obj_t* bar = lv_bar_create(scr);
     lv_obj_set_size(bar, kProgressW, kProgressH);
@@ -1437,17 +1410,17 @@ void BuildControls(lv_obj_t* scr) {
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
 
-    CreateRoundButton(row, kSideBtn, kColorBtn, kColorBtnPressed,
-                      "A:ic_s_music_volume_down.spng", OnVolDownClicked);
-    CreateRoundButton(row, kStepBtn, kColorBtn, kColorBtnPressed,
-                      "A:ic_s_player_previous.spng", OnPrevClicked);
-    s_ui.img_play_icon =
-        CreateRoundButton(row, kPlayBtn, kColorAccent, 0xC7E035,
-                          "A:ic_s_player_play.spng", OnPlayClicked);
-    CreateRoundButton(row, kStepBtn, kColorBtn, kColorBtnPressed,
-                      "A:ic_s_player_next.spng", OnNextClicked);
-    CreateRoundButton(row, kSideBtn, kColorBtn, kColorBtnPressed,
-                      "A:ic_s_music_volume_up.spng", OnVolUpClicked);
+    CreateIconButton(row, kSideBtn, kSideIcon, "A:ic_s_music_volume_down.spng",
+                     OnVolDownClicked);
+    CreateIconButton(row, kStepBtn, kStepIcon, "A:ic_s_player_previous.spng",
+                     OnPrevClicked);
+    s_ui.img_play_icon = CreateIconButton(row, kPlayBtn, kPlayIcon,
+                                          "A:ic_s_player_play.spng",
+                                          OnPlayClicked);
+    CreateIconButton(row, kStepBtn, kStepIcon, "A:ic_s_player_next.spng",
+                     OnNextClicked);
+    CreateIconButton(row, kSideBtn, kSideIcon, "A:ic_s_music_volume_up.spng",
+                     OnVolUpClicked);
 }
 
 void BuildBottomRow(lv_obj_t* scr) {
@@ -1501,8 +1474,6 @@ void BuildBottomRow(lv_obj_t* scr) {
 void BuildUi(lv_obj_t* scr) {
     s_ui.lbl_top = MakeLabel(scr, I18n::T("本地音乐 · SD 卡"), kColorMuted, kTextW);
     lv_obj_align(s_ui.lbl_top, LV_ALIGN_TOP_MID, 0, kTopLabelY);
-
-    BuildAlbum(scr);
 
     s_ui.lbl_title = MakeLabel(scr, I18n::T("SD 卡音乐"), kColorText, kTextW);
     lv_obj_align(s_ui.lbl_title, LV_ALIGN_TOP_MID, 0, kTitleY);

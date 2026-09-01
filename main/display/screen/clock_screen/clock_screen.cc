@@ -33,12 +33,32 @@ constexpr int kPanel = DISPLAY_WIDTH;
 constexpr int32_t kBackBtnSize = 40;
 constexpr int32_t kBackBtnX = 78;
 constexpr int32_t kBackBtnY = 56;
+// 底部 tab 原先 -18 会贴边裁字；上移后可用宽度够 270。
+// 圆心 y=180，tab 中心约 278（ofs=-60,h=44）时半宽≈148，270 安全。
+constexpr int32_t kTabBarW = 270;
+constexpr int32_t kTabBarH = 44;
+constexpr int32_t kTabBarBottomOfs = -60;
+constexpr int32_t kAddBtnBottomOfs = -112;
+constexpr int32_t kOverlayBtnBottomOfs = -56;
+constexpr int32_t kAlarmListH = 145;
+constexpr int32_t kSwBtnCenterY = 12;
+constexpr int32_t kCdPresetY = 120;
+constexpr int32_t kCdCustomY = 158;
 #else
 constexpr bool kRound = false;
 constexpr int kPanel = 720;
 constexpr int32_t kBackBtnSize = 44;
 constexpr int32_t kBackBtnX = 16;
 constexpr int32_t kBackBtnY = 16;
+constexpr int32_t kTabBarW = 480;
+constexpr int32_t kTabBarH = 64;
+constexpr int32_t kTabBarBottomOfs = -24;
+constexpr int32_t kAddBtnBottomOfs = -100;
+constexpr int32_t kOverlayBtnBottomOfs = -36;
+constexpr int32_t kAlarmListH = 360;
+constexpr int32_t kSwBtnCenterY = 50;
+constexpr int32_t kCdPresetY = 220;
+constexpr int32_t kCdCustomY = 300;
 #endif
 
 constexpr uint32_t kBg = 0x081C1C;
@@ -1047,7 +1067,7 @@ void ShowAlarmEdit(int index) {
         lv_obj_t* del = lv_btn_create(ov);
         lv_obj_set_size(del, kRound ? 90 : 120, kRound ? 32 : 40);
         lv_obj_align(del, LV_ALIGN_BOTTOM_MID, kRound ? -70 : -100,
-                     kRound ? -28 : -36);
+                     kOverlayBtnBottomOfs);
         lv_obj_set_style_radius(del, 16, LV_PART_MAIN);
         lv_obj_set_style_bg_opa(del, LV_OPA_TRANSP, LV_PART_MAIN);
         lv_obj_set_style_border_width(del, 1, LV_PART_MAIN);
@@ -1067,9 +1087,9 @@ void ShowAlarmEdit(int index) {
                     kRound ? 40 : 56);
     if (s_edit_index >= 0) {
         lv_obj_align(save, LV_ALIGN_BOTTOM_MID, kRound ? 60 : 100,
-                     kRound ? -28 : -36);
+                     kOverlayBtnBottomOfs);
     } else {
-        lv_obj_align(save, LV_ALIGN_BOTTOM_MID, 0, kRound ? -28 : -36);
+        lv_obj_align(save, LV_ALIGN_BOTTOM_MID, 0, kOverlayBtnBottomOfs);
     }
     lv_obj_set_style_radius(save, 22, LV_PART_MAIN);
     lv_obj_set_style_bg_color(save, lv_color_hex(kAccent), LV_PART_MAIN);
@@ -1216,7 +1236,7 @@ void ShowCountdownCustom() {
 
     lv_obj_t* ok = lv_btn_create(ov);
     lv_obj_set_size(ok, kRound ? 200 : 320, kRound ? 40 : 56);
-    lv_obj_align(ok, LV_ALIGN_BOTTOM_MID, 0, kRound ? -28 : -36);
+    lv_obj_align(ok, LV_ALIGN_BOTTOM_MID, 0, kOverlayBtnBottomOfs);
     lv_obj_set_style_radius(ok, 22, LV_PART_MAIN);
     lv_obj_set_style_bg_color(ok, lv_color_hex(kAccent), LV_PART_MAIN);
     lv_obj_set_style_border_width(ok, 0, LV_PART_MAIN);
@@ -1245,10 +1265,9 @@ void ShowCountdownCustom() {
 void BuildTabBar(lv_obj_t* parent) {
     lv_obj_t* bar = lv_obj_create(parent);
     screen_strip_obj_chrome(bar);
-    const int bar_h = kRound ? 44 : 64;
-    lv_obj_set_size(bar, kRound ? 280 : 480, bar_h);
-    lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, kRound ? -18 : -24);
-    lv_obj_set_style_radius(bar, bar_h / 2, LV_PART_MAIN);
+    lv_obj_set_size(bar, kTabBarW, kTabBarH);
+    lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, kTabBarBottomOfs);
+    lv_obj_set_style_radius(bar, kTabBarH / 2, LV_PART_MAIN);
     lv_obj_set_style_bg_color(bar, lv_color_hex(kBtnDark), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
@@ -1291,7 +1310,7 @@ void BuildAlarmPage(lv_obj_t* parent) {
 
     s_alarm_list = lv_obj_create(s_page_alarm);
     screen_strip_obj_chrome(s_alarm_list);
-    const int list_h = kRound ? 190 : 360;
+    const int list_h = kAlarmListH;
     lv_obj_set_size(s_alarm_list, kRound ? 280 : 460, list_h);
     lv_obj_align(s_alarm_list, LV_ALIGN_TOP_MID, 0, kRound ? 62 : 90);
     lv_obj_set_style_bg_opa(s_alarm_list, LV_OPA_TRANSP, LV_PART_MAIN);
@@ -1306,7 +1325,7 @@ void BuildAlarmPage(lv_obj_t* parent) {
     lv_obj_t* add = lv_btn_create(s_page_alarm);
     const int bs = kRound ? 48 : 72;
     StyleFillBtn(add, bs);
-    lv_obj_align(add, LV_ALIGN_BOTTOM_MID, 0, kRound ? -70 : -100);
+    lv_obj_align(add, LV_ALIGN_BOTTOM_MID, 0, kAddBtnBottomOfs);
     lv_obj_t* al = lv_label_create(add);
     lv_label_set_text(al, "+");
     lv_obj_set_style_text_font(al, FontBig(), LV_PART_MAIN);
@@ -1343,7 +1362,7 @@ void BuildStopwatchPage(lv_obj_t* parent) {
     const int bs = kRound ? 52 : 80;
     lv_obj_t* reset = lv_btn_create(s_page_sw);
     StyleGhostBtn(reset, bs);
-    lv_obj_align(reset, LV_ALIGN_CENTER, kRound ? -70 : -110, kRound ? 40 : 50);
+    lv_obj_align(reset, LV_ALIGN_CENTER, kRound ? -70 : -110, kSwBtnCenterY);
     lv_obj_t* rl = lv_label_create(reset);
     lv_label_set_text(rl, I18n::T("复位"));
     lv_obj_set_style_text_font(rl, FontSmall(), LV_PART_MAIN);
@@ -1353,7 +1372,7 @@ void BuildStopwatchPage(lv_obj_t* parent) {
 
     lv_obj_t* start = lv_btn_create(s_page_sw);
     StyleFillBtn(start, bs);
-    lv_obj_align(start, LV_ALIGN_CENTER, 0, kRound ? 40 : 50);
+    lv_obj_align(start, LV_ALIGN_CENTER, 0, kSwBtnCenterY);
     lv_obj_t* sl = lv_label_create(start);
     lv_label_set_text(sl, I18n::T("开始"));
     lv_obj_set_style_text_font(sl, FontSmall(), LV_PART_MAIN);
@@ -1363,7 +1382,7 @@ void BuildStopwatchPage(lv_obj_t* parent) {
 
     lv_obj_t* lap = lv_btn_create(s_page_sw);
     StyleGhostBtn(lap, bs);
-    lv_obj_align(lap, LV_ALIGN_CENTER, kRound ? 70 : 110, kRound ? 40 : 50);
+    lv_obj_align(lap, LV_ALIGN_CENTER, kRound ? 70 : 110, kSwBtnCenterY);
     lv_obj_t* ll = lv_label_create(lap);
     lv_label_set_text(ll, I18n::T("计次"));
     lv_obj_set_style_text_font(ll, FontSmall(), LV_PART_MAIN);
@@ -1391,7 +1410,7 @@ void BuildCountdownPage(lv_obj_t* parent) {
     lv_obj_t* presets = lv_obj_create(s_page_cd);
     screen_strip_obj_chrome(presets);
     lv_obj_set_size(presets, kRound ? 280 : 420, kRound ? 36 : 48);
-    lv_obj_align(presets, LV_ALIGN_TOP_MID, 0, kRound ? 140 : 220);
+    lv_obj_align(presets, LV_ALIGN_TOP_MID, 0, kCdPresetY);
     lv_obj_set_style_bg_opa(presets, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_flex_flow(presets, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(presets, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER,
@@ -1423,8 +1442,8 @@ void BuildCountdownPage(lv_obj_t* parent) {
     const int btn_w = kRound ? 140 : 200;
     const int custom_h = kRound ? 36 : 44;
     const int start_h = kRound ? 40 : 56;
-    const int custom_y = kRound ? 188 : 300;
-    const int start_y = custom_y + custom_h + 12;
+    const int custom_y = kCdCustomY;
+    const int start_y = custom_y + custom_h + 10;
 
     lv_obj_t* custom = lv_btn_create(s_page_cd);
     lv_obj_set_size(custom, btn_w, custom_h);

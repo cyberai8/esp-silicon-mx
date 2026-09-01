@@ -532,11 +532,17 @@ if(NOT EXISTS "${AVATAR_RUNTIME_DIR}/base_360.png")
     message(FATAL_ERROR "Digital people avatar runtime missing: ${AVATAR_RUNTIME_DIR}")
 endif()
 set(ASSETS_PACK_DIR "${CMAKE_BINARY_DIR}/xingzhi-assets-pack")
+# CONFIGURE_DEPENDS：xingzhi-assets 里图标一改，下次 build 会重新 cmake 拷贝进 pack，
+# 避免只改了 png、固件 resources 分区仍是旧图（播放键圆环就是这个问题）。
+file(GLOB_RECURSE XINGZHI_ASSET_FILES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/xingzhi-assets/*")
+file(GLOB AVATAR_RUNTIME_PNGS CONFIGURE_DEPENDS "${AVATAR_RUNTIME_DIR}/*.png")
 file(REMOVE_RECURSE "${ASSETS_PACK_DIR}")
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/xingzhi-assets/" DESTINATION "${ASSETS_PACK_DIR}")
-file(GLOB AVATAR_RUNTIME_PNGS "${AVATAR_RUNTIME_DIR}/*.png")
 file(COPY ${AVATAR_RUNTIME_PNGS} DESTINATION "${ASSETS_PACK_DIR}")
 list(LENGTH AVATAR_RUNTIME_PNGS AVATAR_PNG_COUNT)
+list(LENGTH XINGZHI_ASSET_FILES XINGZHI_ASSET_COUNT)
+message(STATUS "Packing xingzhi-assets: ${XINGZHI_ASSET_COUNT} files")
 message(STATUS "Packing show11 avatar runtime PNGs: ${AVATAR_PNG_COUNT} files")
 
 spiffs_create_partition_assets(

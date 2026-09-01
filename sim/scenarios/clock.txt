@@ -1,23 +1,24 @@
 # 闹钟应用走一遍：三个 tab + 添加闹钟弹层
-# 底部 tab 中心 ≈ (100|180|260, 320)；弹层返回键中心 ≈ (98, 76)
+# 底部 tab 上移后中心 ≈ (95|180|265, 278)；添加按钮中心 ≈ (180, 224)
+# 弹层返回键中心 ≈ (98, 76)
 
 wait 800
 shot 01_alarm_empty.png
 
 log 切到「计时」
-tap 180 320
+tap 180 278
 wait 600
 shot 02_stopwatch.png
 
 log 切到「倒计时」
-tap 260 320
+tap 265 278
 wait 600
 shot 03_countdown.png
 
 log 回「闹钟」，点 + 添加
-tap 100 320
+tap 95 278
 wait 500
-tap 180 265
+tap 180 224
 wait 800
 shot 04_add_alarm.png
 

@@ -1,24 +1,14 @@
 #!/usr/bin/env python3
-"""把下载的播放控件图标（通常 32×32）高质量缩放到圆屏按钮里的实际显示尺寸。
+"""把 player_masters 里的原图高质量缩放到圆屏按钮实际显示尺寸。
 
-用法（二选一）：
-
-1) 只改下面数字，然后执行：
-     python3 tools/resize_player_icons.py
-
-2) 命令行指定：
-     python3 tools/resize_player_icons.py --from 32 --play 24 --step 18
+用法：
+  python3 tools/resize_player_icons.py
+  python3 tools/resize_player_icons.py --play 44 --step 34
 
 目录约定：
   - 原图：main/custom-assets/player_masters/
-      文件名任意（中文/英文均可），如「播放.png」「暂停.png」「上一首.png」
   - 生成：main/custom-assets/player_icons/
-      自动映射为固件名 ic_s_player_*.png / ic_s_music_volume_*.png
   - 安装：默认再复制到 main/xingzhi-assets/ 供编译打包
-
-圆屏按钮里图标区 = 按钮直径 × 11/20：
-  播放/暂停 最大 24×24（电台 44 按钮）
-  上一首/下一首/音量 最大 18×18（34 按钮）
 """
 from __future__ import annotations
 
@@ -30,11 +20,10 @@ from pathlib import Path
 
 from PIL import Image
 
-# ========== 只改这里即可 ==========
-FROM_SIZE = 32  # 下载图标边长
-PLAY_SIZE = 24  # 播放 / 暂停
-STEP_SIZE = 18  # 上一首 / 下一首 / 音量加减
-# ==================================
+# ========== 只改这里即可（与 music_screen_sd 布局常量对齐）==========
+PLAY_SIZE = 44  # 播放 / 暂停
+STEP_SIZE = 34  # 上一首 / 下一首 / 音量加减
+# ==================================================================
 
 ROOT = Path(__file__).resolve().parent.parent
 CUSTOM_ASSETS = ROOT / "main" / "custom-assets"
@@ -42,8 +31,6 @@ MASTERS_DIR = CUSTOM_ASSETS / "player_masters"
 OUT_DIR = CUSTOM_ASSETS / "player_icons"
 INSTALL_DIR = ROOT / "main" / "xingzhi-assets"
 
-# 任意文件名 → (固件文件名不含扩展名, 目标边长键)
-# 目标：play=PLAY_SIZE，其余=STEP_SIZE
 NAME_ALIASES: dict[str, str] = {
     "play": "play",
     "播放": "play",
@@ -113,55 +100,53 @@ def target_size_for(suffix: str, play_size: int, step_size: int) -> int:
     return play_size if suffix in PLAY_SUFFIXES else step_size
 
 
-def resize_rgba(im: Image.Image, from_size: int, to_size: int) -> Image.Image:
-    """高质量缩放：先规范到 from_size 画布，再 LANCZOS 到 to_size。"""
+def resize_to_square(im: Image.Image, to_size: int) -> Image.Image:
+    """按原图比例缩放到 to_size 正方形画布（透明底，居中）。"""
     im = im.convert("RGBA")
     w, h = im.size
-
     if w == to_size and h == to_size:
         return im
 
-    if w != from_size or h != from_size:
-        canvas = Image.new("RGBA", (from_size, from_size), (0, 0, 0, 0))
-        scale = min(from_size / w, from_size / h)
-        nw = max(1, int(round(w * scale)))
-        nh = max(1, int(round(h * scale)))
-        fitted = im.resize((nw, nh), Image.Resampling.LANCZOS)
-        canvas.paste(fitted, ((from_size - nw) // 2, (from_size - nh) // 2), fitted)
-        im = canvas
-
-    if from_size == to_size:
-        return im
-
-    return im.resize((to_size, to_size), Image.Resampling.LANCZOS)
+    scale = min(to_size / w, to_size / h)
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    fitted = im.resize((nw, nh), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGBA", (to_size, to_size), (0, 0, 0, 0))
+    canvas.paste(fitted, ((to_size - nw) // 2, (to_size - nh) // 2), fitted)
+    return canvas
 
 
 def collect_sources(masters: Path, pattern: str) -> list[Path]:
-    return [p for p in sorted(masters.glob(pattern)) if p.is_file() and p.suffix.lower() != ".txt"]
+    # 「暂停.png」优先于「暂停 (1).png」
+    files = [
+        p
+        for p in masters.glob(pattern)
+        if p.is_file() and p.suffix.lower() != ".txt"
+    ]
+    return sorted(
+        files,
+        key=lambda p: (1 if re.search(r"\(\d+\)", p.stem) else 0, p.name),
+    )
 
 
-def ensure_masters_readme(masters: Path) -> None:
+def ensure_masters_readme(masters: Path, play_size: int, step_size: int) -> None:
     readme = masters / "README.txt"
     readme.write_text(
-        "把 32×32 的 PNG 放此目录（中文名也可），例如：\n"
+        "把原图 PNG 放此目录（中文名也可，尺寸随意），例如：\n"
         "  播放.png / 暂停.png / 上一首.png / 下一首.png\n"
         "  音量加.png / 音量减.png\n"
-        "  或 ic_s_player_play.png\n"
         "然后运行：\n"
         "  python3 tools/resize_player_icons.py\n"
-        "生成：main/custom-assets/player_icons/\n"
-        "  播放/暂停 → 24×24（ic_s_player_play / pause）\n"
-        "  切歌/音量 → 18×18（previous / next / volume_up / volume_down）\n"
+        f"生成：main/custom-assets/player_icons/\n"
+        f"  播放/暂停 → {play_size}×{play_size}\n"
+        f"  切歌/音量 → {step_size}×{step_size}\n"
         "并默认复制到 main/xingzhi-assets/ 供编译。\n",
         encoding="utf-8",
     )
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="高质量缩放播放控件图标：32×32 → 播放24 / 切歌18"
-    )
-    ap.add_argument("--from", dest="from_size", type=int, default=FROM_SIZE)
+    ap = argparse.ArgumentParser(description="高质量缩放播放控件图标到目标显示尺寸")
     ap.add_argument("--play", dest="play_size", type=int, default=PLAY_SIZE)
     ap.add_argument("--step", dest="step_size", type=int, default=STEP_SIZE)
     ap.add_argument("--masters", type=Path, default=MASTERS_DIR)
@@ -174,18 +159,11 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    from_size = args.from_size
     play_size = args.play_size
     step_size = args.step_size
-    if from_size <= 0 or play_size <= 0 or step_size <= 0:
-        print("error: --from / --play / --step 必须为正整数", file=sys.stderr)
+    if play_size <= 0 or step_size <= 0:
+        print("error: --play / --step 必须为正整数", file=sys.stderr)
         return 1
-    for label, size in (("播放", play_size), ("切歌", step_size)):
-        if size > from_size:
-            print(
-                f"warn: {label} 目标 {size} > 原图 {from_size}，会放大，清晰度可能下降",
-                file=sys.stderr,
-            )
 
     masters: Path = args.masters
     out_dir: Path = args.out
@@ -193,41 +171,43 @@ def main() -> int:
     CUSTOM_ASSETS.mkdir(parents=True, exist_ok=True)
     if not masters.is_dir():
         masters.mkdir(parents=True, exist_ok=True)
-        ensure_masters_readme(masters)
+        ensure_masters_readme(masters, play_size, step_size)
         print(
             f"已创建原图目录：{masters}\n"
-            f"请把 {from_size}×{from_size} 的 PNG（播放/暂停/上一首/下一首）放进去后再运行。"
+            "请把 PNG（播放/暂停/上一首/下一首）放进去后再运行。"
         )
         return 1
 
-    ensure_masters_readme(masters)
+    ensure_masters_readme(masters, play_size, step_size)
     srcs = collect_sources(masters, args.pattern)
     if not srcs:
-        print(
-            f"error: 在 {masters} 下未找到 {args.pattern}\n"
-            f"请放入 {from_size}×{from_size} PNG 后再运行。",
-            file=sys.stderr,
-        )
+        print(f"error: 在 {masters} 下未找到 {args.pattern}", file=sys.stderr)
         return 1
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"缩放 {from_size} → 播放/暂停 {play_size}，切歌/音量 {step_size}")
+    print(f"缩放 → 播放/暂停 {play_size}，切歌/音量 {step_size}")
     print(f"  原图：{masters}")
     print(f"  生成：{out_dir}")
     print(f"  共 {len(srcs)} 张")
 
     written: list[Path] = []
     unmatched: list[str] = []
+    seen_suffix: set[str] = set()
     for src in srcs:
         suffix = resolve_suffix(src)
         if suffix is None:
             unmatched.append(src.name)
             print(f"  {src.name}  [未映射，跳过]")
             continue
+        # 同名映射只保留第一次（优先无「暂停.png」而不是「暂停 (1).png」）
+        if suffix in seen_suffix:
+            print(f"  {src.name}  [重复映射 {suffix}，跳过]")
+            continue
+        seen_suffix.add(suffix)
         to_size = target_size_for(suffix, play_size, step_size)
         out_name = SUFFIX_TO_ASSET[suffix]
         im = Image.open(src)
-        out = resize_rgba(im, from_size, to_size)
+        out = resize_to_square(im, to_size)
         dst = out_dir / out_name
         out.save(dst, format="PNG", optimize=True)
         written.append(dst)

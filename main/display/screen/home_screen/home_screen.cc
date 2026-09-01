@@ -194,11 +194,6 @@ void wifi_lifecycle_cb(screen_lifecycle_event_t event) {
     NetworkScreen::LifecycleCallback(event);
 }
 
-void chat_lifecycle_cb(screen_lifecycle_event_t event) {
-    PwrKey_OnScreenLifecycle("chat", event);
-    ChatScreen::LifecycleCallback(event);
-}
-
 void digital_people_lifecycle_cb(screen_lifecycle_event_t event) {
     PwrKey_OnScreenLifecycle("digital_people", event);
     DigitalPeopleScreen::LifecycleCallback(event);
@@ -742,7 +737,6 @@ void LaunchWake(screen_lifecycle_cb_t /*lifecycle_cb*/) {
 // ????????ic_app_home_themeN_magnet.spng ????????????// name ??zh-CN msgid??????????
 // I18n::T(entry.name)??
 constexpr AppEntry kApps[] = {
-    {"chat",           "聊天",     LaunchChat,          chat_lifecycle_cb,          true},
     {"wifi",           "网络配置", LaunchWifi,          wifi_lifecycle_cb,          false},
     {"digital_people", "数字人",   LaunchDigitalPeople, digital_people_lifecycle_cb, true},
 #if !defined(BOARD_ESP_VOCAT)
@@ -766,7 +760,7 @@ constexpr AppEntry kApps[] = {
 #if !defined(BOARD_ESP_VOCAT)
     {"pin",            "引脚测试", LaunchPinTest,       pin_test_lifecycle_cb,      false},
 #endif
-    {"2048",           "2048",     LaunchGame2048,      game_2048_lifecycle_cb,     false},
+    {"2048",           "游戏",     LaunchGame2048,      game_2048_lifecycle_cb,     false},
     {"info",           "信息",     LaunchInfo,          info_lifecycle_cb,          false},
 #if !defined(BOARD_ESP_VOCAT)
     {"test",           "测试",     LaunchTest,          test_lifecycle_cb,          false},
@@ -807,35 +801,36 @@ const AppEntry* ResolveCloverApp(const char* preferred,
     return FindAppBySuffix(fallback);
 }
 
-// 首页优先顺序（上/右/下/左），其余按 kApps 原序接在后面。
 void BuildCloverAppOrder(int* out_indices, int* out_count) {
-    const char* prefer[] = {"chat", "recording", "digital_people", "wifi"};
-    bool used[kTotalApps] = {};
-    int n = 0;
-
-    auto push_suffix = [&](const char* suffix, const char* fallback) {
-        const AppEntry* app = ResolveCloverApp(suffix, fallback);
-        if (app == nullptr) {
-            return;
-        }
-        const int idx = static_cast<int>(app - kApps);
-        if (idx < 0 || idx >= kTotalApps || used[idx]) {
-            return;
-        }
-        used[idx] = true;
-        out_indices[n++] = idx;
+    // 圆屏四叶瓣：slot 0=12点(上) 1=3点(右) 2=6点(下) 3=9点(左)，每页 4 个。
+    // 第1页：数字人 / 相册 / 音乐 / 网络
+    // 第2页：闹钟 / 录音 / 像章 / 背包扣
+    // 第3页：游戏 / 设置 / SD卡 / 信息
+    static const char* kOrder[] = {
+        "digital_people",
+        "album",
+        "music",
+        "wifi",
+        "alarm",
+        "recording",
+        "badge",
+        "bagclip",
+        "2048",
+        "settings",
+        "sd",
+        "info",
     };
-
-    push_suffix(prefer[0], nullptr);
-    push_suffix(prefer[1], nullptr);
-    push_suffix(prefer[2], nullptr);
-    push_suffix(prefer[3], nullptr);
-
-    for (int i = 0; i < kTotalApps; ++i) {
-        if (used[i] || kApps[i].icon_suffix == nullptr) {
+    int n = 0;
+    for (const char* suffix : kOrder) {
+        const AppEntry* app = FindAppBySuffix(suffix);
+        if (app == nullptr) {
             continue;
         }
-        out_indices[n++] = i;
+        const int idx = static_cast<int>(app - kApps);
+        if (idx < 0 || idx >= kTotalApps) {
+            continue;
+        }
+        out_indices[n++] = idx;
     }
     *out_count = n;
 }

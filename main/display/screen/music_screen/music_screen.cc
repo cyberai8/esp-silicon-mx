@@ -26,8 +26,6 @@
 #include "native_bluetooth_audio.h"
 #include "screen_util.h"
 
-#include "lv_eaf.h"
-
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_puhui_30_4);
 
@@ -36,48 +34,34 @@ namespace {
 constexpr const char* TAG = "MusicScreen";
 
 // ---------------------------------------------------------------------------
-// 720x720 layout：
-//   y=0     ┌────────────────────────────────┐
-//   y=36   │ [←]                             │  back btn 72x72
-//   y=48   │           Song title           │  font 30, white
-//          │       (gap)                    │
-//   y=140  │     ┌──────────────────┐       │
-//          │     │ album   240x240  │       │  240x240 透明遮罩裁圆
-//   y=380  │     └──────────────────┘       │
-//          │       (gap)                    │
-//   y=410  │   ★ Lyric line 0 (newest)      │  100% opa
-//   y=444  │     · Lyric line 1 (older)     │   60% opa
-//   y=478  │     · Lyric line 2 (oldest)    │   30% opa
-//          │       (gap)                    │
-//   y=560  │ [vol-]  [<] [▶/❚❚] [>]  [vol+] │  control row
-//          │       (gap)                    │
-//   ~y=694 │  蓝牙音箱模式 · 手机连本机 …   │  使用提示，font 20, dim
-//   y=720  └────────────────────────────────┘
+// 预览布局（去掉上方专辑旋转动画，控制键放大并放到中间偏下）：
+//
+// 360 圆屏：
+//   y=36    歌名
+//   y=90    歌词三行
+//   y=188   [音量-] [上一曲] [播放] [下一曲] [音量+]  ← 占位圆钮
+//   底部    使用提示
+//
+// 按钮上的内圈 = 将来图标目标区域；中间文字是占位符，方便估尺寸。
 // ---------------------------------------------------------------------------
 #if defined(BOARD_ESP_VOCAT) || (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360)
 constexpr bool kRoundLayout = true;
 constexpr auto kPanelSize = DISPLAY_WIDTH;
 constexpr int32_t kTitleY = 36;
-constexpr int32_t kAlbumSize = 140;
 constexpr int32_t kHintBottomMargin = 28;
-constexpr int32_t kAlbumMaskShrink = 3;
-constexpr int32_t kAlbumY = 78;
-// 专辑图下沿 = kAlbumY + kAlbumMaskShrink + (kAlbumSize - 2*kAlbumMaskShrink)
-//           = 78 + 3 + 134 = 215，下面留给歌词三行 + 控制行 + 底部提示的
-// 空间只有 360-215-底部安全边距(28+~24) ≈ 93px，必须重新按这个预算收紧
-// 行距/按钮尺寸，否则第三行歌词会被控制行盖住（原数值下确实会撞在一起）。
-constexpr int32_t kLyricY = 221;
-constexpr int32_t kLyricLineGap = 14;
-constexpr int32_t kCtrlRowY = 274;
-constexpr int32_t kCtrlRowWidth = 280;
-constexpr int32_t kCtrlRowHeight = 32;
+constexpr int32_t kLyricY = 90;
+constexpr int32_t kLyricLineGap = 22;
+// 控制行：垂直中心约在 y=188+64/2≈220，相对圆心(180)偏下约 40px。
+constexpr int32_t kCtrlRowY = 188;
+constexpr int32_t kCtrlRowWidth = 320;
+constexpr int32_t kCtrlRowHeight = 72;
 constexpr int32_t kArtistY = 52;
 constexpr int32_t kAlbumInfoY = 66;
-// 按钮视觉尺寸缩小，但 CreateRoundButton 内部 ext_click_area=12，
-// 实际可点热区仍有 ~50-56px，圆屏单指点按不会觉得难点。
-constexpr int32_t kCtrlSideBtnSize = 26;
-constexpr int32_t kCtrlPlayBtnSize = 32;
-// 与相册 / SD 音乐同一套圆屏安全区，避免返回键被圆边裁掉。
+constexpr int32_t kCtrlSideBtnSize = 56;
+constexpr int32_t kCtrlPlayBtnSize = 72;
+// 占位图标区约占按钮直径 62%，方便估最终 png 尺寸。
+constexpr int32_t kCtrlSideIconSize = 34;
+constexpr int32_t kCtrlPlayIconSize = 44;
 constexpr int32_t kBackBtnSize = 40;
 constexpr int32_t kBackBtnX = 78;
 constexpr int32_t kBackBtnY = 56;
@@ -85,19 +69,18 @@ constexpr int32_t kBackBtnY = 56;
 constexpr bool kRoundLayout = false;
 constexpr int32_t kPanelSize = 720;
 constexpr int32_t kTitleY = 48;
-constexpr int32_t kAlbumSize = 240;
 constexpr int32_t kHintBottomMargin = 16;
-constexpr int32_t kAlbumMaskShrink = 4;
-constexpr int32_t kAlbumY = 140;
-constexpr int32_t kCtrlRowY = 560;
-constexpr int32_t kCtrlRowWidth = 700;
-constexpr int32_t kCtrlRowHeight = 120;
+constexpr int32_t kCtrlRowY = 380;
+constexpr int32_t kCtrlRowWidth = 640;
+constexpr int32_t kCtrlRowHeight = 140;
 constexpr int32_t kArtistY = 88;
 constexpr int32_t kAlbumInfoY = 116;
-constexpr int32_t kCtrlSideBtnSize = 80;
-constexpr int32_t kCtrlPlayBtnSize = 112;
-constexpr int32_t kLyricY = 410;
-constexpr int32_t kLyricLineGap = 34;
+constexpr int32_t kCtrlSideBtnSize = 112;
+constexpr int32_t kCtrlPlayBtnSize = 140;
+constexpr int32_t kCtrlSideIconSize = 70;
+constexpr int32_t kCtrlPlayIconSize = 88;
+constexpr int32_t kLyricY = 180;
+constexpr int32_t kLyricLineGap = 40;
 constexpr int32_t kBackBtnSize = 72;
 constexpr int32_t kBackBtnX = 32;
 constexpr int32_t kBackBtnY = 36;
@@ -112,9 +95,9 @@ constexpr uint32_t kColorCtrlBtnBgPressed = 0x303644;
 constexpr uint32_t kColorPlayBtnBg = 0x3A4150;
 constexpr uint32_t kColorPlayBtnBgPressed = 0x4A5260;
 constexpr uint32_t kColorBackBtnBg = 0x1A1E26;
+constexpr uint32_t kColorIconPlaceholder = 0x4A5568;
+constexpr uint32_t kColorIconPlaceholderPlay = 0x6B7588;
 
-constexpr int32_t kAlbumMaskSize = kAlbumSize - kAlbumMaskShrink * 2;
-constexpr uint32_t kAlbumFrameDelayMs = 180;
 #if !BOARD_HAS_EXTERNAL_BT
 constexpr size_t kNativeBtMinInternalFree = 50000;
 constexpr size_t kNativeBtMinLargestBlock = 20000;
@@ -132,8 +115,8 @@ struct MusicUi {
     lv_obj_t* lbl_artist = nullptr;
     lv_obj_t* lbl_album = nullptr;
     lv_obj_t* lbl_lyric[kLyricLineCount] = {nullptr, nullptr, nullptr};
-    lv_obj_t* img_play_icon = nullptr;
-    lv_obj_t* album_eaf = nullptr;
+    // 占位阶段用 label；后续换真图标时可改回 image。
+    lv_obj_t* lbl_play_icon = nullptr;
 #if !BOARD_HAS_EXTERNAL_BT
     lv_timer_t* native_bt_ui_timer = nullptr;
 #endif
@@ -162,15 +145,13 @@ struct NativeBtUiCache {
 std::mutex s_native_bt_ui_mutex;
 NativeBtUiCache s_native_bt_ui_cache;
 #endif
-void sync_album_eaf(bool playing) {
-    if (s_ui.album_eaf == nullptr) {
+
+void set_play_placeholder_text(bool playing) {
+    if (s_ui.lbl_play_icon == nullptr) {
         return;
     }
-    if (playing) {
-        lv_eaf_resume(s_ui.album_eaf);
-    } else {
-        lv_eaf_pause(s_ui.album_eaf);
-    }
+    // 占位文字：播放态显示暂停符，暂停态显示播放符。
+    lv_label_set_text(s_ui.lbl_play_icon, playing ? "II" : ">");
 }
 
 // 把 (part | state) 显式转成 lv_style_selector_t，规避
@@ -293,14 +274,11 @@ struct AsyncPlayStateMsg {
 };
 
 void apply_play_state_to_ui(bool playing) {
-    if (!s_screen_active || s_ui.img_play_icon == nullptr) {
+    if (!s_screen_active || s_ui.lbl_play_icon == nullptr) {
         return;
     }
     s_ui.playing = playing;
-    lv_image_set_src(s_ui.img_play_icon,
-                     playing ? "A:ic_s_player_pause.spng"
-                             : "A:ic_s_player_play.spng");
-    sync_album_eaf(playing);
+    set_play_placeholder_text(playing);
 }
 
 void async_set_play_icon(void* user_data) {
@@ -637,12 +615,7 @@ void OnPlayClicked(lv_event_t* /*e*/) {
                      : NativeBluetoothAudio::Command::kPause);
 #endif
     s_ui.playing = want_playing;
-    if (s_ui.img_play_icon != nullptr) {
-        lv_image_set_src(s_ui.img_play_icon,
-                         want_playing ? "A:ic_s_player_pause.spng"
-                                      : "A:ic_s_player_play.spng");
-    }
-    sync_album_eaf(want_playing);
+    set_play_placeholder_text(want_playing);
 }
 
 void OnVolDownClicked(lv_event_t* /*e*/) {
@@ -684,9 +657,12 @@ void OnScreenUnloaded(lv_event_t* /*e*/) {
 // ---------------------------------------------------------------------------
 // UI 构造
 // ---------------------------------------------------------------------------
-lv_obj_t* CreateRoundButton(lv_obj_t* parent, int32_t size, uint32_t bg_color,
-                            uint32_t bg_pressed, const char* icon_path,
-                            lv_event_cb_t cb) {
+// 占位圆钮：外圈 = 可点区域，内圈 = 将来图标目标尺寸，中间文字 = 功能提示。
+// 返回中间 label，播放键可用来切换 > / II。
+lv_obj_t* CreatePlaceholderButton(lv_obj_t* parent, int32_t size,
+                                  int32_t icon_size, uint32_t bg_color,
+                                  uint32_t bg_pressed, uint32_t icon_bg,
+                                  const char* mark, lv_event_cb_t cb) {
     lv_obj_t* btn = lv_button_create(parent);
     lv_obj_set_size(btn, size, size);
     lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
@@ -699,19 +675,29 @@ lv_obj_t* CreateRoundButton(lv_obj_t* parent, int32_t size, uint32_t bg_color,
     lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
     lv_obj_set_ext_click_area(btn, 12);
 
-    int32_t icon_box = (size * 11) / 20;
-    if (icon_box < 12) {
-        icon_box = 12;
-    }
-    lv_obj_t* img = lv_image_create(btn);
-    lv_obj_set_size(img, icon_box, icon_box);
-    lv_image_set_src(img, icon_path);
-    lv_image_set_inner_align(img, LV_IMAGE_ALIGN_CONTAIN);
-    lv_obj_center(img);
-    lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t* icon_box = lv_obj_create(btn);
+    lv_obj_set_size(icon_box, icon_size, icon_size);
+    screen_strip_obj_chrome(icon_box);
+    lv_obj_remove_flag(icon_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(icon_box, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_radius(icon_box, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(icon_box, lv_color_hex(icon_bg), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(icon_box, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(icon_box, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(icon_box, 0, LV_PART_MAIN);
+    lv_obj_center(icon_box);
+
+    lv_obj_t* lbl = lv_label_create(icon_box);
+    lv_label_set_text(lbl, mark);
+    lv_obj_set_style_text_font(lbl, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(kColorTextPrimary),
+                                LV_PART_MAIN);
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_center(lbl);
+    lv_obj_remove_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
-    return img;
+    return lbl;
 }
 
 void BuildBackButton(lv_obj_t* scr) {
@@ -752,11 +738,7 @@ void BuildBackButton(lv_obj_t* scr) {
 }
 
 void BuildUsageHint(lv_obj_t* scr) {
-    // 屏幕最底部一行操作引导：「这是什么 · 怎么用」。
-    // 暗灰色 + 20pt 字号，弱化但全程可见——即使蓝牙没连，
-    // 用户也知道下一步该做什么。
-    // 控件行容器虽然在 y=560..680，但实际按钮居中在内、可视底比容器
-    // 早 ~20px 结束，因此提示距底边 16px 已能与按钮拉开 ~30px 的视觉间距。
+    // 底部弱提示：蓝牙音箱怎么用。控制键已上移到中间偏下，这里留到底边即可。
     lv_obj_t* hint = lv_label_create(scr);
     lv_label_set_text(
         hint,
@@ -810,39 +792,6 @@ void BuildSongTitle(lv_obj_t* scr) {
     screen_make_input_passive(s_ui.lbl_album);
 }
 
-void BuildAlbum(lv_obj_t* scr) {
-    // 用一个跟 GIF 同样大小（240x240）的容器把 album 包起来：
-    //   - radius = CIRCLE + clip_corner = true，所有超出 240 内切圆的像素
-    //     都会被裁掉（也就是 GIF 四个白色方形角）；
-    //   - 容器自身 opa = 0，被裁掉的角直接漏出底下的屏幕背景，
-    //     看起来跟黑色背景融为一体；
-    //   - 没有边框 / 描边 / 阴影，避免任何绿色或多余的圈线。
-    lv_obj_t* mask = lv_obj_create(scr);
-    lv_obj_set_size(mask, kAlbumMaskSize, kAlbumMaskSize);
-    // 遮罩比 album 小，y 上加上 shrink 让 album 的中心保持原位。
-    lv_obj_align(mask, LV_ALIGN_TOP_MID, 0, kAlbumY + kAlbumMaskShrink);
-    screen_strip_obj_chrome(mask);
-    lv_obj_remove_flag(mask, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_radius(mask, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(mask, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(mask, 0, LV_PART_MAIN);
-    lv_obj_set_style_outline_width(mask, 0, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(mask, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(mask, 0, LV_PART_MAIN);
-    lv_obj_set_style_clip_corner(mask, true, LV_PART_MAIN);
-
-    s_ui.album_eaf = lv_eaf_create(mask);
-    lv_eaf_set_src(s_ui.album_eaf, "A:ic_s_music_album.eaf");
-    lv_eaf_set_frame_delay(s_ui.album_eaf, kAlbumFrameDelayMs);
-    lv_obj_set_size(s_ui.album_eaf, kAlbumSize, kAlbumSize);
-    lv_image_set_inner_align(s_ui.album_eaf, LV_IMAGE_ALIGN_CONTAIN);
-    lv_obj_center(s_ui.album_eaf);
-    // 进入界面默认未播放，专辑动画保持静止。
-    sync_album_eaf(s_ui.playing);
-
-    screen_make_input_passive(mask);
-}
-
 void BuildLyric(lv_obj_t* scr) {
     for (int i = 0; i < kLyricLineCount; ++i) {
         lv_obj_t* lbl = lv_label_create(scr);
@@ -874,24 +823,39 @@ void BuildControls(lv_obj_t* scr) {
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
 
+    // 占位预览：内圈尺寸 = 建议图标边长（圆屏 34 / 播放 44）。
     // 顺序：音量减 / 上一曲 / 播放暂停 / 下一曲 / 音量加
-    CreateRoundButton(row, kCtrlSideBtnSize, kColorCtrlBtnBg,
-                      kColorCtrlBtnBgPressed,
-                      "A:ic_s_music_volume_down.spng", OnVolDownClicked);
-    CreateRoundButton(row, kCtrlSideBtnSize, kColorCtrlBtnBg,
-                      kColorCtrlBtnBgPressed,
-                      "A:ic_s_player_previous.spng", OnPrevClicked);
-    s_ui.img_play_icon = CreateRoundButton(row, kCtrlPlayBtnSize,
-                                           kColorPlayBtnBg,
-                                           kColorPlayBtnBgPressed,
-                                           "A:ic_s_player_play.spng",
-                                           OnPlayClicked);
-    CreateRoundButton(row, kCtrlSideBtnSize, kColorCtrlBtnBg,
-                      kColorCtrlBtnBgPressed,
-                      "A:ic_s_player_next.spng", OnNextClicked);
-    CreateRoundButton(row, kCtrlSideBtnSize, kColorCtrlBtnBg,
-                      kColorCtrlBtnBgPressed,
-                      "A:ic_s_music_volume_up.spng", OnVolUpClicked);
+    CreatePlaceholderButton(row, kCtrlSideBtnSize, kCtrlSideIconSize,
+                            kColorCtrlBtnBg, kColorCtrlBtnBgPressed,
+                            kColorIconPlaceholder, "-", OnVolDownClicked);
+    CreatePlaceholderButton(row, kCtrlSideBtnSize, kCtrlSideIconSize,
+                            kColorCtrlBtnBg, kColorCtrlBtnBgPressed,
+                            kColorIconPlaceholder, "<<", OnPrevClicked);
+    s_ui.lbl_play_icon = CreatePlaceholderButton(
+        row, kCtrlPlayBtnSize, kCtrlPlayIconSize, kColorPlayBtnBg,
+        kColorPlayBtnBgPressed, kColorIconPlaceholderPlay, ">", OnPlayClicked);
+    CreatePlaceholderButton(row, kCtrlSideBtnSize, kCtrlSideIconSize,
+                            kColorCtrlBtnBg, kColorCtrlBtnBgPressed,
+                            kColorIconPlaceholder, ">>", OnNextClicked);
+    CreatePlaceholderButton(row, kCtrlSideBtnSize, kCtrlSideIconSize,
+                            kColorCtrlBtnBg, kColorCtrlBtnBgPressed,
+                            kColorIconPlaceholder, "+", OnVolUpClicked);
+
+    // 底部一行尺寸标注，方便对照找图标。
+    lv_obj_t* size_hint = lv_label_create(scr);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "icon %dx%d / play %dx%d",
+             static_cast<int>(kCtrlSideIconSize),
+             static_cast<int>(kCtrlSideIconSize),
+             static_cast<int>(kCtrlPlayIconSize),
+             static_cast<int>(kCtrlPlayIconSize));
+    lv_label_set_text(size_hint, buf);
+    lv_obj_set_style_text_font(size_hint, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(size_hint, lv_color_hex(0x8B92A3), LV_PART_MAIN);
+    lv_obj_set_style_text_align(size_hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(size_hint, LV_ALIGN_TOP_MID, 0,
+                 kCtrlRowY + kCtrlRowHeight + 8);
+    screen_make_input_passive(size_hint);
 }
 
 }  // namespace
@@ -915,7 +879,6 @@ lv_obj_t* MusicScreen::Create() {
 
     BuildSongTitle(scr);
     BuildUsageHint(scr);
-    BuildAlbum(scr);
     BuildLyric(scr);
     BuildControls(scr);
 #if BOARD_HAS_NATIVE_BT

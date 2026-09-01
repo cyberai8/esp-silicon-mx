@@ -32,9 +32,11 @@
 
 #define DISPLAY_WIDTH    360
 #define DISPLAY_HEIGHT   360
+// 整屏逆时针旋转 90°（相对面板默认方向）：swap + mirror_y。
+// 触摸 flags 与面板保持一致，否则触点会错位。
 #define DISPLAY_MIRROR_X false
-#define DISPLAY_MIRROR_Y false
-#define DISPLAY_SWAP_XY  false
+#define DISPLAY_MIRROR_Y true
+#define DISPLAY_SWAP_XY  true
 #define DISPLAY_OFFSET_X 0
 #define DISPLAY_OFFSET_Y 0
 

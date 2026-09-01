@@ -97,3 +97,19 @@ idf.py -B build-esp-show \
 #
 # 换板后若 CMake 缓存混乱：删对应 build-* 再 set-target / build
 # rm -rf build-esp-show
+
+# 1. 照常编译
+idf.py -B build-esp-show \
+  -DSDKCONFIG=sdkconfig.esp-show \
+  build
+
+# 2. 合并成可整片烧录的 bin
+idf.py -B build-esp-show \
+  -DSDKCONFIG=sdkconfig.esp-show \
+  merge-bin
+
+# 3. 需要发版 zip 时手动打一下即可：
+
+
+mkdir -p releases
+zip -j releases/v2.0.51_esp-show.zip build-esp-show/merged-binary.bin

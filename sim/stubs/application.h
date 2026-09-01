@@ -3,6 +3,7 @@
 #include "device_state.h"
 
 #include <cstdio>
+#include <functional>
 #include <string>
 #include <string_view>
 
@@ -22,6 +23,13 @@ public:
     void PlaySound(const std::string_view& sound) {
         fprintf(stderr, "[sim] PlaySound(%.*s)\n",
                 static_cast<int>(sound.size()), sound.data());
+    }
+
+    // 真机异步投递到主循环；仿真里直接跑，方便闹钟铃声相关路径能编过。
+    void Schedule(std::function<void()> callback) {
+        if (callback) {
+            callback();
+        }
     }
 
     bool HasPendingActivation() const { return false; }
