@@ -134,6 +134,8 @@ struct UiState {
     lv_obj_t* weather_icon = nullptr;
     lv_obj_t* weather_temp_lbl = nullptr;
     lv_obj_t* weather_text_lbl = nullptr;
+    lv_obj_t* weather_date_lbl = nullptr;
+    lv_obj_t* weather_week_lbl = nullptr;
     lv_obj_t* weather_loc_lbl = nullptr;
     lv_obj_t* weather_chip_low_val = nullptr;
     lv_obj_t* weather_chip_high_val = nullptr;
@@ -685,6 +687,12 @@ void ApplyWeatherData(const WeatherDistrictData& data, bool ok) {
     if (!s_ui.weather_ok) {
         lv_label_set_text(s_ui.weather_temp_lbl, "--°");
         lv_label_set_text(s_ui.weather_text_lbl, I18n::T("暂无天气数据"));
+        if (s_ui.weather_date_lbl != nullptr) {
+            lv_label_set_text(s_ui.weather_date_lbl, "--/--");
+        }
+        if (s_ui.weather_week_lbl != nullptr) {
+            lv_label_set_text(s_ui.weather_week_lbl, I18n::T("周-"));
+        }
         lv_label_set_text(s_ui.weather_loc_lbl, "");
         lv_label_set_text(s_ui.weather_chip_low_val, "--");
         lv_label_set_text(s_ui.weather_chip_high_val, "--");
@@ -954,27 +962,54 @@ lv_obj_t* CreateWeatherPanel(lv_obj_t* parent) {
     lv_obj_set_flex_grow(info_col, 1);
     lv_obj_set_height(info_col, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(info_col, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(info_col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START,
+    lv_obj_set_flex_align(info_col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(info_col, kRoundSmall ? 2 : 4, LV_PART_MAIN);
     lv_obj_remove_flag(info_col, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(info_col, LV_OBJ_FLAG_CLICKABLE);
 
+    auto make_info_row = [](lv_obj_t* parent) {
+        lv_obj_t* row = lv_obj_create(parent);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_width(row, LV_PCT(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        return row;
+    };
+
+    lv_obj_t* temp_row = make_info_row(info_col);
     s_ui.weather_temp_lbl =
-        MakeStandbyLabel(info_col, "--°", &font_puhui_30_4, 0xFFFFFF);
+        MakeStandbyLabel(temp_row, "--°", &font_puhui_30_4, 0xFFFFFF);
     lv_obj_set_style_text_align(s_ui.weather_temp_lbl, LV_TEXT_ALIGN_LEFT,
                                 LV_PART_MAIN);
+    lv_obj_set_flex_grow(s_ui.weather_temp_lbl, 1);
+    s_ui.weather_date_lbl =
+        MakeStandbyLabel(temp_row, "--/--", &font_puhui_30_4, 0xD1D5DB);
+    lv_obj_set_style_text_align(s_ui.weather_date_lbl, LV_TEXT_ALIGN_RIGHT,
+                                LV_PART_MAIN);
+    lv_label_set_long_mode(s_ui.weather_date_lbl, LV_LABEL_LONG_CLIP);
+
+    lv_obj_t* text_row = make_info_row(info_col);
     s_ui.weather_text_lbl =
-        MakeStandbyLabel(info_col, I18n::T("加载中..."), &font_puhui_30_4,
+        MakeStandbyLabel(text_row, I18n::T("加载中..."), &font_puhui_30_4,
                          0xE5E7EB);
     lv_obj_set_style_text_align(s_ui.weather_text_lbl, LV_TEXT_ALIGN_LEFT,
                                 LV_PART_MAIN);
+    lv_obj_set_flex_grow(s_ui.weather_text_lbl, 1);
+    s_ui.weather_week_lbl =
+        MakeStandbyLabel(text_row, I18n::T("周-"), &font_puhui_30_4, 0xFFFFFF);
+    lv_obj_set_style_text_align(s_ui.weather_week_lbl, LV_TEXT_ALIGN_RIGHT,
+                                LV_PART_MAIN);
+    lv_label_set_long_mode(s_ui.weather_week_lbl, LV_LABEL_LONG_CLIP);
+
     s_ui.weather_loc_lbl =
         MakeStandbyLabel(info_col, "", &font_puhui_20_4, 0x9CA3AF);
     lv_obj_set_style_text_align(s_ui.weather_loc_lbl, LV_TEXT_ALIGN_LEFT,
                                 LV_PART_MAIN);
-    lv_obj_set_width(s_ui.weather_temp_lbl, LV_PCT(100));
-    lv_obj_set_width(s_ui.weather_text_lbl, LV_PCT(100));
     lv_obj_set_width(s_ui.weather_loc_lbl, LV_PCT(100));
     lv_label_set_long_mode(s_ui.weather_text_lbl, LV_LABEL_LONG_CLIP);
     lv_label_set_long_mode(s_ui.weather_loc_lbl, LV_LABEL_LONG_DOT);
@@ -1046,6 +1081,37 @@ void FormatDateText(char* buf, size_t len, const struct tm& tm_info, bool have_t
                       tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
                       weekday);
     }
+}
+
+void UpdateWeatherDateLabels() {
+    if (s_ui.weather_date_lbl == nullptr || s_ui.weather_week_lbl == nullptr) {
+        return;
+    }
+    time_t now = time(nullptr);
+    struct tm tm_info = {};
+    const bool have_time =
+        localtime_r(&now, &tm_info) != nullptr && tm_info.tm_year >= 2025 - 1900;
+    if (!have_time) {
+        lv_label_set_text(s_ui.weather_date_lbl, "--/--");
+        lv_label_set_text(s_ui.weather_week_lbl, I18n::T("周-"));
+        return;
+    }
+    char date_buf[16];
+    char week_buf[16];
+    const int wday = tm_info.tm_wday;
+    const char* weekday =
+        (wday >= 0 && wday < 7) ? I18n::T(kWeekdayMsgIds[wday]) : "-";
+    if (kRoundSmall) {
+        std::snprintf(date_buf, sizeof(date_buf), "%02d/%02d", tm_info.tm_mon + 1,
+                      tm_info.tm_mday);
+        std::snprintf(week_buf, sizeof(week_buf), I18n::T("周%s"), weekday);
+    } else {
+        std::snprintf(date_buf, sizeof(date_buf), "%04d/%02d/%02d",
+                      tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday);
+        std::snprintf(week_buf, sizeof(week_buf), I18n::T("星期%s"), weekday);
+    }
+    lv_label_set_text(s_ui.weather_date_lbl, date_buf);
+    lv_label_set_text(s_ui.weather_week_lbl, week_buf);
 }
 
 void StopChargeEffect();
@@ -1276,6 +1342,7 @@ void UpdateClockLabels() {
 
 void OnClockTimer(lv_timer_t* /*timer*/) {
     UpdateClockLabels();
+    UpdateWeatherDateLabels();
     s_ui.weather_ticks++;
     const uint32_t interval =
         s_ui.weather_ok ? kWeatherRefreshOkSec : kWeatherRefreshFailSec;
@@ -1506,6 +1573,7 @@ lv_obj_t* StandbyScreen::Create() {
     screen_make_input_passive(s_ui.face_dots);
 
     UpdateClockLabels();
+    UpdateWeatherDateLabels();
     ApplyFaceVisibility();
     if (WeatherService::Instance().DeviceCached().valid) {
         ApplyWeatherData(WeatherService::Instance().DeviceCached(), true);
