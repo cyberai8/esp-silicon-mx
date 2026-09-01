@@ -165,6 +165,8 @@ TaskHandle_t s_play_task = nullptr;
 TaskHandle_t s_asr_task = nullptr;        // 上传转写
 TaskHandle_t s_asr_query_task = nullptr;  // 查询转写结果
 TaskHandle_t s_meta_task = nullptr;
+StackType_t* s_record_stack = nullptr;
+StaticTask_t* s_record_tcb = nullptr;
 lv_timer_t* s_tick_timer = nullptr;
 bool s_wake_disabled_by_us = false;
 std::atomic<bool> s_stop_meta{false};
@@ -374,6 +376,84 @@ void RestoreWakeWordIfNeeded() {
     }
     Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
     s_wake_disabled_by_us = false;
+}
+
+// 进入录音 / 点「开始录音」前释放云端监听与唤醒词 AFE，腾出 internal RAM
+// 给 rec_save（Opus 编码栈约 28KB）。
+void PrepareMicForRecording() {
+    auto& app = Application::GetInstance();
+    auto& as = app.GetAudioService();
+
+    const DeviceState st = app.GetDeviceState();
+    if (st == kDeviceStateSpeaking) {
+        app.AbortSpeaking(kAbortReasonNone);
+    }
+    app.StopListening();
+    as.EnableAudioTesting(false);
+    as.EnableVoiceProcessing(false);
+    as.ResetDecoder();
+
+    if (as.IsWakeWordRunning()) {
+        as.ReleaseWakeWordDetection();
+        s_wake_disabled_by_us = true;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    } else {
+        DisableWakeWordIfNeeded();
+    }
+
+    if (!as.IsStarted()) {
+        as.Start();
+    }
+    if (AudioCodec* codec = Board::GetInstance().GetAudioCodec(); codec != nullptr) {
+        codec->EnableInput(true);
+    }
+
+    ESP_LOGI(TAG,
+             "mic prepared (state=%d started=%d wake=%d proc=%d int_free=%u largest=%u)",
+             static_cast<int>(st), as.IsStarted() ? 1 : 0,
+             as.IsWakeWordRunning() ? 1 : 0, as.IsAudioProcessorRunning() ? 1 : 0,
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(
+                 heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+}
+
+void RecordTask(void* arg);
+
+bool SpawnRecordTask() {
+    constexpr uint32_t kRecordTaskStack = 2048 * 14;
+    s_record_task = nullptr;
+
+    if (xTaskCreatePinnedToCore(RecordTask, "rec_save", kRecordTaskStack, nullptr,
+                                tskIDLE_PRIORITY + 3, &s_record_task, 0) == pdPASS) {
+        ESP_LOGI(TAG, "record task started (internal stack=%u)",
+                 static_cast<unsigned>(kRecordTaskStack));
+        return true;
+    }
+
+    ESP_LOGW(TAG, "record task internal create failed, trying SPIRAM stack");
+    if (s_record_stack == nullptr) {
+        s_record_stack = static_cast<StackType_t*>(heap_caps_malloc(
+            kRecordTaskStack, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+    if (s_record_tcb == nullptr) {
+        s_record_tcb = static_cast<StaticTask_t*>(heap_caps_malloc(
+            sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+    if (s_record_stack == nullptr || s_record_tcb == nullptr) {
+        ESP_LOGE(TAG, "record task SPIRAM alloc failed");
+        return false;
+    }
+
+    s_record_task = xTaskCreateStaticPinnedToCore(
+        RecordTask, "rec_save", kRecordTaskStack, nullptr, tskIDLE_PRIORITY + 3,
+        s_record_stack, s_record_tcb, 0);
+    if (s_record_task == nullptr) {
+        ESP_LOGE(TAG, "record task static create failed");
+        return false;
+    }
+    ESP_LOGI(TAG, "record task started (SPIRAM stack=%u)",
+             static_cast<unsigned>(kRecordTaskStack));
+    return true;
 }
 
 void FormatTimer(char* buf, size_t buf_size, int total_sec) {
@@ -621,6 +701,7 @@ void MakeNextRecordPath(char* path, size_t path_size) {
 }
 
 void RecordTask(void* /*arg*/) {
+    ESP_LOGI(TAG, "record task running");
     auto& as = Application::GetInstance().GetAudioService();
     char path[192] = {};
     FILE* file = nullptr;
@@ -788,12 +869,16 @@ void StartRecording() {
 
     StopPlayback();
 
+    PrepareMicForRecording();
+
     auto& as = Application::GetInstance().GetAudioService();
     if (!as.IsStarted()) {
+        ESP_LOGW(TAG, "StartRecording: audio service not started");
         SetRecordStatusText(I18n::T("音频未就绪"));
         return;
     }
     if (as.IsAudioProcessorRunning()) {
+        ESP_LOGW(TAG, "StartRecording: audio processor still busy");
         SetRecordStatusText(I18n::T("音频忙，稍后再试"));
         return;
     }
@@ -807,11 +892,7 @@ void StartRecording() {
     UpdateRecordButtonUi();
     StartTickTimer();
 
-    // Opus/SILK 编码栈很深：AudioService opus_codec 用 2048*13，
-    // wake_word encode 用 4096*7；16KB 会 Stack protection fault。
-    constexpr uint32_t kRecordTaskStack = 2048 * 14;
-    if (xTaskCreatePinnedToCore(RecordTask, "rec_save", kRecordTaskStack, nullptr,
-                                tskIDLE_PRIORITY + 3, &s_record_task, 0) != pdPASS) {
+    if (!SpawnRecordTask()) {
         s_record_task = nullptr;
         s_state.store(RecState::Idle);
         StopTickTimer();
@@ -2433,6 +2514,7 @@ lv_obj_t* RecordingScreen::Create() {
 void RecordingScreen::LifecycleCallback(screen_lifecycle_event_t event) {
     if (event == SCREEN_LIFECYCLE_LOAD) {
         ESP_LOGI(TAG, "load: recording_screen sd=%d", s_sd_ready ? 1 : 0);
+        PrepareMicForRecording();
     } else {
         ESP_LOGI(TAG, "unload: recording_screen");
         ForceStopAll();
