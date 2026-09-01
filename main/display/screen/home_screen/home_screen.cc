@@ -35,7 +35,6 @@ extern "C" void board_release_power_hold_if_supported();
 #include "settings.h"
 #include "settings_screen/settings_screen.h"
 #include "call_screen/call_screen.h"
-#include "chat_screen/chat_screen.h"
 #include "album_screen/album_screen.h"
 #include "clock_screen/clock_screen.h"
 #include "digital_people_screen/digital_people_screen.h"
@@ -466,16 +465,6 @@ void LaunchWifi(screen_lifecycle_cb_t lifecycle_cb) {
     }
 }
 
-void LaunchChat(screen_lifecycle_cb_t lifecycle_cb) {
-    lv_obj_t* old_scr = lv_screen_active();
-    lv_obj_t* app = ChatScreen::Create();
-    screen_attach_lifecycle(app, lifecycle_cb);
-    lv_screen_load(app);
-    if (old_scr != nullptr && old_scr != app) {
-        lv_obj_delete_async(old_scr);
-    }
-}
-
 void LaunchDigitalPeople(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* old_scr = lv_screen_active();
     lv_obj_t* app = DigitalPeopleScreen::Create();
@@ -790,15 +779,6 @@ const AppEntry* FindAppBySuffix(const char* suffix) {
         }
     }
     return nullptr;
-}
-
-const AppEntry* ResolveCloverApp(const char* preferred,
-                                 const char* fallback) {
-    const AppEntry* app = FindAppBySuffix(preferred);
-    if (app != nullptr) {
-        return app;
-    }
-    return FindAppBySuffix(fallback);
 }
 
 void BuildCloverAppOrder(int* out_indices, int* out_count) {
