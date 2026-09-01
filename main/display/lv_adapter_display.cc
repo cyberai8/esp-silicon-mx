@@ -20,6 +20,8 @@
 #include "screen/home_screen/home_screen.h"
 
 #include "application.h"
+#include "config.h"
+#include "display/display_orientation.h"
 
 static const char* TAG = "LVAdapterDisplay";
 
@@ -121,6 +123,11 @@ LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
         touch_feed_init(touch_handle, 16);
         touch_feed_attach_indev(touch_indev);
     }
+
+#if defined(BOARD_ESP_SHOW) && defined(DISPLAY_AUTO_ROTATION) && DISPLAY_AUTO_ROTATION
+    DisplayOrientationInit(panel, touch_handle, DISPLAY_SWAP_XY, DISPLAY_MIRROR_X,
+                           DISPLAY_MIRROR_Y);
+#endif
 
     ESP_ERROR_CHECK(esp_lv_adapter_start());
 

@@ -37,6 +37,10 @@
 #define DISPLAY_MIRROR_X false
 #define DISPLAY_MIRROR_Y true
 #define DISPLAY_SWAP_XY  true
+// QMI8658 重力方向自动旋转（90° 步进）；0 关闭。
+#define DISPLAY_AUTO_ROTATION 1
+// IMU 判定方向相对真实屏幕的固定补偿（顺时针 90/180/270）。
+#define DISPLAY_ORIENT_OFFSET_DEG 90
 #define DISPLAY_OFFSET_X 0
 #define DISPLAY_OFFSET_Y 0
 

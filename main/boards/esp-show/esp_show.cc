@@ -6,8 +6,12 @@
 #include "bq27220_gauge.h"
 #include "button.h"
 #include "digital_people_screen/digital_people_screen.h"
+#include "display/display_orientation.h"
 #include "display/lv_adapter_display.h"
+#include "esp_lv_adapter.h"
+#include "esp_lv_adapter_display.h"
 #include "home_screen/home_screen.h"
+#include "lvgl.h"
 #include "SdCardManager.hpp"
 #include "settings.h"
 #include "wifi_board.h"
@@ -29,6 +33,71 @@
 #include <freertos/task.h>
 
 #define TAG "EspShow"
+
+namespace {
+
+constexpr uint8_t kQmiRegCtrl1 = 0x02;
+constexpr uint8_t kQmiRegCtrl2 = 0x03;
+constexpr uint8_t kQmiRegCtrl3 = 0x04;
+constexpr uint8_t kQmiRegCtrl7 = 0x08;
+constexpr uint8_t kQmiRegAxL = 0x35;
+
+bool QmiWriteReg(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t val) {
+    const uint8_t buf[2] = {reg, val};
+    return i2c_master_transmit(dev, buf, sizeof(buf), 50) == ESP_OK;
+}
+
+bool QmiReadRegs(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t* out, size_t len) {
+    return i2c_master_transmit_receive(dev, &reg, 1, out, len, 50) == ESP_OK;
+}
+
+bool InitQmi8658Imu(i2c_master_dev_handle_t dev) {
+    if (!QmiWriteReg(dev, kQmiRegCtrl1, 0x60)) {
+        return false;
+    }
+    // Accel 4G + 125Hz
+    if (!QmiWriteReg(dev, kQmiRegCtrl2, 0x26)) {
+        return false;
+    }
+    // Gyro 512dps + 125Hz（平放绕屏旋转时靠 gz 积分）
+    if (!QmiWriteReg(dev, kQmiRegCtrl3, 0x46)) {
+        return false;
+    }
+    if (!QmiWriteReg(dev, kQmiRegCtrl7, 0x03)) {
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(80));
+    return true;
+}
+
+ImuSample ReadQmiImu(i2c_master_dev_handle_t dev) {
+    ImuSample sample;
+    uint8_t raw[12] = {};
+    if (!QmiReadRegs(dev, kQmiRegAxL, raw, sizeof(raw))) {
+        return sample;
+    }
+    sample.ax = static_cast<int16_t>((raw[1] << 8) | raw[0]);
+    sample.ay = static_cast<int16_t>((raw[3] << 8) | raw[2]);
+    sample.az = static_cast<int16_t>((raw[5] << 8) | raw[4]);
+    sample.gx = static_cast<int16_t>((raw[7] << 8) | raw[6]);
+    sample.gy = static_cast<int16_t>((raw[9] << 8) | raw[8]);
+    sample.gz = static_cast<int16_t>((raw[11] << 8) | raw[10]);
+    sample.ok = true;
+    return sample;
+}
+
+void OnOrientationApplyAsync(void* arg) {
+    const auto rot =
+        static_cast<esp_lv_adapter_rotation_t>(reinterpret_cast<intptr_t>(arg));
+    if (esp_lv_adapter_lock(-1) != ESP_OK) {
+        ESP_LOGW(TAG, "orientation apply lock failed rot=%d", static_cast<int>(rot));
+        return;
+    }
+    DisplayOrientationApply(rot);
+    esp_lv_adapter_unlock();
+}
+
+}  // namespace
 
 static i2c_master_bus_handle_t s_board_i2c_bus = nullptr;
 
@@ -798,39 +867,57 @@ private:
     void InitializeMotion() {
         const uint8_t addrs[] = {0x6A, 0x6B};
         for (uint8_t addr : addrs) {
-            if (ProbeQmi8658(addr)) {
-                xTaskCreate(
-                    [](void* arg) {
-                        auto* self = static_cast<EspShow*>(arg);
-                        uint8_t reg = 0x35;
-                        int16_t prev_ax = 0;
-                        for (;;) {
-                            uint8_t raw[6] = {};
-                            if (self->qmi_dev_ != nullptr &&
-                                i2c_master_transmit_receive(self->qmi_dev_, &reg, 1, raw,
-                                                            6, 50) == ESP_OK) {
-                                const int16_t ax =
-                                    static_cast<int16_t>((raw[1] << 8) | raw[0]);
-                                if (prev_ax != 0) {
-                                    const int delta = abs(static_cast<int>(ax) - prev_ax);
-                                    if (delta > 12000) {
-                                        ESP_LOGI(TAG, "QMI8658 shake score=%d", delta);
-                                        if (DigitalPeopleScreen::IsActive()) {
-                                            Application::GetInstance().ToggleChatState();
-                                        } else {
-                                            HomeScreen::OpenDigitalPeopleAsync();
-                                        }
-                                        vTaskDelay(pdMS_TO_TICKS(1500));
-                                    }
-                                }
-                                prev_ax = ax;
-                            }
-                            vTaskDelay(pdMS_TO_TICKS(80));
-                        }
-                    },
-                    "ws185b_qmi", 3072, this, 3, nullptr);
-                return;
+            if (!ProbeQmi8658(addr)) {
+                continue;
             }
+            if (!InitQmi8658Imu(qmi_dev_)) {
+                ESP_LOGW(TAG, "QMI8658 IMU init failed");
+                i2c_master_bus_rm_device(qmi_dev_);
+                qmi_dev_ = nullptr;
+                continue;
+            }
+            ESP_LOGI(TAG, "QMI8658 auto-rotation enabled");
+            xTaskCreate(
+                [](void* arg) {
+                    auto* self = static_cast<EspShow*>(arg);
+                    int16_t prev_ax = 0;
+                    constexpr int kPollMs = 120;
+                    for (;;) {
+                        const ImuSample sample = ReadQmiImu(self->qmi_dev_);
+                        if (!sample.ok) {
+                            vTaskDelay(pdMS_TO_TICKS(kPollMs));
+                            continue;
+                        }
+
+#if defined(DISPLAY_AUTO_ROTATION) && DISPLAY_AUTO_ROTATION
+                        const esp_lv_adapter_rotation_t target =
+                            DisplayOrientationUpdate(sample, kPollMs);
+                        DisplayOrientationMaybeLog(sample, target);
+                        if (target != DisplayOrientationGet()) {
+                            lv_async_call(OnOrientationApplyAsync,
+                                          reinterpret_cast<void*>(static_cast<intptr_t>(target)));
+                        }
+#endif
+
+                        if (prev_ax != 0) {
+                            const int delta =
+                                abs(static_cast<int>(sample.ax) - static_cast<int>(prev_ax));
+                            if (delta > 12000) {
+                                ESP_LOGI(TAG, "QMI8658 shake score=%d", delta);
+                                if (DigitalPeopleScreen::IsActive()) {
+                                    Application::GetInstance().ToggleChatState();
+                                } else {
+                                    HomeScreen::OpenDigitalPeopleAsync();
+                                }
+                                vTaskDelay(pdMS_TO_TICKS(1500));
+                            }
+                        }
+                        prev_ax = sample.ax;
+                        vTaskDelay(pdMS_TO_TICKS(kPollMs));
+                    }
+                },
+                "qmi8658", 4096, this, 3, nullptr);
+            return;
         }
         ESP_LOGW(TAG, "QMI8658 not found");
     }
