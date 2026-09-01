@@ -10,11 +10,9 @@
 - BQ27220 电量、QMI8658 IMU、MicroSD（SDMMC 4-bit）
 - 无 4G 模组 → 本板继承 `WifiBoard`
 
-## 与 esp-vocat 的关系
+## UI 栈
 
-分辨率与 UI 栈相同（`LVAdapterDisplay` + 圆屏适配），但 **GPIO 完全不同**，且无 PG1/PG2、无 ML307。
-
-## 内存
+360×360 圆屏（`LVAdapterDisplay` + 圆屏适配），仅 WiFi，无 4G / PG1/PG2 电源键逻辑。
 
 8MB Octal PSRAM 已启用；`sdkconfig.esp-show` 将 TLS/mbedTLS 堆、LVGL 线程栈、NVS 缓存放到 PSRAM，并关闭硬件 AES（避免 `esp-aes: Failed to allocate memory`）。详见 `sdkconfig.defaults.esp-show`。
 

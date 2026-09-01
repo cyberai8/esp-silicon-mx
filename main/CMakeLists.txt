@@ -103,19 +103,8 @@ set(SOURCES "audio/audio_codec.cc"
 
 set(INCLUDE_DIRS "." "i18n" "display" "display/font" "display/lvgl_display" "display/lvgl_display/jpg" "display/screen" "display/screen/boot_screen" "display/screen/ota_screen" "display/screen/wifi_config_tip_screen" "display/screen/home_screen" "display/screen/game_2048_screen" "display/screen/clock_screen" "display/screen/album_screen" "display/screen/music_screen" "display/screen/radio_screen" "display/screen/recording_screen" "display/screen/weather_screen" "display/screen/gps_screen" "display/screen/vibrate_screen" "display/screen/backlight_screen" "display/screen/settings_screen" "display/screen/call_screen" "display/screen/bluetooth_screen" "display/screen/chat_screen" "display/screen/network_screen" "display/screen/digital_people_screen" "display/screen/level_screen" "display/screen/magnet_screen" "display/screen/sd_card_screen" "display/screen/pin_test_screen" "display/screen/test_screen" "display/screen/info_screen" "display/screen/standby_screen" "display/screen/badge_screen" "display/screen/bagclip_screen" "audio" "protocols")
 
-# Add board common files
+# Add board common files (ESP-Show: WiFi only, no 4G / USB disk / legacy chargers)
 file(GLOB BOARD_COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/boards/common/*.cc)
-if(CONFIG_BOARD_TYPE_ESP_VOCAT)
-    # VoCat：无 NT26；启用 DualNetwork + ML307 UART 4G
-    list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/nt26_board\\.cc$")
-    list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/uart_eth_modem\\.cc$")
-elseif(CONFIG_BOARD_TYPE_ESP_SHOW)
-    # ESP-Show：无 NT26 / 4G
-    list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/nt26_board\\.cc$")
-    list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/uart_eth_modem\\.cc$")
-    list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/dual_network_board\\.cc$")
-    list(FILTER BOARD_COMMON_SOURCES EXCLUDE REGEX ".*/ml307_board\\.cc$")
-endif()
 list(APPEND SOURCES ${BOARD_COMMON_SOURCES})
 list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/common)
 
@@ -136,37 +125,11 @@ endfunction()
 set(BUILTIN_TEXT_FONT font_puhui_14_1)
 set(BUILTIN_ICON_FONT font_awesome_14_1)
 
-# Add board files according to BOARD_TYPE
-if(CONFIG_BOARD_TYPE_METALIO_CLAW_4)
-    set(BOARD_TYPE "metalio-claw-4")
-    set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
-    set(BUILTIN_ICON_FONT font_awesome_20_4)
-    set(DEFAULT_EMOJI_COLLECTION twemoji_64)
-elseif(CONFIG_BOARD_TYPE_ESP_VOCAT)
-    set(BOARD_TYPE "esp-vocat")
-    # Classic SpiLcdDisplay chat UI needs full CJK glyphs; basic lacks common Chinese chars.
-    set(BUILTIN_TEXT_FONT font_puhui_20_4)
-    set(BUILTIN_ICON_FONT font_awesome_20_4)
-    set(DEFAULT_EMOJI_COLLECTION twemoji_64)
-elseif(CONFIG_BOARD_TYPE_ESP_SHOW)
-    set(BOARD_TYPE "esp-show")
-    set(BUILTIN_TEXT_FONT font_puhui_20_4)
-    set(BUILTIN_ICON_FONT font_awesome_20_4)
-    set(DEFAULT_EMOJI_COLLECTION twemoji_64)
-elseif(CONFIG_IDF_TARGET_ESP32P4)
-    set(BOARD_TYPE "metalio-claw-4")
-    set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
-    set(BUILTIN_ICON_FONT font_awesome_20_4)
-    set(DEFAULT_EMOJI_COLLECTION twemoji_64)
-endif()
-
-if(NOT BOARD_TYPE)
-    message(WARNING "No board type selected yet; defaulting to metalio-claw-4")
-    set(BOARD_TYPE "metalio-claw-4")
-    set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
-    set(BUILTIN_ICON_FONT font_awesome_20_4)
-    set(DEFAULT_EMOJI_COLLECTION twemoji_64)
-endif()
+# ESP-Show is the only supported board target.
+set(BOARD_TYPE "esp-show")
+set(BUILTIN_TEXT_FONT font_puhui_20_4)
+set(BUILTIN_ICON_FONT font_awesome_20_4)
+set(DEFAULT_EMOJI_COLLECTION twemoji_64)
 
 file(GLOB BOARD_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_TYPE}/*.cc
@@ -339,15 +302,9 @@ target_compile_definitions(${COMPONENT_LIB}
                     PRIVATE BOARD_TYPE=\"${BOARD_TYPE}\" BOARD_NAME=\"${BOARD_NAME}\"
                     PRIVATE BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT} BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
                     )
-if(CONFIG_BOARD_TYPE_ESP_VOCAT OR CONFIG_BOARD_TYPE_ESP_SHOW)
-    # 360 圆屏 UI 适配（home/radio 等）复用 VoCat 分支
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE BOARD_ESP_VOCAT=1)
-    # OTA 上报 esp-show，服务端才会下发 viseme 口型轴
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE OTA_BOARD_TYPE=\"esp-show\")
-endif()
-if(CONFIG_BOARD_TYPE_ESP_SHOW)
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE BOARD_ESP_SHOW=1)
-endif()
+# 360 圆屏 UI 适配 + OTA 上报 esp-show（服务端 viseme 口型轴）
+target_compile_definitions(${COMPONENT_LIB} PRIVATE BOARD_ESP_VOCAT=1 BOARD_ESP_SHOW=1
+                    OTA_BOARD_TYPE=\"esp-show\")
 
 # Add generation rules
 # Use ${PYTHON} (IDF-resolved interpreter). Bare `python` is often missing from

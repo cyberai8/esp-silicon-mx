@@ -37,7 +37,7 @@ public:
         if (!enable || OtaScreen::IsActive()) {
             return;
         }
-#if CONFIG_BOARD_TYPE_ESP_VOCAT
+#if CONFIG_BOARD_TYPE_ESP_SHOW
         if (!force) {
             return;
         }

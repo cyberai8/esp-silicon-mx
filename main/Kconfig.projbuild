@@ -112,20 +112,9 @@ choice
         bool "Serbian"
 endchoice
 
-config BOARD_TYPE_METALIO_CLAW_4
-    bool "Metalio Claw4 (metalio-claw-4)"
-    default y if IDF_TARGET_ESP32P4
-    depends on IDF_TARGET_ESP32P4
-
-config BOARD_TYPE_ESP_VOCAT
-    bool "ESP-VoCat (esp-vocat)"
-    default y if IDF_TARGET_ESP32S3
-    depends on IDF_TARGET_ESP32S3
-    help
-        ESP-VoCat 喵伴：ESP32-S3、360x360 ST77916 QSPI 圆屏、CST816S 触摸、ES8311/ES7210、BQ27220、ML307。
-
 config BOARD_TYPE_ESP_SHOW
     bool "ESP-Show (esp-show)"
+    default y
     depends on IDF_TARGET_ESP32S3
     help
         ESP-Show：基于微雪 ESP32-S3-Touch-LCD-1.85B，360x360 ST77916 QSPI 圆屏、CST816S、ES8311/ES7210、BQ27220、SDMMC 4-bit（仅 WiFi）。
@@ -215,7 +204,7 @@ config USE_AUDIO_PROCESSOR
 config USE_DEVICE_AEC
     bool "Enable Device-Side AEC"
     default n
-    depends on USE_AUDIO_PROCESSOR && BOARD_TYPE_METALIO_CLAW_4
+    depends on USE_AUDIO_PROCESSOR && BOARD_TYPE_ESP_SHOW
     help
         To work properly, device-side AEC requires a clean output reference path from the speaker signal and physical acoustic isolation between the microphone and speaker.
 

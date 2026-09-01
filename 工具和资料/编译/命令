@@ -1,115 +1,41 @@
 # =============================================================================
-# esp-yun 各板级编译说明
+# esp-yun 编译说明（仅 ESP-Show）
 # 仓库: /home/qmx/qmx-sd/esp-yun
 #
-# 板级目录                          Target      IDF 要求
-# --------------------------------  ----------  ----------------------------
-# metalio-claw-4                    esp32p4     v5.5.4（文档主推）
-# esp-vocat                         esp32s3     v5.5.x
-# esp-show                           esp32s3     v5.5.x
-#
-# 原则：每块板用独立 -B build 目录 + 独立 SDKCONFIG，避免互相覆盖。
+# 板级: main/boards/esp-show
+# Target: esp32s3
+# IDF: v5.5.x
+# 配置: sdkconfig.esp-show
 # =============================================================================
 
 cd /home/qmx/qmx-sd/esp-yun
 
-# -----------------------------------------------------------------------------
-# 0) 先加载对应版本的 ESP-IDF（路径按本机修改）
-# -----------------------------------------------------------------------------
-# P4 / S3 圆屏：
-#   . ~/esp-idf-v5.5.4/export.sh
-#
-# idf.py --version   # 确认版本后再编译
-
-
-# =============================================================================
-# 1) Metalio Claw4（旗舰 P4）
-#    板级: main/boards/metalio-claw-4
-#    IDF:  v5.5.4
-# =============================================================================
-. ~/esp-idf-v5.5.4/export.sh
-
-idf.py -B build-claw4 \
-  -DSDKCONFIG=sdkconfig.claw4 \
-  set-target esp32p4
-
-# 若还没有 sdkconfig.claw4：可从一份已知可用的 P4 配置复制，或 set-target 后
-# 用 menuconfig 选 BOARD_TYPE_METALIO_CLAW_4，再保存为 sdkconfig.claw4。
-# 仓库默认文档路径是根目录 sdkconfig + build/；多板并行时建议用上面独立文件。
-
-idf.py -B build-claw4 -DSDKCONFIG=sdkconfig.claw4 build
-idf.py -B build-claw4 -DSDKCONFIG=sdkconfig.claw4 -p /dev/ttyACM0 flash monitor
-
-# 文档「单板默认」写法（会动根目录 sdkconfig / build）：
-# idf.py set-target esp32p4   # 仅首次
-# idf.py build
-# idf.py -p /dev/ttyACM0 flash monitor
-
-
-# =============================================================================
-# 2) ESP-VoCat（S3 圆屏 + ML307）
-#    板级: main/boards/esp-vocat
-#    IDF:  v5.5.x
-#    配置: sdkconfig.esp-vocat（仓库已有）
-# =============================================================================
+# 0) 加载 ESP-IDF（路径按本机修改）
 source /home/qmx/esp/esp-idf/export.sh
-
-idf.py -B build-esp-vocat \
-  -DSDKCONFIG=sdkconfig.esp-vocat \
-  set-target esp32s3
-
-idf.py -B build-esp-vocat \
-  -DSDKCONFIG=sdkconfig.esp-vocat \
-  build
-
-idf.py -B build-esp-vocat \
-  -DSDKCONFIG=sdkconfig.esp-vocat \
-  -p /dev/ttyUSB0 flash monitor
-
-
-# =============================================================================
-# 3) ESP-Show（S3 圆屏，仅 WiFi；硬件基于 Waveshare 1.85B）
-#    板级: main/boards/esp-show
-#    IDF:  v5.5.x
-#    配置: sdkconfig.esp-show（仓库已有）
-# =============================================================================
-source /home/qmx/esp/esp-idf/export.sh
-
-idf.py -B build-esp-show \
-  -DSDKCONFIG=sdkconfig.esp-show \
-  set-target esp32s3
-
-idf.py -B build-esp-show \
-  -DSDKCONFIG=sdkconfig.esp-show \
-  build
-
-idf.py -B build-esp-show \
-  -DSDKCONFIG=sdkconfig.esp-show \
-  -p /dev/ttyACM0 flash monitor
-
-
-# =============================================================================
-# 常用检查
-# =============================================================================
 # idf.py --version
-# grep CONFIG_IDF_TARGET= sdkconfig*
-# grep CONFIG_BOARD_TYPE_ sdkconfig*
-#
-# 换板后若 CMake 缓存混乱：删对应 build-* 再 set-target / build
-# rm -rf build-esp-show
 
-# 1. 照常编译
+# 1) 首次或换 target
+idf.py -B build-esp-show \
+  -DSDKCONFIG=sdkconfig.esp-show \
+  set-target esp32s3
+
+# 2) 编译
 idf.py -B build-esp-show \
   -DSDKCONFIG=sdkconfig.esp-show \
   build
 
-# 2. 合并成可整片烧录的 bin
+# 3) 烧录 + 监视
+idf.py -B build-esp-show \
+  -DSDKCONFIG=sdkconfig.esp-show \
+  -p /dev/ttyACM1 flash monitor
+
+# 4) 合并整片 bin（发版用）
 idf.py -B build-esp-show \
   -DSDKCONFIG=sdkconfig.esp-show \
   merge-bin
 
-# 3. 需要发版 zip 时手动打一下即可：
-
-
 mkdir -p releases
 zip -j releases/v2.0.51_esp-show.zip build-esp-show/merged-binary.bin
+
+# 换板后若 CMake 缓存混乱：删 build 再 set-target / build
+# rm -rf build-esp-show
