@@ -84,11 +84,18 @@ constexpr int32_t kDetailBtnH  = kRoundLayout ? 44 : 72;
 constexpr int32_t kDetailBtnGap    = 8;    // 竖排时两按钮间距（圆屏专用）
 constexpr int32_t kDetailSideInset = 40;
 
+// 圆屏详情页：返回键顶中，内容逐行下移。
+constexpr int32_t kDetailTopY     = kRoundLayout ? 6 : 0;
+constexpr int32_t kDetailTitleY   = kRoundLayout ? (kDetailTopY + kBackBtnSize + 4) : 0;
+constexpr int32_t kDetailMetaY    = kRoundLayout ? (kDetailTitleY + 22) : 0;
+constexpr int32_t kDetailPlayY    = kRoundLayout ? (kDetailMetaY + 10) : 0;
+constexpr int32_t kDetailAsrY     = kRoundLayout ? (kDetailPlayY + kDetailBtnH + kDetailBtnGap) : 0;
+
 // 录音列表行：圆屏收窄到跟随 kPanelSize，避免 420px 宽的文件名/删除按钮
 // 布局在 360 面板上溢出裁切。
-constexpr int32_t kListRowH        = kRoundLayout ? 76 : 88;
-constexpr int32_t kListDelBtnW     = kRoundLayout ? 64 : 96;
-constexpr int32_t kListDelBtnH     = kRoundLayout ? 40 : 56;
+constexpr int32_t kListRowH        = kRoundLayout ? 84 : 88;
+constexpr int32_t kListDelBtnW     = kRoundLayout ? 56 : 96;
+constexpr int32_t kListDelBtnH     = kRoundLayout ? 44 : 56;
 constexpr int32_t kListBottomReserve = kRoundLayout ? 40 : 56;
 
 constexpr uint32_t kColorBg = 0x0E1116;
@@ -472,6 +479,42 @@ void FormatFileSize(char* buf, size_t buf_size, size_t bytes) {
         std::snprintf(buf, buf_size, I18n::T("%.1f KB"), bytes / 1024.0);
     } else {
         std::snprintf(buf, buf_size, I18n::T("%u B"), static_cast<unsigned>(bytes));
+    }
+}
+
+// 列表行标题：圆屏用短日期时间，避免长文件名叠行。
+void FormatListTitle(const char* filename, char* buf, size_t buf_size) {
+    if (filename == nullptr || buf == nullptr || buf_size == 0) {
+        return;
+    }
+    buf[0] = '\0';
+    const char* stem = filename;
+    const char* slash = std::strrchr(filename, '/');
+    if (slash != nullptr) {
+        stem = slash + 1;
+    }
+
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    if (std::sscanf(stem, "REC_%*[^_]_%4d%2d%2d_%2d%2d%2d", &year, &month, &day, &hour,
+                    &minute, &second) == 6) {
+        if (kRoundLayout) {
+            std::snprintf(buf, buf_size, "%02d/%02d %02d:%02d", month, day, hour, minute);
+        } else {
+            std::snprintf(buf, buf_size, "%04d/%02d/%02d %02d:%02d:%02d", year, month, day,
+                          hour, minute, second);
+        }
+        return;
+    }
+
+    strlcpy(buf, stem, buf_size);
+    char* dot = std::strrchr(buf, '.');
+    if (dot != nullptr) {
+        *dot = '\0';
     }
 }
 
@@ -1994,26 +2037,42 @@ void RebuildFileList(bool schedule_fill) {
         lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_radius(row, kRoundLayout ? 14 : 16, LV_PART_MAIN);
         lv_obj_set_style_pad_hor(row, kRoundLayout ? 12 : 16, LV_PART_MAIN);
-        lv_obj_set_style_pad_ver(row, 8, LV_PART_MAIN);
+        lv_obj_set_style_pad_ver(row, kRoundLayout ? 10 : 8, LV_PART_MAIN);
         lv_obj_set_style_margin_bottom(row, kRoundLayout ? 8 : 12, LV_PART_MAIN);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(row, kRoundLayout ? 8 : 12, LV_PART_MAIN);
         lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(row, OnRowClicked, LV_EVENT_CLICKED, idx_ud);
         screen_swipe_back_ignore(row, true);
 
-        // 名字/提示行宽：圆屏跟随实际列表宽度收紧，否则 420 定宽在 360 面板
-        // 上会让长文件名的省略号落在删除按钮下面而不是可见边界处。
-        constexpr int32_t kNameW =
-            kRoundLayout ? (kPanelSize - 80 - 24 - kListDelBtnW - 8) : 420;
-        lv_obj_t* name = lv_label_create(row);
-        lv_label_set_text(name, s_files[i].name);
-        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(name, kNameW);
+        lv_obj_t* info = lv_obj_create(row);
+        lv_obj_remove_style_all(info);
+        lv_obj_set_flex_grow(info, 1);
+        lv_obj_set_height(info, LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(info, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(info, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_START);
+        lv_obj_set_style_pad_row(info, kRoundLayout ? 4 : 6, LV_PART_MAIN);
+        lv_obj_remove_flag(info, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(info, LV_OBJ_FLAG_CLICKABLE);
+
+        char title_buf[48];
+        if (kRoundLayout) {
+            FormatListTitle(s_files[i].name, title_buf, sizeof(title_buf));
+        } else {
+            strlcpy(title_buf, s_files[i].name, sizeof(title_buf));
+        }
+        lv_obj_t* name = lv_label_create(info);
+        lv_label_set_text(name, title_buf);
+        lv_label_set_long_mode(name, LV_LABEL_LONG_CLIP);
+        lv_obj_set_width(name, LV_PCT(100));
         lv_obj_set_style_text_color(name, lv_color_hex(kColorText), LV_PART_MAIN);
         lv_obj_set_style_text_font(name, &font_puhui_20_4, LV_PART_MAIN);
-        lv_obj_align(name, LV_ALIGN_LEFT_MID, 0, kRoundLayout ? -10 : -12);
 
-        lv_obj_t* hint = lv_label_create(row);
+        lv_obj_t* hint = lv_label_create(info);
         char dur[16];
         char size_buf[24];
         if (s_files[i].duration_ready) {
@@ -2022,20 +2081,22 @@ void RebuildFileList(bool schedule_fill) {
             std::snprintf(dur, sizeof(dur), "--:--");
         }
         FormatFileSize(size_buf, sizeof(size_buf), s_files[i].size_bytes);
-        char hint_buf[72];
-        std::snprintf(hint_buf, sizeof(hint_buf), I18n::T("时长 %s · %s · 点击查看"),
-                      dur, size_buf);
+        char hint_buf[48];
+        if (kRoundLayout) {
+            std::snprintf(hint_buf, sizeof(hint_buf), I18n::T("%s · %s"), dur, size_buf);
+        } else {
+            std::snprintf(hint_buf, sizeof(hint_buf), I18n::T("时长 %s · %s · 点击查看"),
+                          dur, size_buf);
+        }
         lv_label_set_text(hint, hint_buf);
-        lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(hint, kNameW);
+        lv_label_set_long_mode(hint, LV_LABEL_LONG_CLIP);
+        lv_obj_set_width(hint, LV_PCT(100));
         lv_obj_set_style_text_color(hint, lv_color_hex(kColorSubtle), LV_PART_MAIN);
         lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
-        lv_obj_align(hint, LV_ALIGN_LEFT_MID, 0, kRoundLayout ? 13 : 16);
 
         lv_obj_t* del = lv_button_create(row);
         lv_obj_remove_style_all(del);
         lv_obj_set_size(del, kListDelBtnW, kListDelBtnH);
-        lv_obj_align(del, LV_ALIGN_RIGHT_MID, 0, 0);
         lv_obj_set_style_radius(del, kRoundLayout ? 10 : 14, LV_PART_MAIN);
         lv_obj_set_style_bg_color(del, lv_color_hex(kColorDanger), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(del, LV_OPA_COVER, LV_PART_MAIN);
@@ -2118,8 +2179,7 @@ void BuildDetailPanel(lv_obj_t* parent) {
     lv_obj_remove_style_all(back);
     lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
     if constexpr (kRoundLayout) {
-        lv_obj_set_pos(back, kHeaderSideInset,
-                       kHeaderTopInset + (kHeaderContentH - kBackBtnSize) / 2);
+        lv_obj_align(back, LV_ALIGN_TOP_MID, 0, kDetailTopY);
     } else {
         lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
     }
@@ -2144,9 +2204,8 @@ void BuildDetailPanel(lv_obj_t* parent) {
                                                                 : &font_puhui_30_4,
                                LV_PART_MAIN);
     if constexpr (kRoundLayout) {
-        lv_obj_set_width(s_ui.detail_title, kPanelSize - kHeaderSideInset * 2);
-        const int title_y = kHeaderTopInset + (kHeaderContentH - 20) / 2;
-        lv_obj_align(s_ui.detail_title, LV_ALIGN_TOP_MID, 0, title_y);
+        lv_obj_set_width(s_ui.detail_title, kPanelSize - 80);
+        lv_obj_align(s_ui.detail_title, LV_ALIGN_TOP_MID, 0, kDetailTitleY);
     } else {
         lv_obj_set_width(s_ui.detail_title, kPanelSize - 16 - kBackBtnSize - 40);
         lv_obj_align(s_ui.detail_title, LV_ALIGN_LEFT_MID, 16 + kBackBtnSize + 8, 0);
@@ -2156,7 +2215,11 @@ void BuildDetailPanel(lv_obj_t* parent) {
     lv_label_set_text(s_ui.detail_meta, "");
     lv_obj_set_style_text_color(s_ui.detail_meta, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_ui.detail_meta, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_align(s_ui.detail_meta, LV_ALIGN_TOP_MID, 0, kHeaderH + (kRoundLayout ? 4 : 8));
+    if constexpr (kRoundLayout) {
+        lv_obj_align(s_ui.detail_meta, LV_ALIGN_TOP_MID, 0, kDetailMetaY);
+    } else {
+        lv_obj_align(s_ui.detail_meta, LV_ALIGN_TOP_MID, 0, kHeaderH + 8);
+    }
 
     // 操作按钮：大屏并排放（play 左 / asr 右）；圆屏改成竖排堆叠，300px
     // 的按钮宽度在 360 面板上根本放不下两个并排。
@@ -2165,7 +2228,7 @@ void BuildDetailPanel(lv_obj_t* parent) {
     lv_obj_remove_style_all(play);
     lv_obj_set_size(play, kDetailBtnW, kDetailBtnH);
     if constexpr (kRoundLayout) {
-        lv_obj_align(play, LV_ALIGN_TOP_MID, 0, kHeaderH + 30);
+        lv_obj_align(play, LV_ALIGN_TOP_MID, 0, kDetailPlayY);
     } else {
         lv_obj_align(play, LV_ALIGN_TOP_LEFT, 40, kHeaderH + 48);
     }
@@ -2190,7 +2253,7 @@ void BuildDetailPanel(lv_obj_t* parent) {
     lv_obj_remove_style_all(asr);
     lv_obj_set_size(asr, kDetailBtnW, kDetailBtnH);
     if constexpr (kRoundLayout) {
-        lv_obj_align(asr, LV_ALIGN_TOP_MID, 0, kHeaderH + 30 + kDetailBtnH + 8);
+        lv_obj_align(asr, LV_ALIGN_TOP_MID, 0, kDetailAsrY);
     } else {
         lv_obj_align(asr, LV_ALIGN_TOP_RIGHT, -40, kHeaderH + 48);
     }
@@ -2212,7 +2275,11 @@ void BuildDetailPanel(lv_obj_t* parent) {
 
     // 竖排按钮占用的总高度：圆屏两个按钮 + 间隙，大屏保持原来单行 72px。
     constexpr int32_t kDetailBtnsBlockH =
-        kRoundLayout ? (30 + kDetailBtnH * 2 + 8) : (48 + 72);
+        kRoundLayout ? (kDetailAsrY + kDetailBtnH - kDetailPlayY)
+                     : (48 + 72);
+    constexpr int32_t kDetailStatusY =
+        kRoundLayout ? (kDetailAsrY + kDetailBtnH + 10)
+                     : (kHeaderH + kDetailBtnsBlockH + 16);
 
     s_ui.detail_status = lv_label_create(panel);
     lv_label_set_text(s_ui.detail_status, "");
@@ -2226,13 +2293,13 @@ void BuildDetailPanel(lv_obj_t* parent) {
         lv_obj_set_style_text_align(s_ui.detail_status, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     }
     lv_obj_align(s_ui.detail_status, LV_ALIGN_TOP_MID, 0,
-                kHeaderH + kDetailBtnsBlockH + (kRoundLayout ? 8 : 16));
+                kRoundLayout ? kDetailStatusY : kHeaderH + kDetailBtnsBlockH + 16);
     screen_make_input_passive(s_ui.detail_status);
 
     // 圆屏给 status 文字预留出约两行的高度（提示语常有较长的中文句子），
     // 再往下才是结果框，避免长状态文案和结果框标题重叠。
     const int32_t result_box_y =
-        kHeaderH + kDetailBtnsBlockH + (kRoundLayout ? (8 + 48) : 48);
+        kRoundLayout ? (kDetailStatusY + 48) : (kHeaderH + kDetailBtnsBlockH + 48);
     lv_obj_t* result_box = lv_obj_create(panel);
     screen_strip_obj_chrome(result_box);
     lv_obj_set_size(result_box, kPanelSize - (kRoundLayout ? 80 : 48),
