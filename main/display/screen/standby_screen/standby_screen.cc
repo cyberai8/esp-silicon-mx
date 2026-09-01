@@ -58,7 +58,7 @@ constexpr int kDigitW = kRoundSmall ? 68 : 88;
 constexpr int kDigitH = kRoundSmall ? 112 : 148;
 constexpr int kDigitHalf = kDigitH / 2;
 constexpr int kPairGap = kRoundSmall ? 3 : 6;
-constexpr int kGroupGap = kRoundSmall ? 16 : 32;
+constexpr int kColonW = kRoundSmall ? 20 : 28;
 constexpr uint32_t kCardBg = 0x1C1C1E;
 constexpr uint32_t kCardBgTop = 0x2A2A2E;
 constexpr uint32_t kHingeColor = 0x0A0A0A;
@@ -455,6 +455,17 @@ void CreateFlipDigit(lv_obj_t* parent, FlipDigit* d) {
     d->animating = false;
 }
 
+lv_obj_t* CreateClockColon(lv_obj_t* parent) {
+    lv_obj_t* colon = lv_label_create(parent);
+    lv_label_set_text(colon, ":");
+    lv_obj_set_style_text_font(colon, StandbyDigitFont(), LV_PART_MAIN);
+    lv_obj_set_style_text_color(colon, lv_color_hex(kDigitColor), LV_PART_MAIN);
+    lv_obj_set_style_text_align(colon, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(colon, kColonW);
+    lv_obj_remove_flag(colon, LV_OBJ_FLAG_CLICKABLE);
+    return colon;
+}
+
 lv_obj_t* CreateFlipClockRow(lv_obj_t* parent) {
     lv_obj_t* row = lv_obj_create(parent);
     lv_obj_remove_style_all(row);
@@ -469,11 +480,15 @@ lv_obj_t* CreateFlipClockRow(lv_obj_t* parent) {
     for (int i = 0; i < kDigitCount; ++i) {
         if (i > 0) {
             const bool group_break = (i % 2 == 0);
-            lv_obj_t* gap = lv_obj_create(row);
-            lv_obj_remove_style_all(gap);
-            lv_obj_set_size(gap, group_break ? kGroupGap : kPairGap, 1);
-            lv_obj_set_style_bg_opa(gap, LV_OPA_TRANSP, LV_PART_MAIN);
-            lv_obj_remove_flag(gap, LV_OBJ_FLAG_CLICKABLE);
+            if (group_break) {
+                CreateClockColon(row);
+            } else {
+                lv_obj_t* gap = lv_obj_create(row);
+                lv_obj_remove_style_all(gap);
+                lv_obj_set_size(gap, kPairGap, 1);
+                lv_obj_set_style_bg_opa(gap, LV_OPA_TRANSP, LV_PART_MAIN);
+                lv_obj_remove_flag(gap, LV_OBJ_FLAG_CLICKABLE);
+            }
         }
         CreateFlipDigit(row, &s_ui.digits[i]);
     }
