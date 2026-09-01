@@ -83,13 +83,14 @@ constexpr int32_t kDetailBtnW  = kRoundLayout ? kPanelSize - 80 : 300;
 constexpr int32_t kDetailBtnH  = kRoundLayout ? 44 : 72;
 constexpr int32_t kDetailBtnGap    = 8;    // 竖排时两按钮间距（圆屏专用）
 constexpr int32_t kDetailSideInset = 40;
+constexpr int32_t kDetailContentW  = kRoundLayout ? (kPanelSize - 128) : (kPanelSize - 80);
 
-// 圆屏详情页：返回键顶中，内容逐行下移。
-constexpr int32_t kDetailTopY     = kRoundLayout ? 6 : 0;
-constexpr int32_t kDetailTitleY   = kRoundLayout ? (kDetailTopY + kBackBtnSize + 4) : 0;
-constexpr int32_t kDetailMetaY    = kRoundLayout ? (kDetailTitleY + 22) : 0;
-constexpr int32_t kDetailPlayY    = kRoundLayout ? (kDetailMetaY + 10) : 0;
-constexpr int32_t kDetailAsrY     = kRoundLayout ? (kDetailPlayY + kDetailBtnH + kDetailBtnGap) : 0;
+// 圆屏详情页：返回顶中，短标题居中，避开圆弧裁切。
+constexpr int32_t kDetailTopY    = kRoundLayout ? 8 : 0;
+constexpr int32_t kDetailTitleY  = kRoundLayout ? 48 : 0;
+constexpr int32_t kDetailMetaY   = kRoundLayout ? 72 : 0;
+constexpr int32_t kDetailPlayY   = kRoundLayout ? 96 : 0;
+constexpr int32_t kDetailAsrY    = kRoundLayout ? (kDetailPlayY + kDetailBtnH + kDetailBtnGap) : 0;
 
 // 录音列表行：圆屏收窄到跟随 kPanelSize，避免 420px 宽的文件名/删除按钮
 // 布局在 360 面板上溢出裁切。
@@ -174,6 +175,8 @@ TaskHandle_t s_asr_query_task = nullptr;  // 查询转写结果
 TaskHandle_t s_meta_task = nullptr;
 StackType_t* s_record_stack = nullptr;
 StaticTask_t* s_record_tcb = nullptr;
+StackType_t* s_meta_stack = nullptr;
+StaticTask_t* s_meta_tcb = nullptr;
 lv_timer_t* s_tick_timer = nullptr;
 bool s_wake_disabled_by_us = false;
 std::atomic<bool> s_stop_meta{false};
@@ -377,12 +380,35 @@ void DisableWakeWordIfNeeded() {
     vTaskDelay(pdMS_TO_TICKS(150));
 }
 
-void RestoreWakeWordIfNeeded() {
+// I2S DMA 需要较大的连续 internal 块；堆碎片时 esp_codec_dev 可能在失败路径崩溃。
+constexpr size_t kMinLargestForWakeWord = 8192;
+
+void RestoreWakeWordIfNeededImpl(bool deferred_retry) {
     if (!s_wake_disabled_by_us) {
+        return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(deferred_retry ? 200 : 80));
+    const size_t largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    if (largest < kMinLargestForWakeWord) {
+        if (!deferred_retry) {
+            ESP_LOGW(TAG, "defer wake word restore: largest=%u",
+                     static_cast<unsigned>(largest));
+            Application::GetInstance().Schedule([]() {
+                RestoreWakeWordIfNeededImpl(true);
+            });
+        } else {
+            ESP_LOGW(TAG, "skip wake word restore: largest=%u",
+                     static_cast<unsigned>(largest));
+        }
         return;
     }
     Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
     s_wake_disabled_by_us = false;
+}
+
+void RestoreWakeWordIfNeeded() {
+    RestoreWakeWordIfNeededImpl(false);
 }
 
 // 进入录音 / 点「开始录音」前释放云端监听与唤醒词 AFE，腾出 internal RAM
@@ -878,7 +904,6 @@ done:
         }
     }
     encoder.reset();
-    RestoreWakeWordIfNeeded();
 
     s_state.store(RecState::Idle);
     if (esp_lv_adapter_lock(-1) == ESP_OK) {
@@ -1208,9 +1233,29 @@ void ScheduleDurationFill() {
         return;
     }
     s_stop_meta.store(false);
-    if (xTaskCreatePinnedToCore(DurationFillTask, "rec_meta", 8 * 1024, nullptr,
-                                tskIDLE_PRIORITY + 1, &s_meta_task, 0) != pdPASS) {
+    constexpr uint32_t kMetaTaskStack = 8 * 1024;
+    if (xTaskCreatePinnedToCore(DurationFillTask, "rec_meta", kMetaTaskStack, nullptr,
+                                tskIDLE_PRIORITY + 1, &s_meta_task, 0) == pdPASS) {
+        return;
+    }
+    ESP_LOGW(TAG, "duration fill task internal create failed, trying SPIRAM stack");
+    if (s_meta_stack == nullptr) {
+        s_meta_stack = static_cast<StackType_t*>(heap_caps_malloc(
+            kMetaTaskStack, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+    if (s_meta_tcb == nullptr) {
+        s_meta_tcb = static_cast<StaticTask_t*>(heap_caps_malloc(
+            sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+    if (s_meta_stack == nullptr || s_meta_tcb == nullptr) {
         s_meta_task = nullptr;
+        ESP_LOGW(TAG, "duration fill task start failed");
+        return;
+    }
+    s_meta_task = xTaskCreateStaticPinnedToCore(
+        DurationFillTask, "rec_meta", kMetaTaskStack, nullptr,
+        tskIDLE_PRIORITY + 1, s_meta_stack, s_meta_tcb, 0);
+    if (s_meta_task == nullptr) {
         ESP_LOGW(TAG, "duration fill task start failed");
     }
 }
@@ -1437,7 +1482,6 @@ void PlayTask(void* arg) {
     fclose(file);
 
     as.ResetDecoder();
-    RestoreWakeWordIfNeeded();
 
     s_playing_path[0] = '\0';
     s_state.store(RecState::Idle);
@@ -1472,8 +1516,6 @@ void StopPlayback() {
         s_state.store(RecState::Idle);
     }
     Application::GetInstance().GetAudioService().ResetDecoder();
-    // PlayTask 若已被打断退出，这里兜底恢复唤醒词。
-    RestoreWakeWordIfNeeded();
     UpdateDetailPlayButton();
 }
 
@@ -1949,15 +1991,25 @@ void ShowDetail(int idx) {
     strlcpy(s_detail_name, entry.name, sizeof(s_detail_name));
 
     if (s_ui.detail_title != nullptr) {
-        lv_label_set_text(s_ui.detail_title, entry.name);
+        char title_buf[48];
+        if (kRoundLayout) {
+            FormatListTitle(entry.name, title_buf, sizeof(title_buf));
+        } else {
+            strlcpy(title_buf, entry.name, sizeof(title_buf));
+        }
+        lv_label_set_text(s_ui.detail_title, title_buf);
     }
     if (s_ui.detail_meta != nullptr) {
         char dur[16];
         char size_buf[24];
         FormatTimer(dur, sizeof(dur), entry.duration_sec);
         FormatFileSize(size_buf, sizeof(size_buf), entry.size_bytes);
-        char meta[80];
-        std::snprintf(meta, sizeof(meta), I18n::T("时长 %s · %s"), dur, size_buf);
+        char meta[48];
+        if (kRoundLayout) {
+            std::snprintf(meta, sizeof(meta), I18n::T("%s · %s"), dur, size_buf);
+        } else {
+            std::snprintf(meta, sizeof(meta), I18n::T("时长 %s · %s"), dur, size_buf);
+        }
         lv_label_set_text(s_ui.detail_meta, meta);
     }
     SetDetailStatusText("");
@@ -2168,46 +2220,57 @@ void BuildDetailPanel(lv_obj_t* parent) {
     lv_obj_add_flag(panel, LV_OBJ_FLAG_HIDDEN);
     screen_swipe_back_ignore(panel, true);
 
-    lv_obj_t* header = lv_obj_create(panel);
-    screen_strip_obj_chrome(header);
-    lv_obj_set_size(header, kPanelSize, kHeaderH);
-    lv_obj_set_pos(header, 0, 0);
-    lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+    auto make_back_btn = [&](lv_obj_t* parent_btn, int32_t y_ofs) {
+        lv_obj_t* back = lv_button_create(parent_btn);
+        lv_obj_remove_style_all(back);
+        lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
+        if constexpr (kRoundLayout) {
+            lv_obj_align(back, LV_ALIGN_TOP_MID, 0, y_ofs);
+        } else {
+            lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
+        }
+        lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
+                                  Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+        lv_obj_set_style_bg_opa(back, LV_OPA_20, Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+        lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_add_event_cb(back, OnDetailBackClicked, LV_EVENT_CLICKED, nullptr);
+        screen_swipe_back_ignore(back, true);
 
-    lv_obj_t* back = lv_button_create(header);
-    lv_obj_remove_style_all(back);
-    lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
+        lv_obj_t* back_icon = lv_image_create(back);
+        lv_image_set_src(back_icon, "A:ic_app_back.spng");
+        lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(back_icon);
+        return back;
+    };
+
     if constexpr (kRoundLayout) {
-        lv_obj_align(back, LV_ALIGN_TOP_MID, 0, kDetailTopY);
-    } else {
-        lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
-    }
-    lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
-                              Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-    lv_obj_set_style_bg_opa(back, LV_OPA_20, Sel(LV_PART_MAIN, LV_STATE_PRESSED));
-    lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_add_event_cb(back, OnDetailBackClicked, LV_EVENT_CLICKED, nullptr);
-    screen_swipe_back_ignore(back, true);
+        make_back_btn(panel, kDetailTopY);
 
-    lv_obj_t* back_icon = lv_image_create(back);
-    lv_image_set_src(back_icon, "A:ic_app_back.spng");
-    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(back_icon);
-
-    s_ui.detail_title = lv_label_create(header);
-    lv_label_set_text(s_ui.detail_title, "");
-    lv_label_set_long_mode(s_ui.detail_title, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_color(s_ui.detail_title, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_ui.detail_title, kRoundLayout ? &font_puhui_20_4
-                                                                : &font_puhui_30_4,
-                               LV_PART_MAIN);
-    if constexpr (kRoundLayout) {
-        lv_obj_set_width(s_ui.detail_title, kPanelSize - 80);
+        s_ui.detail_title = lv_label_create(panel);
+        lv_label_set_text(s_ui.detail_title, "");
+        lv_label_set_long_mode(s_ui.detail_title, LV_LABEL_LONG_CLIP);
+        lv_obj_set_width(s_ui.detail_title, kDetailContentW);
+        lv_obj_set_style_text_color(s_ui.detail_title, lv_color_white(), LV_PART_MAIN);
+        lv_obj_set_style_text_font(s_ui.detail_title, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_set_style_text_align(s_ui.detail_title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
         lv_obj_align(s_ui.detail_title, LV_ALIGN_TOP_MID, 0, kDetailTitleY);
     } else {
+        lv_obj_t* header = lv_obj_create(panel);
+        screen_strip_obj_chrome(header);
+        lv_obj_set_size(header, kPanelSize, kHeaderH);
+        lv_obj_set_pos(header, 0, 0);
+        lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+
+        make_back_btn(header, 0);
+
+        s_ui.detail_title = lv_label_create(header);
+        lv_label_set_text(s_ui.detail_title, "");
+        lv_label_set_long_mode(s_ui.detail_title, LV_LABEL_LONG_DOT);
         lv_obj_set_width(s_ui.detail_title, kPanelSize - 16 - kBackBtnSize - 40);
+        lv_obj_set_style_text_color(s_ui.detail_title, lv_color_white(), LV_PART_MAIN);
+        lv_obj_set_style_text_font(s_ui.detail_title, &font_puhui_30_4, LV_PART_MAIN);
         lv_obj_align(s_ui.detail_title, LV_ALIGN_LEFT_MID, 16 + kBackBtnSize + 8, 0);
     }
 
@@ -2216,13 +2279,15 @@ void BuildDetailPanel(lv_obj_t* parent) {
     lv_obj_set_style_text_color(s_ui.detail_meta, lv_color_hex(kColorSubtle), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_ui.detail_meta, &font_puhui_20_4, LV_PART_MAIN);
     if constexpr (kRoundLayout) {
+        lv_obj_set_width(s_ui.detail_meta, kDetailContentW);
+        lv_obj_set_style_text_align(s_ui.detail_meta, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_label_set_long_mode(s_ui.detail_meta, LV_LABEL_LONG_CLIP);
         lv_obj_align(s_ui.detail_meta, LV_ALIGN_TOP_MID, 0, kDetailMetaY);
     } else {
         lv_obj_align(s_ui.detail_meta, LV_ALIGN_TOP_MID, 0, kHeaderH + 8);
     }
 
-    // 操作按钮：大屏并排放（play 左 / asr 右）；圆屏改成竖排堆叠，300px
-    // 的按钮宽度在 360 面板上根本放不下两个并排。
+    // 操作按钮：大屏并排放（play 左 / asr 右）；圆屏改成竖排堆叠。
     lv_obj_t* play = lv_button_create(panel);
     s_ui.detail_play_btn = play;
     lv_obj_remove_style_all(play);
@@ -2283,7 +2348,7 @@ void BuildDetailPanel(lv_obj_t* parent) {
 
     s_ui.detail_status = lv_label_create(panel);
     lv_label_set_text(s_ui.detail_status, "");
-    lv_obj_set_width(s_ui.detail_status, kRoundLayout ? kPanelSize - 80 : kPanelSize - 80);
+    lv_obj_set_width(s_ui.detail_status, kDetailContentW);
     lv_label_set_long_mode(s_ui.detail_status, kRoundLayout ? LV_LABEL_LONG_WRAP
                                                              : LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_color(s_ui.detail_status, lv_color_hex(kColorSubtle),
@@ -2302,8 +2367,8 @@ void BuildDetailPanel(lv_obj_t* parent) {
         kRoundLayout ? (kDetailStatusY + 48) : (kHeaderH + kDetailBtnsBlockH + 48);
     lv_obj_t* result_box = lv_obj_create(panel);
     screen_strip_obj_chrome(result_box);
-    lv_obj_set_size(result_box, kPanelSize - (kRoundLayout ? 80 : 48),
-                    kPanelSize - result_box_y - (kRoundLayout ? 28 : 0));
+    lv_obj_set_size(result_box, kDetailContentW,
+                    kPanelSize - result_box_y - (kRoundLayout ? 24 : 0));
     lv_obj_align(result_box, LV_ALIGN_TOP_MID, 0, result_box_y);
     lv_obj_set_style_bg_color(result_box, lv_color_hex(kColorCard), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(result_box, LV_OPA_COVER, LV_PART_MAIN);
@@ -2315,7 +2380,7 @@ void BuildDetailPanel(lv_obj_t* parent) {
     s_ui.detail_result = lv_label_create(result_box);
     lv_label_set_text(s_ui.detail_result, "");
     lv_obj_set_width(s_ui.detail_result,
-                     kPanelSize - (kRoundLayout ? 80 + 24 : 48 + 40));
+                     kDetailContentW - (kRoundLayout ? 24 : 40));
     lv_label_set_long_mode(s_ui.detail_result, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(s_ui.detail_result, lv_color_hex(kColorText),
                                 LV_PART_MAIN);
