@@ -327,6 +327,9 @@ std::atomic<bool> s_active{false};
 std::atomic<bool> s_worker_stop{false};
 std::atomic<int> s_job_index{-1};
 TaskHandle_t s_worker = nullptr;
+lv_timer_t* s_decode_defer_timer = nullptr;
+constexpr uint32_t kGalleryDecodeDeferMs =
+    (DISPLAY_WIDTH == 360 && DISPLAY_HEIGHT == 360) ? 2500u : 600u;
 #endif
 
 uint8_t* s_show_buf = nullptr;
@@ -592,6 +595,32 @@ void StopWorker() {
     s_worker = nullptr;
 }
 
+void CancelDecodeDeferTimer() {
+    if (s_decode_defer_timer != nullptr) {
+        lv_timer_delete(s_decode_defer_timer);
+        s_decode_defer_timer = nullptr;
+    }
+}
+
+void OnDecodeDeferTimer(lv_timer_t* timer) {
+    if (s_decode_defer_timer == timer) {
+        s_decode_defer_timer = nullptr;
+    }
+    if (!s_alive.load(std::memory_order_relaxed) ||
+        !s_active.load(std::memory_order_relaxed) || s_images.empty()) {
+        return;
+    }
+    if (s_show_buf == nullptr) {
+        StartDecode(s_current_index);
+    }
+}
+
+void ScheduleDecodeAfterSettle() {
+    CancelDecodeDeferTimer();
+    s_decode_defer_timer = lv_timer_create(OnDecodeDeferTimer, kGalleryDecodeDeferMs, nullptr);
+    lv_timer_set_repeat_count(s_decode_defer_timer, 1);
+}
+
 void StartDecode(int index) {
     if (s_images.empty()) {
         return;
@@ -705,7 +734,7 @@ void StandbyGallery_SetActive(bool active) {
         return;
     }
     const bool was_active = s_active.load(std::memory_order_relaxed);
-    // 待机页每秒 ApplyFaceVisibility 会再次进来；已激活时不要重解当前张。
+    // 已激活时仅同步显隐；勿重复触发解码。
     if (was_active == active) {
         if (active) {
             lv_obj_remove_flag(s_ui.root, LV_OBJ_FLAG_HIDDEN);
@@ -724,9 +753,8 @@ void StandbyGallery_SetActive(bool active) {
         ESP_LOGI(TAG, "gallery face on, images=%d idx=%d",
                  static_cast<int>(s_images.size()), s_current_index);
         if (!s_images.empty()) {
-            // 已有画面时先保留，继续轮播；没有才开始解第一张。
             if (s_show_buf == nullptr) {
-                StartDecode(s_current_index);
+                ScheduleDecodeAfterSettle();
             }
             StartSlideTimer();
         } else if (s_ui.hint) {
@@ -736,6 +764,7 @@ void StandbyGallery_SetActive(bool active) {
     } else {
         lv_obj_add_flag(s_ui.root, LV_OBJ_FLAG_HIDDEN);
         StopSlideTimer();
+        CancelDecodeDeferTimer();
 #if defined(ESP_PLATFORM)
         CancelRetryTimer();
 #endif
@@ -748,6 +777,7 @@ void StandbyGallery_Destroy() {
     s_active.store(false, std::memory_order_release);
     StopSlideTimer();
 #if defined(ESP_PLATFORM)
+    CancelDecodeDeferTimer();
     CancelRetryTimer();
     StopWorker();
 #endif

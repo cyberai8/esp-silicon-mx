@@ -47,10 +47,13 @@ constexpr int kPanelSize = 720;
 
 constexpr int kChargeFxW = kRoundSmall ? kPanelSize : 560;
 constexpr int kChargeFxH = kRoundSmall ? 160 : 360;
-constexpr int kParticleCount = kRoundSmall ? 28 : 52;
+constexpr int kParticleCount = kRoundSmall ? 16 : 52;
 constexpr uint32_t kChargeBlueSoft = 0x59B2FF;
 constexpr uint32_t kChargeBlueBright = 0x9AD0FF;
-constexpr uint32_t kParticleTickMs = 33;
+// 圆屏 QSPI 条带刷新慢；降低粒子帧率，避免与相册/天气抢 flush 触发 task_wdt。
+constexpr uint32_t kParticleTickMs = kRoundSmall ? 50 : 33;
+constexpr uint32_t kChargeEffectDeferMs = kRoundSmall ? 2500 : 800;
+constexpr uint32_t kWeatherRetryMs = 2000;
 
 // 翻页时钟：大屏 HH MM SS；圆屏 HH MM，用 120 号数字放大填满安全区。
 constexpr int kDigitCount = kRoundSmall ? 4 : 6;
@@ -156,6 +159,10 @@ struct UiState {
     bool last_charging = false;
     bool charge_primed = false;
     bool clock_primed = false;
+    bool last_activating = false;
+    int last_weather_date_key = -1;
+    int pending_charge_level = 0;
+    lv_timer_t* charge_defer_timer = nullptr;
 
     StandbyFace face = StandbyFace::Weather;
     uint32_t weather_ticks = 0;
@@ -797,6 +804,19 @@ void WeatherFetchTask(void* arg) {
         return;
     }
 
+    const auto& cached = WeatherService::Instance().DeviceCached();
+    if (cached.valid) {
+        if (esp_lv_adapter_lock(-1) == ESP_OK) {
+            if (s_weather_session.load() == my_session && s_ui.screen != nullptr) {
+                s_ui.weather_fetching = false;
+                ApplyWeatherData(cached, true);
+            }
+            esp_lv_adapter_unlock();
+        }
+        vTaskDelete(nullptr);
+        return;
+    }
+
     if (!HttpsInternalRamReady()) {
         ESP_LOGW(TAG, "weather deferred, largest_int=%u internal=%u",
                  static_cast<unsigned>(HttpsLargestInternalBlock()),
@@ -842,6 +862,10 @@ void TriggerWeatherFetch() {
         return;
     }
     if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
+        return;
+    }
+    if (WeatherService::Instance().DeviceCached().valid) {
+        ApplyWeatherData(WeatherService::Instance().DeviceCached(), true);
         return;
     }
     s_ui.weather_fetching = true;
@@ -1083,7 +1107,7 @@ void FormatDateText(char* buf, size_t len, const struct tm& tm_info, bool have_t
     }
 }
 
-void UpdateWeatherDateLabels() {
+void UpdateWeatherDateLabelsIfChanged() {
     if (s_ui.weather_date_lbl == nullptr || s_ui.weather_week_lbl == nullptr) {
         return;
     }
@@ -1091,6 +1115,15 @@ void UpdateWeatherDateLabels() {
     struct tm tm_info = {};
     const bool have_time =
         localtime_r(&now, &tm_info) != nullptr && tm_info.tm_year >= 2025 - 1900;
+    const int date_key = have_time
+                             ? ((tm_info.tm_yday << 5) | (tm_info.tm_hour << 3) |
+                                (tm_info.tm_min >> 3))
+                             : -1;
+    if (date_key == s_ui.last_weather_date_key) {
+        return;
+    }
+    s_ui.last_weather_date_key = date_key;
+
     if (!have_time) {
         lv_label_set_text(s_ui.weather_date_lbl, "--/--");
         lv_label_set_text(s_ui.weather_week_lbl, I18n::T("周-"));
@@ -1115,6 +1148,7 @@ void UpdateWeatherDateLabels() {
 }
 
 void StopChargeEffect();
+void CancelChargeDeferTimer();
 void StartChargeEffect(int battery_level);
 
 uint32_t ChargeRand() {
@@ -1156,7 +1190,26 @@ void RespawnParticle(Particle* p, bool birth_at_bottom) {
     lv_obj_set_style_bg_opa(p->obj, LV_OPA_COVER, LV_PART_MAIN);
 }
 
+void CancelChargeDeferTimer() {
+    if (s_ui.charge_defer_timer != nullptr) {
+        lv_timer_delete(s_ui.charge_defer_timer);
+        s_ui.charge_defer_timer = nullptr;
+    }
+}
+
+void OnChargeDeferTimer(lv_timer_t* timer) {
+    if (s_ui.charge_defer_timer == timer) {
+        s_ui.charge_defer_timer = nullptr;
+    }
+    if (!s_ui.last_charging || s_ui.charge_playing || s_ui.screen == nullptr) {
+        return;
+    }
+    StartChargeEffect(s_ui.pending_charge_level);
+    ApplyFaceVisibility();
+}
+
 void StopChargeEffect() {
+    CancelChargeDeferTimer();
     if (s_ui.charge_tick_timer != nullptr) {
         lv_timer_delete(s_ui.charge_tick_timer);
         s_ui.charge_tick_timer = nullptr;
@@ -1281,13 +1334,22 @@ void SyncChargeEffect(bool charging, int battery_level) {
 
     if (charging) {
         if (!s_ui.charge_playing) {
-            StartChargeEffect(battery_level);
+            s_ui.pending_charge_level = battery_level;
+            if (s_ui.charge_defer_timer == nullptr) {
+                s_ui.charge_defer_timer =
+                    lv_timer_create(OnChargeDeferTimer, kChargeEffectDeferMs, nullptr);
+                lv_timer_set_repeat_count(s_ui.charge_defer_timer, 1);
+            }
         } else {
             UpdateChargeTip(battery_level);
         }
-    } else if (s_ui.charge_playing) {
-        ESP_LOGI(TAG, "charge unplugged, stop effect");
-        StopChargeEffect();
+    } else {
+        CancelChargeDeferTimer();
+        if (s_ui.charge_playing) {
+            ESP_LOGI(TAG, "charge unplugged, stop effect");
+            StopChargeEffect();
+            ApplyFaceVisibility();
+        }
     }
     s_ui.last_charging = charging;
 }
@@ -1336,14 +1398,17 @@ void UpdateClockLabels() {
         }
         SyncChargeEffect(charging, battery_level);
     }
-
-    ApplyFaceVisibility();
 }
 
 void OnClockTimer(lv_timer_t* /*timer*/) {
     UpdateClockLabels();
-    UpdateWeatherDateLabels();
+    UpdateWeatherDateLabelsIfChanged();
     s_ui.weather_ticks++;
+    const bool activating = Application::GetInstance().HasPendingActivation();
+    if (activating != s_ui.last_activating) {
+        s_ui.last_activating = activating;
+        ApplyFaceVisibility();
+    }
     const uint32_t interval =
         s_ui.weather_ok ? kWeatherRefreshOkSec : kWeatherRefreshFailSec;
     if (s_ui.weather_ticks > 0 && (s_ui.weather_ticks % interval) == 0) {
@@ -1352,17 +1417,13 @@ void OnClockTimer(lv_timer_t* /*timer*/) {
 }
 
 void ScheduleInitialWeatherFetch() {
-    // 每 3 秒检查一次：
-    //  1) 如果 application.cc 的预拉取已把天气缓存到 WeatherService，直接上屏
-    //  2) 否则尝试 TriggerWeatherFetch() 自行拉取
-    // 最多重试 40 次（2 分钟），成功后停止。
+    // 进待机后先等 LVGL 首帧/QSPI flush 稳定，再拉天气；间隔加大减轻 internal 碎片。
     struct RetryCtx { int remaining; };
-    auto* ctx = new RetryCtx{240};  // 500ms × 240 ≈ 2 分钟
+    auto* ctx = new RetryCtx{60};  // 2s × 60 ≈ 2 分钟
     lv_timer_t* timer = lv_timer_create(
         [](lv_timer_t* timer) {
             auto* c = static_cast<RetryCtx*>(lv_timer_get_user_data(timer));
 
-            // 优先检查缓存：application.cc 的预拉取可能已完成
             if (!s_ui.weather_ok && s_ui.screen != nullptr) {
                 const auto& cached = WeatherService::Instance().DeviceCached();
                 if (cached.valid) {
@@ -1379,7 +1440,7 @@ void ScheduleInitialWeatherFetch() {
                 return;
             }
 
-            if (!s_ui.weather_fetching) {
+            if (!s_ui.weather_fetching && HttpsInternalRamReady()) {
                 TriggerWeatherFetch();
             }
             if (s_ui.weather_fetching || --c->remaining <= 0) {
@@ -1387,7 +1448,18 @@ void ScheduleInitialWeatherFetch() {
                 lv_timer_delete(timer);
             }
         },
-        500, ctx);
+        kWeatherRetryMs, ctx);
+    lv_timer_set_repeat_count(timer, -1);
+    lv_timer_pause(timer);
+    lv_timer_t* kick = lv_timer_create(
+        [](lv_timer_t* kick_timer) {
+            auto* main_timer =
+                static_cast<lv_timer_t*>(lv_timer_get_user_data(kick_timer));
+            lv_timer_delete(kick_timer);
+            lv_timer_resume(main_timer);
+        },
+        kChargeEffectDeferMs, timer);
+    lv_timer_set_repeat_count(kick, 1);
 }
 
 void CancelLongPressHomeTimer() {
@@ -1573,7 +1645,8 @@ lv_obj_t* StandbyScreen::Create() {
     screen_make_input_passive(s_ui.face_dots);
 
     UpdateClockLabels();
-    UpdateWeatherDateLabels();
+    UpdateWeatherDateLabelsIfChanged();
+    s_ui.last_activating = Application::GetInstance().HasPendingActivation();
     ApplyFaceVisibility();
     if (WeatherService::Instance().DeviceCached().valid) {
         ApplyWeatherData(WeatherService::Instance().DeviceCached(), true);
