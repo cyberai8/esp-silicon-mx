@@ -5,7 +5,9 @@
 #include "backlight.h"
 #include "bq27220_gauge.h"
 #include "button.h"
+#include "digital_people_screen/digital_people_screen.h"
 #include "display/lv_adapter_display.h"
+#include "home_screen/home_screen.h"
 #include "SdCardManager.hpp"
 #include "settings.h"
 #include "wifi_board.h"
@@ -566,7 +568,11 @@ private:
                 EnterWifiConfigMode();
                 return;
             }
-            app.ToggleChatState();
+            if (DigitalPeopleScreen::IsActive()) {
+                app.ToggleChatState();
+            } else {
+                HomeScreen::OpenDigitalPeopleAsync();
+            }
         });
     }
 
@@ -809,7 +815,11 @@ private:
                                     const int delta = abs(static_cast<int>(ax) - prev_ax);
                                     if (delta > 12000) {
                                         ESP_LOGI(TAG, "QMI8658 shake score=%d", delta);
-                                        Application::GetInstance().ToggleChatState();
+                                        if (DigitalPeopleScreen::IsActive()) {
+                                            Application::GetInstance().ToggleChatState();
+                                        } else {
+                                            HomeScreen::OpenDigitalPeopleAsync();
+                                        }
                                         vTaskDelay(pdMS_TO_TICKS(1500));
                                     }
                                 }

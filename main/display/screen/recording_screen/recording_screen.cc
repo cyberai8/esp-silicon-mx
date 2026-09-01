@@ -387,6 +387,10 @@ void RestoreWakeWordIfNeededImpl(bool deferred_retry) {
     if (!s_wake_disabled_by_us) {
         return;
     }
+    if (!Application::GetInstance().IsVoiceChatAllowed()) {
+        s_wake_disabled_by_us = false;
+        return;
+    }
     vTaskDelay(pdMS_TO_TICKS(deferred_retry ? 200 : 80));
     const size_t largest =
         heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);

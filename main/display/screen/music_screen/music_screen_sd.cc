@@ -1567,8 +1567,10 @@ void MusicScreenSd::LifecycleCallback(screen_lifecycle_event_t event) {
         ShutdownPlayTask();
         Application::GetInstance().GetAudioService().SetExternalPlaybackHold(false);
         if (s_wake_disabled_by_us) {
-            Application::GetInstance().GetAudioService().EnableWakeWordDetection(
-                true);
+            if (Application::GetInstance().IsVoiceChatAllowed()) {
+                Application::GetInstance().GetAudioService().EnableWakeWordDetection(
+                    true);
+            }
             s_wake_disabled_by_us = false;
         }
         s_screen_active = false;

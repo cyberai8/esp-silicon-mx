@@ -718,7 +718,7 @@ void info_lifecycle_cb(screen_lifecycle_event_t event) {
 }
 
 void LaunchWake(screen_lifecycle_cb_t /*lifecycle_cb*/) {
-    Application::GetInstance().ToggleChatState();
+    LaunchDigitalPeople(digital_people_lifecycle_cb);
 }
 
 // ??
@@ -3042,9 +3042,17 @@ void CreateIndicator(lv_obj_t* screen, PagerState* state) {
     HighlightDot(state, 0);
 }
 
+void OnOpenDigitalPeopleAsync(void* /*arg*/) {
+    LaunchDigitalPeople(digital_people_lifecycle_cb);
+}
+
 }  // namespace
 
 void HomeScreen::WarmStatusCaches() { WarmStatusCachesImpl(); }
+
+void HomeScreen::OpenDigitalPeopleAsync() {
+    lv_async_call(OnOpenDigitalPeopleAsync, nullptr);
+}
 
 void HomeScreen::ShowPowerOptionsDialog() { ShowPowerDialog(); }
 

@@ -1094,7 +1094,6 @@ void ChatScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         } else {
             ESP_LOGI(TAG, "load: chat_screen");
         }
-        audio_service.EnableWakeWordDetection(true);
         RefreshDeviceState();
     } else {
         ESP_LOGI(TAG, "unload: chat_screen");

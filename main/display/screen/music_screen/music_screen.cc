@@ -558,7 +558,9 @@ void restore_audio_service_after_native_bt() {
     }
     if (s_restore_wake_word_after_native_bt || !audio_service.IsWakeWordRunning()) {
         ESP_LOGI(TAG, "restore wake word after native BT");
-        audio_service.EnableWakeWordDetection(true);
+        if (Application::GetInstance().IsVoiceChatAllowed()) {
+            audio_service.EnableWakeWordDetection(true);
+        }
     }
     s_restart_audio_service_after_native_bt = false;
     s_restore_wake_word_after_native_bt = false;

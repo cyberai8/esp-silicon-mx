@@ -121,7 +121,9 @@ void PowerSaveTimer::WakeUp() {
             auto& app = Application::GetInstance();
             auto& audio_service = app.GetAudioService();
             if (is_wake_word_running_) {
-                audio_service.EnableWakeWordDetection(true);
+                if (app.IsVoiceChatAllowed()) {
+                    audio_service.EnableWakeWordDetection(true);
+                }
             }
         }
 

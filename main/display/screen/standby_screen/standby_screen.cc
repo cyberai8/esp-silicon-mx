@@ -836,7 +836,8 @@ void WeatherFetchTask(void* arg) {
     const esp_err_t err = WeatherService::Instance().FetchByDevice(data);
 
     if (restore_wake &&
-        Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
+        Application::GetInstance().GetDeviceState() == kDeviceStateIdle &&
+        Application::GetInstance().IsVoiceChatAllowed()) {
         Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
     }
     if (esp_lv_adapter_lock(-1) == ESP_OK) {

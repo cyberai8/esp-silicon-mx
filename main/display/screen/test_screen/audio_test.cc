@@ -105,7 +105,9 @@ void RestoreWakeWord() {
     if (!s_wake_disabled) {
         return;
     }
-    Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
+    if (Application::GetInstance().IsVoiceChatAllowed()) {
+        Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
+    }
     s_wake_disabled = false;
 }
 

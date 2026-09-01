@@ -38,7 +38,7 @@ constexpr int kVocatShortMaxMs = 2000;
 #endif
 
 bool IsChatToggleScreen(const char* name) {
-    return std::strcmp(name, "chat") == 0;
+    return std::strcmp(name, "digital_people") == 0;
 }
 
 void StackPush(const char* name) {

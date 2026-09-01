@@ -109,7 +109,9 @@ void SleepTimer::CheckTimer() {
             });
 
             if (is_wake_word_running) {
-                audio_service.EnableWakeWordDetection(true);
+                if (Application::GetInstance().IsVoiceChatAllowed()) {
+                    audio_service.EnableWakeWordDetection(true);
+                }
             }
         }
     }

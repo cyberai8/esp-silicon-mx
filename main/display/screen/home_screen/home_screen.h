@@ -16,6 +16,8 @@ public:
     static void WarmStatusCaches();
     // PWR_KEY 长按后弹出 [重启 / 关机] 对话框（须在 LVGL 线程调用）。
     static void ShowPowerOptionsDialog();
+    // 从非 LVGL 线程进入数字人页（内部 lv_async_call）。
+    static void OpenDigitalPeopleAsync();
     // 软件关机（UI / 空闲策略共用）。
     static void RequestSystemShutdown(const char* reason);
 

@@ -76,6 +76,8 @@ public:
     void RestoreSystemAudioAfterStressTest();
 
     void ForceReturnToIdle();
+    // 仅数字人页允许唤醒词与语音对话；其它界面一律禁止。
+    bool IsVoiceChatAllowed() const;
 private:
     Application();
     ~Application();

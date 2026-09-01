@@ -463,7 +463,7 @@ void Application::StopSystemAudioForStressTest() {
 void Application::RestoreSystemAudioAfterStressTest() {
     // 给电台 GMF/HLS 释放后的内部堆一点整理时间，再抢 I2S DMA。
     vTaskDelay(pdMS_TO_TICKS(80));
-    if (device_state_ == kDeviceStateIdle) {
+    if (device_state_ == kDeviceStateIdle && IsVoiceChatAllowed()) {
         audio_service_.EnableWakeWordDetection(true);
     }
     ESP_LOGI(TAG, "System audio restored after stress test");
@@ -489,7 +489,19 @@ void Application::DismissAlert() {
     }
 }
 
+bool Application::IsVoiceChatAllowed() const {
+#ifdef HAVE_LVGL
+    return DigitalPeopleScreen::IsActive();
+#else
+    return false;
+#endif
+}
+
 void Application::ToggleChatState() {
+    if (!IsVoiceChatAllowed()) {
+        ESP_LOGW(TAG, "Chat ignored: not on digital people screen");
+        return;
+    }
     if (device_state_ == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);
         return;
@@ -534,6 +546,10 @@ void Application::ToggleChatState() {
 }
 
 void Application::StartListening() {
+    if (!IsVoiceChatAllowed()) {
+        ESP_LOGW(TAG, "StartListening ignored: not on digital people screen");
+        return;
+    }
     if (device_state_ == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);
         return;
@@ -857,7 +873,7 @@ void Application::StartNetworkAndProtocol() {
         vTaskDelay(pdMS_TO_TICKS(120));
         WeatherDistrictData weather;
         const esp_err_t werr = WeatherService::Instance().FetchByDevice(weather);
-        if (restore_wake && device_state_ == kDeviceStateIdle) {
+        if (restore_wake && device_state_ == kDeviceStateIdle && IsVoiceChatAllowed()) {
             audio_service_.EnableWakeWordDetection(true);
         }
         if (werr == ESP_OK) {
@@ -1142,6 +1158,11 @@ void Application::OnWakeWordDetected() {
         ESP_LOGW(TAG, "Wake word ignored: protocol not ready");
         return;
     }
+    if (!IsVoiceChatAllowed()) {
+        ESP_LOGW(TAG, "Wake word ignored: not on digital people screen");
+        audio_service_.EnableWakeWordDetection(false);
+        return;
+    }
 
     if (device_state_ == kDeviceStateIdle) {
         // Detection already Stop()'d fetch; clear FEED before encode/connect.
@@ -1161,7 +1182,9 @@ void Application::OnWakeWordDetected() {
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             if (!protocol_->OpenAudioChannel()) {
-                audio_service_.EnableWakeWordDetection(true);
+                if (IsVoiceChatAllowed()) {
+                    audio_service_.EnableWakeWordDetection(true);
+                }
                 return;
             }
         }
@@ -1226,7 +1249,7 @@ void Application::SetDeviceState(DeviceState state) {
             display->SetStatus(Lang::Strings::STANDBY);
             display->SetEmotion("neutral");
             audio_service_.EnableVoiceProcessing(false);
-            audio_service_.EnableWakeWordDetection(true);
+            audio_service_.EnableWakeWordDetection(IsVoiceChatAllowed());
             break;
         case kDeviceStateConnecting:
             board.SetPowerSaveMode(false);
@@ -1262,7 +1285,8 @@ void Application::SetDeviceState(DeviceState state) {
                 audio_service_.ResetDecoder();
                 // 先把喇叭 TX 打开，再启 AFE 唤醒，避免 I2S 重配踩坏 feed 队列。
                 audio_service_.EnsureOutputEnabled();
-                audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+                audio_service_.EnableWakeWordDetection(
+                    IsVoiceChatAllowed() && audio_service_.IsAfeWakeWord());
             } else {
                 audio_service_.ResetDecoder();
             }
@@ -1356,6 +1380,10 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
     if (!protocol_) {
         return;
     }
+    if (!IsVoiceChatAllowed()) {
+        ESP_LOGW(TAG, "WakeWordInvoke ignored: not on digital people screen");
+        return;
+    }
 
     if (device_state_ == kDeviceStateIdle) {
         audio_service_.EnableWakeWordDetection(false);
@@ -1371,7 +1399,9 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             if (!protocol_->OpenAudioChannel()) {
-                audio_service_.EnableWakeWordDetection(true);
+                if (IsVoiceChatAllowed()) {
+                    audio_service_.EnableWakeWordDetection(true);
+                }
                 return;
             }
         }
