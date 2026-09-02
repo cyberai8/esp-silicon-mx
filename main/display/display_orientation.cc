@@ -319,11 +319,11 @@ void DisplayOrientationMaybeLog(const ImuSample& sample, esp_lv_adapter_rotation
     const float g = GravityMagnitude(sample.ax, sample.ay, sample.az);
     const float tilt_z_pct =
         (g > 1.0f) ? (std::fabsf(static_cast<float>(sample.az)) * 100.0f / g) : 0.0f;
-    ESP_LOGI(TAG,
-             "imu ax=%d ay=%d az=%d gz=%d flat=%d z%%=%.0f raw=%d cur=%d stable=%d accum=%ld",
-             sample.ax, sample.ay, sample.az, sample.gz,
-             IsNearlyFlat(sample.ax, sample.ay, sample.az) ? 1 : 0, tilt_z_pct,
-             static_cast<int>(s_raw_detected), static_cast<int>(s_current), s_stable_count,
-             static_cast<long>(s_gyro_z_accum));
+    // ESP_LOGI(TAG,
+    //          "imu ax=%d ay=%d az=%d gz=%d flat=%d z%%=%.0f raw=%d cur=%d stable=%d accum=%ld",
+    //          sample.ax, sample.ay, sample.az, sample.gz,
+    //          IsNearlyFlat(sample.ax, sample.ay, sample.az) ? 1 : 0, tilt_z_pct,
+    //          static_cast<int>(s_raw_detected), static_cast<int>(s_current), s_stable_count,
+    //          static_cast<long>(s_gyro_z_accum));
 #endif
 }

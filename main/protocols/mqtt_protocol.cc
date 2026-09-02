@@ -159,7 +159,7 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
 }
 
 bool MqttProtocol::SendText(const std::string& text) {
-    if (publish_topic_.empty()) {
+    if (publish_topic_.empty() || mqtt_ == nullptr) {
         return false;
     }
     if (!mqtt_->Publish(publish_topic_, text)) {
@@ -206,7 +206,9 @@ void MqttProtocol::CloseAudioChannel() {
     message += "\"session_id\":\"" + session_id_ + "\",";
     message += "\"type\":\"goodbye\"";
     message += "}";
-    SendText(message);
+    if (mqtt_ != nullptr) {
+        SendText(message);
+    }
 
     if (on_audio_channel_closed_ != nullptr) {
         on_audio_channel_closed_();

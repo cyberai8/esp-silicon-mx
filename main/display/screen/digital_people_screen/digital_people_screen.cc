@@ -465,9 +465,11 @@ void DigitalPeopleScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         RefreshDeviceState();
     } else {
         ESP_LOGI(TAG, "unload: digital_people_screen");
-        Application::GetInstance().ForceReturnToIdle();
         audio_service.EnableWakeWordDetection(false);
         ResetLipSync();
+        Application::GetInstance().Schedule([]() {
+            Application::GetInstance().ForceReturnToIdle();
+        });
     }
 }
 

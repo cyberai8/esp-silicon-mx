@@ -642,7 +642,8 @@ bool Application::InitializeProtocol(Ota& ota) {
         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
     });
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (device_state_ == kDeviceStateSpeaking) {
+        // tts.start 经 Schedule 切 speaking 前 UDP 包可能已到，不能丢。
+        if (device_state_ == kDeviceStateSpeaking || tts_playback_active_.load()) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
@@ -654,6 +655,7 @@ bool Application::InitializeProtocol(Ota& ota) {
         }
     });
     protocol_->OnAudioChannelClosed([this, &board]() {
+        tts_playback_active_.store(false);
         board.SetPowerSaveMode(true);
         Schedule([this]() {
             auto* disp = Board::GetInstance().GetDisplay();
@@ -671,14 +673,20 @@ bool Application::InitializeProtocol(Ota& ota) {
                 // 注意：服务端常先发 sentence_start/viseme，后发 tts.start。
                 // 这里不能 ResetLipSync，否则会清掉已加载的口型轴。
                 ESP_LOGI(TAG, "<< tts start");
+                tts_playback_active_.store(true);
+                aborted_ = false;
+                // 在 speaking 状态切换前同步清空旧缓冲，避免 Schedule 延迟期间
+                // 到达的 UDP 包随后被 SetDeviceState(speaking) 再次 Reset 掉。
+                audio_service_.ResetDecoder();
                 Schedule([this]() {
-                    aborted_ = false;
-                    if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                    if (device_state_ == kDeviceStateIdle ||
+                        device_state_ == kDeviceStateListening) {
                         SetDeviceState(kDeviceStateSpeaking);
                     }
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 ESP_LOGI(TAG, "<< tts stop");
+                tts_playback_active_.store(false);
                 Schedule([this]() {
 #ifdef HAVE_LVGL
                     DigitalPeopleScreen::ResetLipSync();
@@ -1216,6 +1224,8 @@ void Application::OnWakeWordDetected() {
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
+    tts_playback_active_.store(false);
+    audio_service_.ResetDecoder();
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
     }
@@ -1282,13 +1292,9 @@ void Application::SetDeviceState(DeviceState state) {
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
-                audio_service_.ResetDecoder();
-                // 先把喇叭 TX 打开，再启 AFE 唤醒，避免 I2S 重配踩坏 feed 队列。
                 audio_service_.EnsureOutputEnabled();
                 audio_service_.EnableWakeWordDetection(
                     IsVoiceChatAllowed() && audio_service_.IsAfeWakeWord());
-            } else {
-                audio_service_.ResetDecoder();
             }
             break;
         default:
@@ -1506,10 +1512,13 @@ void Application::ForceReturnToIdle() {
         device_state_ == kDeviceStateAudioTesting) {
         return;
     }
+    tts_playback_active_.store(false);
     if (device_state_ == kDeviceStateListening && protocol_) {
         protocol_->CloseAudioChannel();
     } else if (device_state_ == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
+    } else {
+        audio_service_.ResetDecoder();
     }
     SetDeviceState(kDeviceStateIdle);
 }

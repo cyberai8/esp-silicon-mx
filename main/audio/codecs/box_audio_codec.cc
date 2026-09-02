@@ -380,9 +380,66 @@ void BoxAudioCodec::SetOutputVolume(int volume) {
     AudioCodec::SetOutputVolume(volume);
 }
 
+void BoxAudioCodec::CloseInputDeviceLocked() {
+    if (input_dev_ != nullptr &&
+        esp_codec_dev_close(input_dev_) != ESP_CODEC_DEV_OK) {
+        ESP_LOGW(TAG, "Failed to close input device");
+    }
+}
+
+void BoxAudioCodec::CloseOutputDeviceLocked() {
+    if (output_dev_ != nullptr &&
+        esp_codec_dev_close(output_dev_) != ESP_CODEC_DEV_OK) {
+        ESP_LOGW(TAG, "Failed to close output device");
+    }
+}
+
+void BoxAudioCodec::ResetI2sHardwareLocked() {
+    if (tx_handle_ != nullptr) {
+        esp_err_t err = i2s_channel_disable(tx_handle_);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "Disable TX failed: %s", esp_err_to_name(err));
+        }
+    }
+    if (rx_handle_ != nullptr) {
+        esp_err_t err = i2s_channel_disable(rx_handle_);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "Disable RX failed: %s", esp_err_to_name(err));
+        }
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+    if (tx_handle_ != nullptr) {
+        esp_err_t err = i2s_channel_enable(tx_handle_);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "Enable TX failed: %s", esp_err_to_name(err));
+        }
+    }
+    if (rx_handle_ != nullptr) {
+        esp_err_t err = i2s_channel_enable(rx_handle_);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "Enable RX failed: %s", esp_err_to_name(err));
+        }
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+}
+
+bool BoxAudioCodec::RecoverDuplexStreamLocked() {
+    CloseInputDeviceLocked();
+    CloseOutputDeviceLocked();
+    AudioCodec::EnableInput(false);
+    AudioCodec::EnableOutput(false);
+    ResetI2sHardwareLocked();
+    return true;
+}
+
 bool BoxAudioCodec::OpenOutputDeviceLocked() {
     if (output_enabled_) {
         return true;
+    }
+
+    // 冷启动仅开 TX 时跳过 RX 路径，I2S 未经 Reset；录音开 RX 会复位，故录后能播。
+    if (!input_enabled_) {
+        ResetI2sHardwareLocked();
     }
 
     esp_codec_dev_sample_info_t fs = {
@@ -411,6 +468,13 @@ bool BoxAudioCodec::OpenInputDeviceLocked() {
         return true;
     }
 
+    if (output_enabled_) {
+        CloseOutputDeviceLocked();
+        AudioCodec::EnableOutput(false);
+    } else {
+        ResetI2sHardwareLocked();
+    }
+
     esp_codec_dev_sample_info_t fs = {
         .bits_per_sample = 16,
         .channel = 4,
@@ -434,47 +498,44 @@ bool BoxAudioCodec::OpenInputDeviceLocked() {
     }
 #endif
 
-    if (esp_codec_dev_open(input_dev_, &fs) != ESP_CODEC_DEV_OK) {
-        ESP_LOGE(TAG, "Failed to open input device");
-        return false;
-    }
+    auto finish_open = [&]() -> bool {
 #if CONFIG_BOARD_TYPE_ESP_VOCAT
-    if (esp_codec_dev_set_in_gain(input_dev_, input_gain_) !=
-        ESP_CODEC_DEV_OK) {
-        ESP_LOGE(TAG, "Failed to set input gain");
-        esp_codec_dev_close(input_dev_);
-        return false;
-    }
-    input_read_fail_count_ = 0;
-    ESP_LOGI(TAG, "Input device opened: ch=%d mask=0x%x rate=%" PRIu32
-                  " app_ch=%d ref=%d",
-             fs.channel, fs.channel_mask, fs.sample_rate, input_channels_,
-             input_reference_ ? 1 : 0);
+        if (esp_codec_dev_set_in_gain(input_dev_, input_gain_) !=
+            ESP_CODEC_DEV_OK) {
+            ESP_LOGE(TAG, "Failed to set input gain");
+            CloseInputDeviceLocked();
+            return false;
+        }
+        input_read_fail_count_ = 0;
+        ESP_LOGI(TAG, "Input device opened: ch=%d mask=0x%x rate=%" PRIu32
+                      " app_ch=%d ref=%d",
+                 fs.channel, fs.channel_mask, fs.sample_rate, input_channels_,
+                 input_reference_ ? 1 : 0);
 #else
-    if (esp_codec_dev_set_in_channel_gain(input_dev_,
-                                          ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
-                                          input_gain_) != ESP_CODEC_DEV_OK) {
-        ESP_LOGE(TAG, "Failed to set input channel gain");
-        esp_codec_dev_close(input_dev_);
+        if (esp_codec_dev_set_in_channel_gain(input_dev_,
+                                              ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
+                                              input_gain_) != ESP_CODEC_DEV_OK) {
+            ESP_LOGE(TAG, "Failed to set input channel gain");
+            CloseInputDeviceLocked();
+            return false;
+        }
+#endif
+        AudioCodec::EnableInput(true);
+        return true;
+    };
+
+    if (esp_codec_dev_open(input_dev_, &fs) == ESP_CODEC_DEV_OK) {
+        return finish_open();
+    }
+    ESP_LOGW(TAG, "Failed to open input device, retry after duplex reset");
+    CloseInputDeviceLocked();
+    RecoverDuplexStreamLocked();
+    if (esp_codec_dev_open(input_dev_, &fs) != ESP_CODEC_DEV_OK) {
+        ESP_LOGE(TAG, "Failed to open input device after reset");
+        CloseInputDeviceLocked();
         return false;
     }
-#endif
-    AudioCodec::EnableInput(true);
-    return true;
-}
-
-void BoxAudioCodec::CloseInputDeviceLocked() {
-    if (input_dev_ != nullptr &&
-        esp_codec_dev_close(input_dev_) != ESP_CODEC_DEV_OK) {
-        ESP_LOGW(TAG, "Failed to close input device");
-    }
-}
-
-void BoxAudioCodec::CloseOutputDeviceLocked() {
-    if (output_dev_ != nullptr &&
-        esp_codec_dev_close(output_dev_) != ESP_CODEC_DEV_OK) {
-        ESP_LOGW(TAG, "Failed to close output device");
-    }
+    return finish_open();
 }
 
 #if CONFIG_BOARD_TYPE_ESP_VOCAT

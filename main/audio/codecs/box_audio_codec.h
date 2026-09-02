@@ -50,6 +50,8 @@ private:
     bool OpenInputDeviceLocked();
     void CloseOutputDeviceLocked();
     void CloseInputDeviceLocked();
+    void ResetI2sHardwareLocked();
+    bool RecoverDuplexStreamLocked();
 #if CONFIG_BOARD_TYPE_ESP_VOCAT
     bool CreateCodecDevicesLocked();
     void DeleteCodecDevicesLocked();

@@ -11,6 +11,7 @@
 #include <dirent.h>
 #include <memory>
 #include <string>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
@@ -35,7 +36,9 @@
 #include "wifi_required_dialog.h"
 
 #include <cJSON.h>
+#include <opus_decoder.h>
 #include <opus_encoder.h>
+#include <opus_resampler.h>
 
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_puhui_30_4);
@@ -91,6 +94,7 @@ constexpr int32_t kDetailTitleY  = kRoundLayout ? 48 : 0;
 constexpr int32_t kDetailMetaY   = kRoundLayout ? 72 : 0;
 constexpr int32_t kDetailPlayY   = kRoundLayout ? 96 : 0;
 constexpr int32_t kDetailAsrY    = kRoundLayout ? (kDetailPlayY + kDetailBtnH + kDetailBtnGap) : 0;
+constexpr int32_t kDetailDelY    = kHeaderH + 48 + kDetailBtnH + 8;
 
 // 录音列表行：圆屏收窄到跟随 kPanelSize，避免 420px 宽的文件名/删除按钮
 // 布局在 360 面板上溢出裁切。
@@ -109,7 +113,10 @@ constexpr uint32_t kColorCard = 0x1B2030;
 constexpr uint32_t kColorDanger = 0xEF4444;
 
 constexpr const char* kPosixDir = "/sdcard/recordings";
-constexpr int kSampleRate = 16000;
+#ifndef AUDIO_INPUT_SAMPLE_RATE
+#define AUDIO_INPUT_SAMPLE_RATE 16000
+#endif
+constexpr int kSampleRate = AUDIO_INPUT_SAMPLE_RATE;
 constexpr int kFrameDurationMs = OPUS_FRAME_DURATION_MS;  // 60
 constexpr int kSamplesPerFrame = kSampleRate * kFrameDurationMs / 1000;  // 960
 // Opus granule 固定按 48 kHz 计：60ms → 2880
@@ -151,6 +158,7 @@ struct UiState {
     lv_obj_t* detail_play_lbl = nullptr;
     lv_obj_t* detail_asr_btn = nullptr;
     lv_obj_t* detail_asr_lbl = nullptr;
+    lv_obj_t* detail_del_btn = nullptr;
     lv_obj_t* detail_status = nullptr;
     lv_obj_t* detail_result = nullptr;
 };
@@ -175,11 +183,20 @@ TaskHandle_t s_asr_query_task = nullptr;  // 查询转写结果
 TaskHandle_t s_meta_task = nullptr;
 StackType_t* s_record_stack = nullptr;
 StaticTask_t* s_record_tcb = nullptr;
+StackType_t* s_play_stack = nullptr;
+StaticTask_t* s_play_tcb = nullptr;
 StackType_t* s_meta_stack = nullptr;
 StaticTask_t* s_meta_tcb = nullptr;
+int s_meta_fill_fail_count = 0;
 lv_timer_t* s_tick_timer = nullptr;
 bool s_wake_disabled_by_us = false;
 std::atomic<bool> s_stop_meta{false};
+std::atomic<uint32_t> s_play_gen{0};
+
+struct PlayTaskArgs {
+    char path[192];
+    uint32_t gen;
+};
 
 char s_playing_path[192] = {};
 char s_detail_path[192] = {};
@@ -206,10 +223,12 @@ void UpdateRecordButtonUi();
 void UpdateTimerLabel();
 void RebuildFileList();
 void RebuildFileList(bool schedule_fill);
+void RefreshListRowMeta();
 void StopPlayback();
 void ForceStopAll();
 void ShowDetail(int idx);
 void HideDetail();
+bool DeleteRecordingAt(int idx);
 void UpdateDetailPlayButton();
 void SetDetailStatusText(const char* text);
 void SetDetailResultText(const char* text);
@@ -380,6 +399,47 @@ void DisableWakeWordIfNeeded() {
     vTaskDelay(pdMS_TO_TICKS(150));
 }
 
+// 录音结束后 RX 仍占双工 I2S（TDM 4ch），直接开 TX 会失败；与 SD 音乐页一致先关麦再播。
+bool PrepareAudioForPlayback(AudioService& as, AudioCodec* codec) {
+    DisableWakeWordIfNeeded();
+    if (!as.IsStarted()) {
+        as.Start();
+    }
+    if (codec != nullptr) {
+        if (codec->input_enabled()) {
+            codec->EnableInput(false);
+            vTaskDelay(pdMS_TO_TICKS(100));
+        } else if (!codec->output_enabled() && codec->duplex()) {
+            // 双工板冷 idle：走一遍 RX 开/关，与录音路径一样复位 I2S/TDM。
+            codec->EnableInput(true);
+            if (codec->input_enabled()) {
+                vTaskDelay(pdMS_TO_TICKS(80));
+                codec->EnableInput(false);
+                vTaskDelay(pdMS_TO_TICKS(80));
+            }
+        }
+        if (codec->output_enabled()) {
+            codec->EnableOutput(false);
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+    as.SetExternalPlaybackHold(true);
+    as.NotifyExternalPlayback();
+    if (codec == nullptr) {
+        ESP_LOGW(TAG, "playback prepare failed: no codec");
+        return false;
+    }
+    if (!codec->output_enabled()) {
+        ESP_LOGW(TAG, "playback prepare failed: output disabled");
+        return false;
+    }
+    return true;
+}
+
+void ReleaseAudioAfterPlayback(AudioService& as) {
+    as.SetExternalPlaybackHold(false);
+}
+
 // I2S DMA 需要较大的连续 internal 块；堆碎片时 esp_codec_dev 可能在失败路径崩溃。
 constexpr size_t kMinLargestForWakeWord = 8192;
 
@@ -433,7 +493,7 @@ void PrepareMicForRecording() {
     if (as.IsWakeWordRunning()) {
         as.ReleaseWakeWordDetection();
         s_wake_disabled_by_us = true;
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(150));
     } else {
         DisableWakeWordIfNeeded();
     }
@@ -442,7 +502,7 @@ void PrepareMicForRecording() {
         as.Start();
     }
     if (AudioCodec* codec = Board::GetInstance().GetAudioCodec(); codec != nullptr) {
-        codec->EnableInput(true);
+        codec->EnableOutput(false);
     }
 
     ESP_LOGI(TAG,
@@ -455,6 +515,9 @@ void PrepareMicForRecording() {
 }
 
 void RecordTask(void* arg);
+void PlayTask(void* arg);
+
+struct PlayTaskArgs;
 
 bool SpawnRecordTask() {
     constexpr uint32_t kRecordTaskStack = 2048 * 14;
@@ -594,26 +657,31 @@ void PostPlayStatusFromWorker(const char* text) {
     if (text == nullptr) {
         return;
     }
-    auto* copy = static_cast<char*>(heap_caps_malloc(std::strlen(text) + 1, MALLOC_CAP_8BIT));
-    if (copy == nullptr) {
-        return;
-    }
-    std::strcpy(copy, text);
     if (esp_lv_adapter_lock(-1) != ESP_OK) {
-        heap_caps_free(copy);
         return;
     }
     if (s_screen_alive) {
         if (s_detail_open) {
-            SetDetailStatusText(copy);
-            UpdateDetailPlayButton();
+            SetDetailStatusText(text);
         } else {
-            SetListStatusText(copy);
+            SetListStatusText(text);
         }
+        UpdateDetailPlayButton();
         UpdateRecordButtonUi();
     }
     esp_lv_adapter_unlock();
-    heap_caps_free(copy);
+}
+
+void FailPlaybackFromWorker(uint32_t my_gen, const char* status) {
+    s_play_task = nullptr;
+    const bool is_latest = (my_gen == s_play_gen.load());
+    if (is_latest) {
+        s_playing_path[0] = '\0';
+        s_state.store(RecState::Idle);
+    }
+    if (status != nullptr && is_latest) {
+        PostPlayStatusFromWorker(status);
+    }
 }
 
 void PostDetailStatusFromWorker(const char* text) {
@@ -773,15 +841,23 @@ void MakeNextRecordPath(char* path, size_t path_size) {
     std::snprintf(path, path_size, "%s/REC_%s_%lu.opus", kPosixDir, serial, ts_ms);
 }
 
+bool VerifyOpusFileHeader(const char* path);
+bool FinalizeRecordingPartFile(const char* final_path, const char* part_path);
+void SyncRecordingsDir();
+void CleanupStalePartFiles();
+void WarnIfSdFsckArtifacts();
+
 void RecordTask(void* /*arg*/) {
     ESP_LOGI(TAG, "record task running");
     auto& as = Application::GetInstance().GetAudioService();
     char path[192] = {};
+    char part_path[208] = {};
     FILE* file = nullptr;
     uint32_t frames = 0;
     uint32_t page_seq = 0;
     bool ok = false;
     bool hit_max = false;
+    int part_path_len = 0;
     std::unique_ptr<OpusEncoderWrapper> encoder;
 
     DisableWakeWordIfNeeded();
@@ -793,15 +869,24 @@ void RecordTask(void* /*arg*/) {
     }
 
     MakeNextRecordPath(path, sizeof(path));
-    file = fopen(path, "wb");
-    if (file == nullptr) {
-        ESP_LOGE(TAG, "fopen failed: %s", path);
+    part_path_len = std::snprintf(part_path, sizeof(part_path), "%s.part", path);
+    if (part_path_len < 0 ||
+        static_cast<size_t>(part_path_len) >= sizeof(part_path)) {
         PostStatusFromWorker(false, I18n::T("写入失败，未保存"));
         goto done;
     }
+    file = fopen(part_path, "wb");
+    if (file == nullptr) {
+        ESP_LOGE(TAG, "fopen failed: %s", part_path);
+        PostStatusFromWorker(false, I18n::T("写入失败，未保存"));
+        goto done;
+    }
+    // 录音页写入走全缓冲时，异常断电可能只落盘部分 cluster；尽量实时刷盘。
+    setvbuf(file, nullptr, _IONBF, 0);
 
     encoder = std::make_unique<OpusEncoderWrapper>(kSampleRate, 1, kFrameDurationMs);
     encoder->SetComplexity(0);
+    encoder->SetDtx(false);
 
     if (!WriteOpusHeaders(file, kOggSerial, page_seq)) {
         PostStatusFromWorker(false, I18n::T("写入失败，未保存"));
@@ -872,15 +957,25 @@ void RecordTask(void* /*arg*/) {
                      static_cast<unsigned>(frames));
             fclose(file);
             file = nullptr;
-            unlink(path);
+            unlink(part_path);
             UnlinkDurationSidecar(path);
             PostStatusFromWorker(false, I18n::T("录音太短，再试一次"));
             goto done;
         }
 
         fflush(file);
+        if (fsync(fileno(file)) != 0) {
+            ESP_LOGW(TAG, "fsync failed: %s", part_path);
+        }
         fclose(file);
         file = nullptr;
+
+        if (!FinalizeRecordingPartFile(path, part_path)) {
+            UnlinkDurationSidecar(path);
+            PostStatusFromWorker(false, I18n::T("写入失败，未保存"));
+            goto done;
+        }
+
         ok = true;
         {
             const int duration_sec =
@@ -902,12 +997,18 @@ void RecordTask(void* /*arg*/) {
 done:
     if (file != nullptr) {
         fclose(file);
-        if (!ok && path[0] != '\0') {
-            unlink(path);
-            UnlinkDurationSidecar(path);
-        }
+        file = nullptr;
+    }
+    if (!ok && part_path[0] != '\0') {
+        unlink(part_path);
+        UnlinkDurationSidecar(path);
     }
     encoder.reset();
+
+    if (AudioCodec* codec = Board::GetInstance().GetAudioCodec();
+        codec != nullptr && codec->input_enabled()) {
+        codec->EnableInput(false);
+    }
 
     s_state.store(RecState::Idle);
     if (esp_lv_adapter_lock(-1) == ESP_OK) {
@@ -1017,7 +1118,101 @@ bool HasExt(const char* name, const char* ext4) {
 }
 
 bool IsRecordingFilename(const char* name) {
+    if (name == nullptr) {
+        return false;
+    }
+    const size_t len = std::strlen(name);
+    if (len > 5 && std::strcmp(name + len - 5, ".part") == 0) {
+        return false;
+    }
     return HasExt(name, ".opus") || HasExt(name, ".wav");
+}
+
+void SyncRecordingsDir() {
+    const int dirfd = open(kPosixDir, O_RDONLY);
+    if (dirfd >= 0) {
+        fsync(dirfd);
+        close(dirfd);
+    }
+}
+
+bool VerifyOpusFileHeader(const char* path) {
+    if (path == nullptr) {
+        return false;
+    }
+    FILE* f = fopen(path, "rb");
+    if (f == nullptr) {
+        return false;
+    }
+    uint8_t magic[4] = {};
+    const bool ok =
+        (fread(magic, 1, 4, f) == 4 && std::memcmp(magic, "OggS", 4) == 0);
+    fclose(f);
+    return ok;
+}
+
+// 先写 .part，校验 OggS 后 rename，并 fsync 目录项，降低重启/FAT 异常时文件头损坏概率。
+bool FinalizeRecordingPartFile(const char* final_path, const char* part_path) {
+    if (!VerifyOpusFileHeader(part_path)) {
+        ESP_LOGE(TAG, "part file header verify failed: %s", part_path);
+        unlink(part_path);
+        return false;
+    }
+    unlink(final_path);
+    if (rename(part_path, final_path) != 0) {
+        ESP_LOGE(TAG, "rename failed: %s -> %s", part_path, final_path);
+        unlink(part_path);
+        return false;
+    }
+    SyncRecordingsDir();
+    if (!VerifyOpusFileHeader(final_path)) {
+        ESP_LOGE(TAG, "final file header verify failed: %s", final_path);
+        unlink(final_path);
+        return false;
+    }
+    return true;
+}
+
+void CleanupStalePartFiles() {
+    DIR* dir = opendir(kPosixDir);
+    if (dir == nullptr) {
+        return;
+    }
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        if (ent->d_name[0] == '.') {
+            continue;
+        }
+        const size_t len = std::strlen(ent->d_name);
+        if (len <= 5 || std::strcmp(ent->d_name + len - 5, ".part") != 0) {
+            continue;
+        }
+        char full[192];
+        if (std::snprintf(full, sizeof(full), "%s/%s", kPosixDir, ent->d_name) < 0) {
+            continue;
+        }
+        ESP_LOGW(TAG, "remove stale part file: %s", full);
+        unlink(full);
+    }
+    closedir(dir);
+    SyncRecordingsDir();
+}
+
+void WarnIfSdFsckArtifacts() {
+    DIR* dir = opendir("/sdcard");
+    if (dir == nullptr) {
+        return;
+    }
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        if (std::strcmp(ent->d_name, "FOUND.000") == 0) {
+            ESP_LOGW(TAG,
+                     "SD card has FOUND.000 (FAT was repaired); recordings may "
+                     "corrupt after reboot — reformat FAT32 recommended");
+            break;
+        }
+    }
+    closedir(dir);
 }
 
 void MakeDurationSidecarPath(char* out, size_t out_size, const char* opus_path) {
@@ -1194,12 +1389,10 @@ void DurationFillTask(void* /*arg*/) {
     if (!s_stop_meta.load() && s_screen_alive) {
         if (esp_lv_adapter_lock(-1) == ESP_OK) {
             if (s_screen_alive && s_ui.list_scroll != nullptr && !s_detail_open) {
-                // 列表可见时刷新时长文案（sidecar 已齐，Collect 很快）
-                RebuildFileList(false);
+                RefreshListRowMeta();
             } else if (s_screen_alive && s_detail_open && s_detail_idx >= 0 &&
                        s_detail_idx < static_cast<int>(s_files.size())) {
                 FileEntry& e = s_files[static_cast<size_t>(s_detail_idx)];
-                EnsureOpusDuration(e);
                 if (s_ui.detail_meta != nullptr) {
                     char dur[16];
                     char size_buf[24];
@@ -1216,8 +1409,15 @@ void DurationFillTask(void* /*arg*/) {
     }
 
     s_meta_task = nullptr;
-    if (!s_stop_meta.load() && s_screen_alive) {
-        ScheduleDurationFill();  // sidecar 写入失败时再补一轮
+    bool still_need = false;
+    for (const auto& e : s_files) {
+        if (e.format == RecFormat::Opus && !e.duration_ready) {
+            still_need = true;
+            break;
+        }
+    }
+    if (still_need && !s_stop_meta.load() && s_screen_alive) {
+        ScheduleDurationFill();
     }
     vTaskDelete(nullptr);
 }
@@ -1234,12 +1434,34 @@ void ScheduleDurationFill() {
         }
     }
     if (!need) {
+        s_meta_fill_fail_count = 0;
         return;
     }
+
+    constexpr size_t kMinInternalForMeta = 16384;
+    const size_t largest_int =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    if (largest_int < kMinInternalForMeta) {
+        ESP_LOGW(TAG, "defer duration fill: largest_int=%u",
+                 static_cast<unsigned>(largest_int));
+        for (auto& e : s_files) {
+            if (e.format == RecFormat::Opus && !e.duration_ready) {
+                e.duration_sec = 0;
+                e.duration_ready = true;
+            }
+        }
+        if (esp_lv_adapter_lock(-1) == ESP_OK) {
+            RefreshListRowMeta();
+            esp_lv_adapter_unlock();
+        }
+        return;
+    }
+
     s_stop_meta.store(false);
-    constexpr uint32_t kMetaTaskStack = 8 * 1024;
+    constexpr uint32_t kMetaTaskStack = 6 * 1024;
     if (xTaskCreatePinnedToCore(DurationFillTask, "rec_meta", kMetaTaskStack, nullptr,
                                 tskIDLE_PRIORITY + 1, &s_meta_task, 0) == pdPASS) {
+        s_meta_fill_fail_count = 0;
         return;
     }
     ESP_LOGW(TAG, "duration fill task internal create failed, trying SPIRAM stack");
@@ -1254,6 +1476,15 @@ void ScheduleDurationFill() {
     if (s_meta_stack == nullptr || s_meta_tcb == nullptr) {
         s_meta_task = nullptr;
         ESP_LOGW(TAG, "duration fill task start failed");
+        ++s_meta_fill_fail_count;
+        if (s_meta_fill_fail_count >= 2) {
+            for (auto& e : s_files) {
+                if (e.format == RecFormat::Opus && !e.duration_ready) {
+                    e.duration_sec = 0;
+                    e.duration_ready = true;
+                }
+            }
+        }
         return;
     }
     s_meta_task = xTaskCreateStaticPinnedToCore(
@@ -1261,7 +1492,18 @@ void ScheduleDurationFill() {
         tskIDLE_PRIORITY + 1, s_meta_stack, s_meta_tcb, 0);
     if (s_meta_task == nullptr) {
         ESP_LOGW(TAG, "duration fill task start failed");
+        ++s_meta_fill_fail_count;
+        if (s_meta_fill_fail_count >= 2) {
+            for (auto& e : s_files) {
+                if (e.format == RecFormat::Opus && !e.duration_ready) {
+                    e.duration_sec = 0;
+                    e.duration_ready = true;
+                }
+            }
+        }
+        return;
     }
+    s_meta_fill_fail_count = 0;
 }
 
 void CollectRecordings() {
@@ -1297,10 +1539,20 @@ void CollectRecordings() {
         }
         entry.format = HasExt(entry.name, ".opus") ? RecFormat::Opus : RecFormat::Wav;
         struct stat st;
-        if (stat(entry.path, &st) == 0 && st.st_size > 0) {
+        if (stat(entry.path, &st) == 0) {
+            if (!S_ISREG(st.st_mode)) {
+                continue;
+            }
             entry.size_bytes = static_cast<size_t>(st.st_size);
-            if (entry.format == RecFormat::Opus) {
-                // 进页只读 sidecar；缺失则留给后台 / 详情懒加载
+            if (entry.format == RecFormat::Opus && st.st_size > 0 &&
+                !VerifyOpusFileHeader(entry.path)) {
+                ESP_LOGW(TAG, "corrupt opus in list: %s size=%ld",
+                         entry.name, static_cast<long>(st.st_size));
+            }
+            if (st.st_size == 0) {
+                entry.duration_sec = 0;
+                entry.duration_ready = true;
+            } else if (entry.format == RecFormat::Opus) {
                 const int side = ReadDurationSidecar(entry.path);
                 if (side >= 0) {
                     entry.duration_sec = side;
@@ -1316,7 +1568,14 @@ void CollectRecordings() {
                     entry.duration_sec = 0;
                 }
                 entry.duration_ready = true;
+            } else {
+                entry.duration_sec = 0;
+                entry.duration_ready = true;
             }
+        } else {
+            entry.size_bytes = 0;
+            entry.duration_sec = 0;
+            entry.duration_ready = true;
         }
         s_files.push_back(entry);
         if (s_files.size() >= static_cast<size_t>(kMaxListItems)) {
@@ -1331,21 +1590,178 @@ void CollectRecordings() {
               });
 }
 
-bool PlayOpusFile(FILE* file, AudioService& as) {
-    as.ResetDecoder();
-    PostPlayStatusFromWorker(I18n::T("播放中…"));
+// 文件头可能被 SD 脏数据覆盖时，在前 64KB 内搜索 OggS 页同步字。
+bool SeekToOggStart(FILE* file, long* out_offset = nullptr) {
+    if (file == nullptr) {
+        return false;
+    }
+    rewind(file);
+    constexpr long kScanMax = 64 * 1024;
+    std::vector<uint8_t> buf(4096);
+    long base = 0;
+    while (base < kScanMax) {
+        const size_t n = fread(buf.data(), 1, buf.size(), file);
+        if (n < 4) {
+            break;
+        }
+        for (size_t i = 0; i + 4 <= n; ++i) {
+            if (std::memcmp(buf.data() + i, "OggS", 4) == 0) {
+                const long off = base + static_cast<long>(i);
+                if (fseek(file, off, SEEK_SET) != 0) {
+                    return false;
+                }
+                if (out_offset != nullptr) {
+                    *out_offset = off;
+                }
+                if (off > 0) {
+                    ESP_LOGW(TAG, "ogg sync at offset %ld", off);
+                }
+                return true;
+            }
+        }
+        if (n < buf.size()) {
+            break;
+        }
+        base += static_cast<long>(n) - 3;
+        if (fseek(file, base, SEEK_SET) != 0) {
+            break;
+        }
+    }
+    rewind(file);
+    return false;
+}
 
+// 播放前先读首包 Ogg 页，预热 SD 并确认 OpusHead（不占用 I2S）。
+bool ProbeOpusHeadRate(FILE* file, int& stream_rate) {
+    if (file == nullptr) {
+        return false;
+    }
+    long ogg_off = 0;
+    if (!SeekToOggStart(file, &ogg_off)) {
+        long fsize = -1;
+        if (fseek(file, 0, SEEK_END) == 0) {
+            fsize = ftell(file);
+        }
+        rewind(file);
+        uint8_t peek[16] = {};
+        fread(peek, 1, sizeof(peek), file);
+        ESP_LOGE(TAG,
+                 "playback probe: OggS not found size=%ld head=%02x%02x%02x%02x "
+                 "%02x%02x%02x%02x",
+                 fsize, peek[0], peek[1], peek[2], peek[3], peek[4], peek[5],
+                 peek[6], peek[7]);
+        return false;
+    }
+    uint8_t hdr[27];
+    const size_t got = fread(hdr, 1, 27, file);
+    if (got != 27 || std::memcmp(hdr, "OggS", 4) != 0) {
+        ESP_LOGE(TAG, "playback probe: page header read failed off=%ld", ogg_off);
+        rewind(file);
+        return false;
+    }
+    const uint8_t nseg = hdr[26];
+    uint8_t segs[255];
+    if (nseg == 0 || fread(segs, 1, nseg, file) != nseg) {
+        ESP_LOGE(TAG, "playback probe: short ogg page");
+        rewind(file);
+        return false;
+    }
+    size_t body_size = 0;
+    for (uint8_t i = 0; i < nseg; ++i) {
+        body_size += segs[i];
+    }
+    std::vector<uint8_t> body(body_size);
+    if (body_size > 0 && fread(body.data(), 1, body_size, file) != body_size) {
+        ESP_LOGE(TAG, "playback probe: body read failed");
+        rewind(file);
+        return false;
+    }
+    size_t body_off = 0;
+    size_t seg_idx = 0;
+    while (seg_idx < nseg) {
+        size_t pkt_len = 0;
+        const size_t pkt_start = body_off;
+        bool continued = false;
+        do {
+            const uint8_t l = segs[seg_idx++];
+            pkt_len += l;
+            body_off += l;
+            continued = (l == 255);
+        } while (continued && seg_idx < nseg);
+        if (pkt_len == 0) {
+            continue;
+        }
+        const uint8_t* pkt = body.data() + pkt_start;
+        if (pkt_len >= 19 && std::memcmp(pkt, "OpusHead", 8) == 0) {
+            stream_rate = static_cast<int>(ReadLe32(pkt + 12));
+            if (stream_rate <= 0) {
+                stream_rate = kSampleRate;
+            }
+            ESP_LOGI(TAG, "playback probe head rate=%d", stream_rate);
+            if (ogg_off > 0) {
+                fseek(file, ogg_off, SEEK_SET);
+            } else {
+                rewind(file);
+            }
+            return true;
+        }
+    }
+    ESP_LOGE(TAG, "playback probe: OpusHead missing");
+    if (ogg_off > 0) {
+        fseek(file, ogg_off, SEEK_SET);
+    } else {
+        rewind(file);
+    }
+    return false;
+}
+
+bool PlayOpusFile(FILE* file, AudioCodec* codec, AudioService& as, uint32_t play_gen) {
+    if (codec == nullptr) {
+        return false;
+    }
+    if (!SeekToOggStart(file)) {
+        return false;
+    }
+
+    const int out_rate = codec->output_sample_rate();
+    int stream_rate = kSampleRate;
     bool seen_head = false;
     bool seen_tags = false;
-    int sample_rate = kSampleRate;
+    bool decoder_ready = false;
+    int packets_ok = 0;
+    int packets_fail = 0;
     uint8_t hdr[27];
 
-    while (!s_stop_play.load()) {
+    std::unique_ptr<OpusDecoderWrapper> decoder;
+    OpusResampler resampler;
+
+    auto aborted = [&]() {
+        return s_stop_play.load() || play_gen != s_play_gen.load();
+    };
+
+    auto ensure_decoder = [&]() -> bool {
+        if (decoder_ready) {
+            return true;
+        }
+        decoder = std::make_unique<OpusDecoderWrapper>(stream_rate, 1, kFrameDurationMs);
+        if (stream_rate != out_rate) {
+            resampler.Configure(stream_rate, out_rate);
+            if (!resampler.IsConfigured()) {
+                ESP_LOGE(TAG, "local resampler %d -> %d failed", stream_rate, out_rate);
+                return false;
+            }
+        } else {
+            resampler.Reset();
+        }
+        decoder_ready = true;
+        return true;
+    };
+
+    while (!aborted()) {
         if (fread(hdr, 1, 27, file) != 27) {
             break;
         }
         if (std::memcmp(hdr, "OggS", 4) != 0) {
-            PostPlayStatusFromWorker(I18n::T("录音文件损坏"));
             return false;
         }
         const uint8_t nseg = hdr[26];
@@ -1365,7 +1781,7 @@ bool PlayOpusFile(FILE* file, AudioService& as) {
         }
 
         size_t seg_idx = 0;
-        while (seg_idx < nseg && !s_stop_play.load()) {
+        while (seg_idx < nseg && !aborted()) {
             size_t pkt_len = 0;
             const size_t pkt_start = body_off;
             bool continued = false;
@@ -1384,10 +1800,11 @@ bool PlayOpusFile(FILE* file, AudioService& as) {
             if (!seen_head) {
                 if (pkt_len >= 19 && std::memcmp(pkt, "OpusHead", 8) == 0) {
                     seen_head = true;
-                    sample_rate = static_cast<int>(ReadLe32(pkt + 12));
-                    if (sample_rate <= 0) {
-                        sample_rate = kSampleRate;
+                    stream_rate = static_cast<int>(ReadLe32(pkt + 12));
+                    if (stream_rate <= 0) {
+                        stream_rate = kSampleRate;
                     }
+                    ESP_LOGI(TAG, "playback opus head rate=%d", stream_rate);
                 }
                 continue;
             }
@@ -1398,13 +1815,34 @@ bool PlayOpusFile(FILE* file, AudioService& as) {
                 continue;
             }
 
-            auto packet = std::make_unique<AudioStreamPacket>();
-            packet->sample_rate = sample_rate;
-            packet->frame_duration = kFrameDurationMs;
-            packet->payload.assign(pkt, pkt + pkt_len);
-            if (!as.PushPacketToDecodeQueue(std::move(packet), true)) {
-                break;
+            if (!ensure_decoder()) {
+                return false;
             }
+            std::vector<uint8_t> opus_pkt(pkt, pkt + pkt_len);
+            std::vector<int16_t> pcm;
+            if (!decoder->Decode(std::move(opus_pkt), pcm) || pcm.empty()) {
+                ++packets_fail;
+                continue;
+            }
+            std::vector<int16_t> out_pcm;
+            if (stream_rate != out_rate && resampler.IsConfigured()) {
+                const int out_samples =
+                    resampler.GetOutputSamples(static_cast<int>(pcm.size()));
+                if (out_samples <= 0) {
+                    ++packets_fail;
+                    continue;
+                }
+                out_pcm.resize(static_cast<size_t>(out_samples));
+                resampler.Process(pcm.data(), static_cast<int>(pcm.size()), out_pcm.data());
+            } else {
+                out_pcm = std::move(pcm);
+            }
+            if (!codec->output_enabled()) {
+                codec->EnableOutput(true);
+            }
+            as.NotifyExternalPlayback();
+            codec->OutputData(out_pcm);
+            ++packets_ok;
         }
 
         if (hdr[5] & 0x04) {
@@ -1412,11 +1850,11 @@ bool PlayOpusFile(FILE* file, AudioService& as) {
         }
     }
 
-    // 等解码播放队列排空
-    while (!s_stop_play.load() && !as.IsIdle()) {
-        vTaskDelay(pdMS_TO_TICKS(20));
+    if (!seen_head) {
+        ESP_LOGE(TAG, "playback opus: OpusHead not found");
     }
-    return true;
+    ESP_LOGI(TAG, "playback opus ok=%d fail=%d", packets_ok, packets_fail);
+    return packets_ok > 0 && !aborted();
 }
 
 bool PlayWavFile(FILE* file, AudioCodec* codec) {
@@ -1450,77 +1888,158 @@ bool PlayWavFile(FILE* file, AudioCodec* codec) {
     return true;
 }
 
-void PlayTask(void* arg) {
-    auto* path_copy = static_cast<char*>(arg);
-    const bool is_opus = HasExt(path_copy, ".opus");
-    FILE* file = fopen(path_copy, "rb");
-    heap_caps_free(path_copy);
-    path_copy = nullptr;
+bool SpawnPlayTask(PlayTaskArgs* args) {
+    constexpr uint32_t kPlayTaskStack = 28 * 1024;
+    s_play_task = nullptr;
 
-    if (file == nullptr) {
-        PostPlayStatusFromWorker(I18n::T("无法打开录音文件"));
-        s_state.store(RecState::Idle);
-        if (esp_lv_adapter_lock(-1) == ESP_OK) {
-            if (s_screen_alive) {
-                UpdateRecordButtonUi();
-            }
-            esp_lv_adapter_unlock();
+    if (s_play_stack == nullptr) {
+        s_play_stack = static_cast<StackType_t*>(heap_caps_malloc(
+            kPlayTaskStack, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+    if (s_play_tcb == nullptr) {
+        s_play_tcb = static_cast<StaticTask_t*>(heap_caps_malloc(
+            sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+    if (s_play_stack != nullptr && s_play_tcb != nullptr) {
+        s_play_task = xTaskCreateStaticPinnedToCore(
+            PlayTask, "rec_play", kPlayTaskStack, args, tskIDLE_PRIORITY + 2,
+            s_play_stack, s_play_tcb, 0);
+        if (s_play_task != nullptr) {
+            return true;
         }
+    }
+
+    if (xTaskCreatePinnedToCore(PlayTask, "rec_play", kPlayTaskStack, args,
+                                tskIDLE_PRIORITY + 2, &s_play_task, 0) == pdPASS) {
+        return true;
+    }
+
+    ESP_LOGE(TAG, "play task start failed");
+    return false;
+}
+
+void PlayTask(void* arg) {
+    auto* args = static_cast<PlayTaskArgs*>(arg);
+    if (args == nullptr) {
         s_play_task = nullptr;
         vTaskDelete(nullptr);
         return;
     }
-
-    // 播放开功放时若仍在 AFE feed，会把 FreeRTOS 队列打坏（LoadProhibited）。
-    DisableWakeWordIfNeeded();
+    const uint32_t my_gen = args->gen;
+    const bool is_opus = HasExt(args->path, ".opus");
+    FILE* file = fopen(args->path, "rb");
+    heap_caps_free(args);
+    args = nullptr;
 
     auto& as = Application::GetInstance().GetAudioService();
     AudioCodec* codec = Board::GetInstance().GetAudioCodec();
+
+    if (file == nullptr) {
+        FailPlaybackFromWorker(my_gen, I18n::T("无法打开录音文件"));
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    int probed_rate = kSampleRate;
+    if (is_opus && !ProbeOpusHeadRate(file, probed_rate)) {
+        fclose(file);
+        FailPlaybackFromWorker(my_gen, I18n::T("录音文件损坏"));
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    if (my_gen != s_play_gen.load() || s_stop_play.load()) {
+        fclose(file);
+        FailPlaybackFromWorker(my_gen, nullptr);
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    if (!PrepareAudioForPlayback(as, codec)) {
+        fclose(file);
+        ReleaseAudioAfterPlayback(as);
+        FailPlaybackFromWorker(my_gen, I18n::T("音频未就绪"));
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    if (my_gen == s_play_gen.load()) {
+        s_state.store(RecState::Playing);
+        PostPlayStatusFromWorker(I18n::T("播放中…"));
+    }
+
+    ESP_LOGI(TAG, "playback start opus=%d path=%s gen=%u rate=%d",
+             is_opus ? 1 : 0, s_playing_path, static_cast<unsigned>(my_gen),
+             probed_rate);
     bool played_ok = false;
     if (is_opus) {
-        played_ok = PlayOpusFile(file, as);
+        played_ok = PlayOpusFile(file, codec, as, my_gen);
     } else {
-        as.ResetDecoder();
         played_ok = PlayWavFile(file, codec);
     }
     fclose(file);
 
-    as.ResetDecoder();
+    ReleaseAudioAfterPlayback(as);
+
+    if (my_gen != s_play_gen.load()) {
+        s_playing_path[0] = '\0';
+        s_state.store(RecState::Idle);
+        s_play_task = nullptr;
+        Application::GetInstance().Schedule([]() {
+            if (s_screen_alive) {
+                UpdateDetailPlayButton();
+                UpdateRecordButtonUi();
+            }
+        });
+        vTaskDelete(nullptr);
+        return;
+    }
 
     s_playing_path[0] = '\0';
     s_state.store(RecState::Idle);
-    if (played_ok && !s_stop_play.load()) {
+    const bool stopped = s_stop_play.load();
+    s_stop_play.store(false);
+    if (played_ok && !stopped) {
         PostPlayStatusFromWorker(I18n::T("播放结束"));
-    } else if (s_stop_play.load()) {
+    } else if (stopped) {
         PostPlayStatusFromWorker(I18n::T("已停止播放"));
+    } else {
+        PostPlayStatusFromWorker(I18n::T("播放失败"));
     }
-    if (esp_lv_adapter_lock(-1) == ESP_OK) {
+    Application::GetInstance().Schedule([]() {
         if (s_screen_alive) {
             UpdateRecordButtonUi();
             UpdateDetailPlayButton();
         }
-        esp_lv_adapter_unlock();
-    }
+    });
     s_play_task = nullptr;
     vTaskDelete(nullptr);
 }
 
 void StopPlayback() {
-    if (s_play_task == nullptr && s_state.load() != RecState::Playing) {
-        return;
+    ++s_play_gen;
+    const bool had_task = s_play_task != nullptr;
+    const bool was_active =
+        had_task || s_state.load() == RecState::Playing ||
+        s_playing_path[0] != '\0';
+    if (had_task) {
+        s_stop_play.store(true);
+        for (int i = 0; i < 50 && s_play_task != nullptr; ++i) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
     }
-    s_stop_play.store(true);
-    // 最多等约 300ms，避免长时间卡住 LVGL 线程。
-    for (int i = 0; i < 15 && s_play_task != nullptr; ++i) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-    s_stop_play.store(false);
     s_playing_path[0] = '\0';
-    if (s_state.load() == RecState::Playing && s_play_task == nullptr) {
-        s_state.store(RecState::Idle);
+    s_state.store(RecState::Idle);
+    s_stop_play.store(false);
+    if (was_active) {
+        ReleaseAudioAfterPlayback(Application::GetInstance().GetAudioService());
     }
-    Application::GetInstance().GetAudioService().ResetDecoder();
-    UpdateDetailPlayButton();
+    Application::GetInstance().Schedule([]() {
+        if (s_screen_alive) {
+            UpdateDetailPlayButton();
+            UpdateRecordButtonUi();
+        }
+    });
 }
 
 void StartPlayback(const char* path) {
@@ -1545,22 +2064,22 @@ void StartPlayback(const char* path) {
         return;
     }
 
-    auto* path_copy = static_cast<char*>(heap_caps_malloc(std::strlen(path) + 1, MALLOC_CAP_8BIT));
-    if (path_copy == nullptr) {
+    auto* args = static_cast<PlayTaskArgs*>(
+        heap_caps_malloc(sizeof(PlayTaskArgs), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    if (args == nullptr) {
         set_status(I18n::T("内存不足"));
         return;
     }
-    std::strcpy(path_copy, path);
+    std::strncpy(args->path, path, sizeof(args->path) - 1);
+    args->path[sizeof(args->path) - 1] = '\0';
+    args->gen = s_play_gen.load();
     std::snprintf(s_playing_path, sizeof(s_playing_path), "%s", path);
 
     s_stop_play.store(false);
-    s_state.store(RecState::Playing);
-    UpdateRecordButtonUi();
-    UpdateDetailPlayButton();
+    set_status(I18n::T("准备播放…"));
 
-    if (xTaskCreatePinnedToCore(PlayTask, "rec_play", 8 * 1024, path_copy,
-                                tskIDLE_PRIORITY + 2, &s_play_task, 0) != pdPASS) {
-        heap_caps_free(path_copy);
+    if (!SpawnPlayTask(args)) {
+        heap_caps_free(args);
         s_play_task = nullptr;
         s_playing_path[0] = '\0';
         s_state.store(RecState::Idle);
@@ -1589,8 +2108,11 @@ void OnDetailPlayClicked(lv_event_t* /*e*/) {
     if (s_detail_path[0] == '\0') {
         return;
     }
-    if (s_state.load() == RecState::Playing &&
-        std::strcmp(s_playing_path, s_detail_path) == 0) {
+    const bool playing_this =
+        s_state.load() == RecState::Playing &&
+        std::strcmp(s_playing_path, s_detail_path) == 0;
+    const bool play_busy = s_play_task != nullptr;
+    if (playing_this || play_busy) {
         StopPlayback();
         SetDetailStatusText(I18n::T("已停止播放"));
         UpdateDetailPlayButton();
@@ -1598,7 +2120,6 @@ void OnDetailPlayClicked(lv_event_t* /*e*/) {
         return;
     }
     StartPlayback(s_detail_path);
-    UpdateDetailPlayButton();
 }
 
 void AppendJsonStringArray(std::string& out, cJSON* arr, const char* title) {
@@ -1963,6 +2484,55 @@ void OnDetailAsrClicked(lv_event_t* /*e*/) {
 
 void OnDetailBackClicked(lv_event_t* /*e*/) { HideDetail(); }
 
+bool DeleteRecordingAt(int idx) {
+    if (idx < 0 || idx >= static_cast<int>(s_files.size())) {
+        return false;
+    }
+    const FileEntry& entry = s_files[static_cast<size_t>(idx)];
+    const char* path = entry.path;
+
+    if (s_detail_open && s_detail_idx == idx) {
+        s_stop_asr.store(true);
+    }
+    if (s_state.load() == RecState::Playing &&
+        std::strcmp(s_playing_path, path) == 0) {
+        StopPlayback();
+    }
+    if (unlink(path) != 0) {
+        ESP_LOGE(TAG, "delete failed: %s", path);
+        if (s_detail_open && s_detail_idx == idx) {
+            SetDetailStatusText(I18n::T("删除失败"));
+        } else {
+            SetListStatusText(I18n::T("删除失败"));
+        }
+        return false;
+    }
+    if (entry.format == RecFormat::Opus) {
+        UnlinkDurationSidecar(path);
+    }
+    ESP_LOGI(TAG, "deleted: %s", path);
+
+    if (s_detail_open && s_detail_idx == idx) {
+        HideDetail();
+        SetListStatusText(I18n::T("已删除"));
+    } else {
+        SetListStatusText(I18n::T("已删除"));
+    }
+    RebuildFileList();
+    return true;
+}
+
+void OnDetailDeleteClicked(lv_event_t* /*e*/) {
+    if (!s_detail_open || s_detail_idx < 0) {
+        return;
+    }
+    if (s_state.load() == RecState::Recording || s_state.load() == RecState::Saving) {
+        SetDetailStatusText(I18n::T("请先结束录音"));
+        return;
+    }
+    DeleteRecordingAt(s_detail_idx);
+}
+
 void HideDetail() {
     if (!s_detail_open) {
         return;
@@ -1986,9 +2556,10 @@ void ShowDetail(int idx) {
         s_ui.detail_panel == nullptr) {
         return;
     }
+    if (s_state.load() == RecState::Playing) {
+        StopPlayback();
+    }
     FileEntry& entry = s_files[static_cast<size_t>(idx)];
-    // 详情打开时同步补算一次（尾部扫描，通常很快）
-    EnsureOpusDuration(entry);
     s_detail_idx = idx;
     s_detail_open = true;
     strlcpy(s_detail_path, entry.path, sizeof(s_detail_path));
@@ -2021,11 +2592,17 @@ void ShowDetail(int idx) {
     UpdateDetailPlayButton();
     lv_obj_remove_flag(s_ui.detail_panel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_ui.detail_panel);
+    if (!entry.duration_ready) {
+        ScheduleDurationFill();
+    }
     ScheduleAsrQuery();
+    ESP_LOGI(TAG, "detail open idx=%d path=%s", idx, entry.path);
 }
 
 void OnRowClicked(lv_event_t* e) {
     const int idx = EventIndex(e);
+    ESP_LOGI(TAG, "list row click idx=%d files=%u", idx,
+             static_cast<unsigned>(s_files.size()));
     if (idx < 0 || idx >= static_cast<int>(s_files.size())) {
         return;
     }
@@ -2035,26 +2612,12 @@ void OnRowClicked(lv_event_t* e) {
 void OnDeleteClicked(lv_event_t* e) {
     lv_event_stop_bubbling(e);
     const int idx = EventIndex(e);
-    if (idx < 0 || idx >= static_cast<int>(s_files.size())) {
+    ESP_LOGI(TAG, "list delete click idx=%d", idx);
+    if (s_state.load() == RecState::Recording || s_state.load() == RecState::Saving) {
+        SetListStatusText(I18n::T("请先结束录音"));
         return;
     }
-    const FileEntry& entry = s_files[static_cast<size_t>(idx)];
-    const char* path = entry.path;
-    if (s_state.load() == RecState::Playing &&
-        std::strcmp(s_playing_path, path) == 0) {
-        StopPlayback();
-    }
-    if (unlink(path) != 0) {
-        ESP_LOGE(TAG, "delete failed: %s", path);
-        SetListStatusText(I18n::T("删除失败"));
-        return;
-    }
-    if (entry.format == RecFormat::Opus) {
-        UnlinkDurationSidecar(path);
-    }
-    ESP_LOGI(TAG, "deleted: %s", path);
-    SetListStatusText(I18n::T("已删除"));
-    RebuildFileList();
+    DeleteRecordingAt(idx);
 }
 
 void ClearListChildren() {
@@ -2062,6 +2625,44 @@ void ClearListChildren() {
         return;
     }
     lv_obj_clean(s_ui.list_scroll);
+}
+
+void RefreshListRowMeta() {
+    if (!s_screen_alive || s_ui.list_scroll == nullptr) {
+        return;
+    }
+    const uint32_t row_count = lv_obj_get_child_count(s_ui.list_scroll);
+    for (uint32_t i = 0; i < row_count && i < s_files.size(); ++i) {
+        lv_obj_t* row = lv_obj_get_child(s_ui.list_scroll, i);
+        if (row == nullptr) {
+            continue;
+        }
+        lv_obj_t* open = lv_obj_get_child(row, 0);
+        if (open == nullptr) {
+            continue;
+        }
+        lv_obj_t* hint = lv_obj_get_child(open, 1);
+        if (hint == nullptr) {
+            continue;
+        }
+        const FileEntry& entry = s_files[i];
+        char dur[16];
+        char size_buf[24];
+        if (entry.duration_ready) {
+            FormatTimer(dur, sizeof(dur), entry.duration_sec);
+        } else {
+            std::snprintf(dur, sizeof(dur), "--:--");
+        }
+        FormatFileSize(size_buf, sizeof(size_buf), entry.size_bytes);
+        char hint_buf[48];
+        if (kRoundLayout) {
+            std::snprintf(hint_buf, sizeof(hint_buf), I18n::T("%s · %s"), dur, size_buf);
+        } else {
+            std::snprintf(hint_buf, sizeof(hint_buf), I18n::T("时长 %s · %s · 点击查看"),
+                          dur, size_buf);
+        }
+        lv_label_set_text(hint, hint_buf);
+    }
 }
 
 void RebuildFileList() { RebuildFileList(true); }
@@ -2100,20 +2701,27 @@ void RebuildFileList(bool schedule_fill) {
                               LV_FLEX_ALIGN_CENTER);
         lv_obj_set_style_pad_column(row, kRoundLayout ? 8 : 12, LV_PART_MAIN);
         lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(row, OnRowClicked, LV_EVENT_CLICKED, idx_ud);
-        screen_swipe_back_ignore(row, true);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        screen_swipe_back_ignore(row, false);
 
-        lv_obj_t* info = lv_obj_create(row);
-        lv_obj_remove_style_all(info);
-        lv_obj_set_flex_grow(info, 1);
-        lv_obj_set_height(info, LV_SIZE_CONTENT);
-        lv_obj_set_flex_flow(info, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_flex_align(info, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+        lv_obj_t* open = lv_button_create(row);
+        lv_obj_remove_style_all(open);
+        lv_obj_set_flex_grow(open, 1);
+        lv_obj_set_height(open, kListRowH - (kRoundLayout ? 20 : 16));
+        lv_obj_set_style_min_height(open, kListRowH - (kRoundLayout ? 20 : 16),
+                                    LV_PART_MAIN);
+        lv_obj_set_flex_flow(open, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(open, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START,
                               LV_FLEX_ALIGN_START);
-        lv_obj_set_style_pad_row(info, kRoundLayout ? 4 : 6, LV_PART_MAIN);
-        lv_obj_remove_flag(info, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_remove_flag(info, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_pad_row(open, kRoundLayout ? 4 : 6, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(open, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(open, lv_color_hex(0xFFFFFF),
+                                  Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+        lv_obj_set_style_bg_opa(open, LV_OPA_10, Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+        lv_obj_set_style_radius(open, kRoundLayout ? 10 : 12, LV_PART_MAIN);
+        lv_obj_add_event_cb(open, OnRowClicked, LV_EVENT_CLICKED, idx_ud);
+        lv_obj_add_flag(open, LV_OBJ_FLAG_CLICKABLE);
+        screen_swipe_back_ignore(open, true);
 
         char title_buf[48];
         if (kRoundLayout) {
@@ -2121,14 +2729,15 @@ void RebuildFileList(bool schedule_fill) {
         } else {
             strlcpy(title_buf, s_files[i].name, sizeof(title_buf));
         }
-        lv_obj_t* name = lv_label_create(info);
+        lv_obj_t* name = lv_label_create(open);
         lv_label_set_text(name, title_buf);
         lv_label_set_long_mode(name, LV_LABEL_LONG_CLIP);
         lv_obj_set_width(name, LV_PCT(100));
         lv_obj_set_style_text_color(name, lv_color_hex(kColorText), LV_PART_MAIN);
         lv_obj_set_style_text_font(name, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_remove_flag(name, LV_OBJ_FLAG_CLICKABLE);
 
-        lv_obj_t* hint = lv_label_create(info);
+        lv_obj_t* hint = lv_label_create(open);
         char dur[16];
         char size_buf[24];
         if (s_files[i].duration_ready) {
@@ -2149,6 +2758,7 @@ void RebuildFileList(bool schedule_fill) {
         lv_obj_set_width(hint, LV_PCT(100));
         lv_obj_set_style_text_color(hint, lv_color_hex(kColorSubtle), LV_PART_MAIN);
         lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_remove_flag(hint, LV_OBJ_FLAG_CLICKABLE);
 
         lv_obj_t* del = lv_button_create(row);
         lv_obj_remove_style_all(del);
@@ -2159,7 +2769,9 @@ void RebuildFileList(bool schedule_fill) {
         lv_obj_set_style_bg_color(del, lv_color_hex(0xB91C1C),
                                   Sel(LV_PART_MAIN, LV_STATE_PRESSED));
         lv_obj_add_event_cb(del, OnDeleteClicked, LV_EVENT_CLICKED, idx_ud);
+        lv_obj_add_flag(del, LV_OBJ_FLAG_CLICKABLE);
         screen_swipe_back_ignore(del, true);
+        lv_obj_move_foreground(del);
 
         lv_obj_t* del_lbl = lv_label_create(del);
         lv_label_set_text(del_lbl, I18n::T("删除"));
@@ -2169,7 +2781,7 @@ void RebuildFileList(bool schedule_fill) {
     }
 
     if (schedule_fill) {
-        ScheduleDurationFill();
+        Application::GetInstance().Schedule([]() { ScheduleDurationFill(); });
     }
 }
 
@@ -2209,7 +2821,9 @@ void ForceStopAll() {
     s_detail_name[0] = '\0';
     s_state.store(RecState::Idle);
     RestoreWakeWordIfNeeded();
-    Application::GetInstance().GetAudioService().ResetDecoder();
+    auto& as = Application::GetInstance().GetAudioService();
+    as.ResetDecoder();
+    ReleaseAudioAfterPlayback(as);
 }
 
 void BuildDetailPanel(lv_obj_t* parent) {
@@ -2250,6 +2864,25 @@ void BuildDetailPanel(lv_obj_t* parent) {
 
     if constexpr (kRoundLayout) {
         make_back_btn(panel, kDetailTopY);
+
+        lv_obj_t* del = lv_button_create(panel);
+        s_ui.detail_del_btn = del;
+        lv_obj_remove_style_all(del);
+        lv_obj_set_size(del, 64, 36);
+        lv_obj_align(del, LV_ALIGN_TOP_RIGHT, -24, kDetailTopY);
+        lv_obj_set_style_radius(del, 10, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(del, lv_color_hex(kColorDanger), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(del, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(del, lv_color_hex(0xB91C1C),
+                                  Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+        lv_obj_add_event_cb(del, OnDetailDeleteClicked, LV_EVENT_CLICKED, nullptr);
+        screen_swipe_back_ignore(del, true);
+
+        lv_obj_t* del_lbl = lv_label_create(del);
+        lv_label_set_text(del_lbl, I18n::T("删除"));
+        lv_obj_set_style_text_color(del_lbl, lv_color_white(), LV_PART_MAIN);
+        lv_obj_set_style_text_font(del_lbl, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_center(del_lbl);
 
         s_ui.detail_title = lv_label_create(panel);
         lv_label_set_text(s_ui.detail_title, "");
@@ -2306,8 +2939,10 @@ void BuildDetailPanel(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(play, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_bg_color(play, lv_color_hex(0x2563EB),
                               Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+    lv_obj_add_flag(play, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(play, OnDetailPlayClicked, LV_EVENT_CLICKED, nullptr);
     screen_swipe_back_ignore(play, true);
+    lv_obj_move_foreground(play);
 
     s_ui.detail_play_lbl = lv_label_create(play);
     lv_label_set_text(s_ui.detail_play_lbl, I18n::T("播放"));
@@ -2342,10 +2977,31 @@ void BuildDetailPanel(lv_obj_t* parent) {
                                LV_PART_MAIN);
     lv_obj_center(s_ui.detail_asr_lbl);
 
-    // 竖排按钮占用的总高度：圆屏两个按钮 + 间隙，大屏保持原来单行 72px。
+    if constexpr (!kRoundLayout) {
+        lv_obj_t* del = lv_button_create(panel);
+        s_ui.detail_del_btn = del;
+        lv_obj_remove_style_all(del);
+        lv_obj_set_size(del, kDetailBtnW, kDetailBtnH);
+        lv_obj_align(del, LV_ALIGN_TOP_MID, 0, kDetailDelY);
+        lv_obj_set_style_radius(del, 20, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(del, lv_color_hex(kColorDanger), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(del, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(del, lv_color_hex(0xB91C1C),
+                                  Sel(LV_PART_MAIN, LV_STATE_PRESSED));
+        lv_obj_add_event_cb(del, OnDetailDeleteClicked, LV_EVENT_CLICKED, nullptr);
+        screen_swipe_back_ignore(del, true);
+
+        lv_obj_t* del_lbl = lv_label_create(del);
+        lv_label_set_text(del_lbl, I18n::T("删除"));
+        lv_obj_set_style_text_color(del_lbl, lv_color_white(), LV_PART_MAIN);
+        lv_obj_set_style_text_font(del_lbl, &font_puhui_30_4, LV_PART_MAIN);
+        lv_obj_center(del_lbl);
+    }
+
+    // 竖排按钮占用的总高度：圆屏两个按钮 + 间隙，大屏为并排一行再加删除行。
     constexpr int32_t kDetailBtnsBlockH =
         kRoundLayout ? (kDetailAsrY + kDetailBtnH - kDetailPlayY)
-                     : (48 + 72);
+                     : (kDetailDelY + kDetailBtnH - kHeaderH);
     constexpr int32_t kDetailStatusY =
         kRoundLayout ? (kDetailAsrY + kDetailBtnH + 10)
                      : (kHeaderH + kDetailBtnsBlockH + 16);
@@ -2547,7 +3203,8 @@ void BuildListTab(lv_obj_t* tab) {
                           LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(s_ui.list_scroll, 0, LV_PART_MAIN);
     lv_obj_set_scrollbar_mode(s_ui.list_scroll, LV_SCROLLBAR_MODE_AUTO);
-    screen_swipe_back_ignore(s_ui.list_scroll, true);
+    lv_obj_add_flag(s_ui.list_scroll, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    screen_swipe_back_ignore(s_ui.list_scroll, false);
 }
 
 void BuildTabView(lv_obj_t* parent) {
@@ -2650,7 +3307,10 @@ lv_obj_t* RecordingScreen::Create() {
 void RecordingScreen::LifecycleCallback(screen_lifecycle_event_t event) {
     if (event == SCREEN_LIFECYCLE_LOAD) {
         ESP_LOGI(TAG, "load: recording_screen sd=%d", s_sd_ready ? 1 : 0);
-        PrepareMicForRecording();
+        if (s_sd_ready) {
+            CleanupStalePartFiles();
+            WarnIfSdFsckArtifacts();
+        }
     } else {
         ESP_LOGI(TAG, "unload: recording_screen");
         ForceStopAll();
