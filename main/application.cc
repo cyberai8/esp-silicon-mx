@@ -464,7 +464,7 @@ void Application::RestoreSystemAudioAfterStressTest() {
     // 给电台 GMF/HLS 释放后的内部堆一点整理时间，再抢 I2S DMA。
     vTaskDelay(pdMS_TO_TICKS(80));
     if (device_state_ == kDeviceStateIdle && IsVoiceChatAllowed()) {
-        audio_service_.EnableWakeWordDetection(true);
+        StartDigitalPeopleListening();
     }
     ESP_LOGI(TAG, "System audio restored after stress test");
 }
@@ -491,7 +491,7 @@ void Application::DismissAlert() {
 
 bool Application::IsVoiceChatAllowed() const {
 #ifdef HAVE_LVGL
-    return DigitalPeopleScreen::IsActive();
+    return DigitalPeopleScreen::IsVoiceSessionEnabled();
 #else
     return false;
 #endif
@@ -541,6 +541,54 @@ void Application::ToggleChatState() {
     } else if (device_state_ == kDeviceStateListening) {
         Schedule([this]() {
             protocol_->CloseAudioChannel();
+        });
+    }
+}
+
+void Application::StartDigitalPeopleListening() {
+    if (!IsVoiceChatAllowed()) {
+        return;
+    }
+    if (device_state_ == kDeviceStateActivating) {
+        SetDeviceState(kDeviceStateIdle);
+        return;
+    } else if (device_state_ == kDeviceStateWifiConfiguring) {
+        return;
+    }
+
+    if (!protocol_) {
+        ESP_LOGW(TAG, "Digital people listen: protocol not ready");
+        return;
+    }
+
+    if (device_state_ == kDeviceStateIdle) {
+        Schedule([this]() {
+            if (!IsVoiceChatAllowed()) {
+                return;
+            }
+            if (!protocol_->IsAudioChannelOpened()) {
+                SetDeviceState(kDeviceStateConnecting);
+                if (!protocol_->OpenAudioChannel()) {
+                    return;
+                }
+            }
+            SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop
+                                                  : kListeningModeRealtime);
+        });
+    } else if (device_state_ == kDeviceStateSpeaking) {
+        Schedule([this]() {
+            AbortSpeaking(kAbortReasonNone);
+            if (!IsVoiceChatAllowed()) {
+                return;
+            }
+            if (!protocol_->IsAudioChannelOpened()) {
+                SetDeviceState(kDeviceStateConnecting);
+                if (!protocol_->OpenAudioChannel()) {
+                    return;
+                }
+            }
+            SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop
+                                                  : kListeningModeRealtime);
         });
     }
 }
@@ -882,7 +930,7 @@ void Application::StartNetworkAndProtocol() {
         WeatherDistrictData weather;
         const esp_err_t werr = WeatherService::Instance().FetchByDevice(weather);
         if (restore_wake && device_state_ == kDeviceStateIdle && IsVoiceChatAllowed()) {
-            audio_service_.EnableWakeWordDetection(true);
+            StartDigitalPeopleListening();
         }
         if (werr == ESP_OK) {
             ESP_LOGI(TAG, "Weather prefetched for standby (%s %d°C)",
@@ -1191,7 +1239,7 @@ void Application::OnWakeWordDetected() {
             SetDeviceState(kDeviceStateConnecting);
             if (!protocol_->OpenAudioChannel()) {
                 if (IsVoiceChatAllowed()) {
-                    audio_service_.EnableWakeWordDetection(true);
+                    StartDigitalPeopleListening();
                 }
                 return;
             }
@@ -1259,7 +1307,11 @@ void Application::SetDeviceState(DeviceState state) {
             display->SetStatus(Lang::Strings::STANDBY);
             display->SetEmotion("neutral");
             audio_service_.EnableVoiceProcessing(false);
-            audio_service_.EnableWakeWordDetection(IsVoiceChatAllowed());
+            if (IsVoiceChatAllowed()) {
+                StartDigitalPeopleListening();
+            } else {
+                audio_service_.EnableWakeWordDetection(false);
+            }
             break;
         case kDeviceStateConnecting:
             board.SetPowerSaveMode(false);
@@ -1406,7 +1458,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
             SetDeviceState(kDeviceStateConnecting);
             if (!protocol_->OpenAudioChannel()) {
                 if (IsVoiceChatAllowed()) {
-                    audio_service_.EnableWakeWordDetection(true);
+                    StartDigitalPeopleListening();
                 }
                 return;
             }

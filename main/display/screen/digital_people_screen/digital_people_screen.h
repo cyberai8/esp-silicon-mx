@@ -23,6 +23,8 @@ public:
     static void LifecycleCallback(screen_lifecycle_event_t event);
 
     static bool IsActive();
+    // 页面前台且允许语音会话（unload 时先清此标志，避免 Idle 又自动开麦）。
+    static bool IsVoiceSessionEnabled();
     static void ShowUserMessage(const char* text);
     static void ShowSystemMessage(const char* text);
     static void ClearMessages();

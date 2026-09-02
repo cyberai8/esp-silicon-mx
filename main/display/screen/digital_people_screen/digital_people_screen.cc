@@ -64,6 +64,7 @@ struct ActivationBlockedDialogUi {
 };
 ActivationBlockedDialogUi s_activation_dlg;
 bool s_activation_blocked = false;
+bool s_voice_session_enabled = false;
 
 const lv_font_t* bubble_font() {
     return kRoundLayout ? &font_puhui_20_4 : &font_puhui_30_4;
@@ -421,6 +422,10 @@ bool DigitalPeopleScreen::IsActive() {
     return s_ui.screen != nullptr;
 }
 
+bool DigitalPeopleScreen::IsVoiceSessionEnabled() {
+    return s_voice_session_enabled && s_ui.screen != nullptr;
+}
+
 void DigitalPeopleScreen::ShowUserMessage(const char* text) {
     if (!IsActive() || text == nullptr || text[0] == '\0') return;
     if (s_activation_blocked) return;
@@ -452,24 +457,26 @@ void DigitalPeopleScreen::RefreshDeviceState() {
 }
 
 void DigitalPeopleScreen::LifecycleCallback(screen_lifecycle_event_t event) {
-    auto& audio_service = Application::GetInstance().GetAudioService();
+    auto& app = Application::GetInstance();
+    auto& audio_service = app.GetAudioService();
     if (event == SCREEN_LIFECYCLE_LOAD) {
         if (!is_device_activated()) {
+            s_voice_session_enabled = false;
             ESP_LOGW(TAG,
                      "load: digital_people_screen blocked (device not activated)");
             log_activation_blocked();
         } else {
-            ESP_LOGI(TAG, "load: digital_people_screen");
+            s_voice_session_enabled = true;
+            ESP_LOGI(TAG, "load: digital_people_screen (auto listen)");
+            app.StartDigitalPeopleListening();
         }
-        audio_service.EnableWakeWordDetection(true);
         RefreshDeviceState();
     } else {
         ESP_LOGI(TAG, "unload: digital_people_screen");
+        s_voice_session_enabled = false;
         audio_service.EnableWakeWordDetection(false);
         ResetLipSync();
-        Application::GetInstance().Schedule([]() {
-            Application::GetInstance().ForceReturnToIdle();
-        });
+        app.ForceReturnToIdle();
     }
 }
 

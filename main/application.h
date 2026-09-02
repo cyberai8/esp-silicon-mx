@@ -54,6 +54,8 @@ public:
     void AbortSpeaking(AbortReason reason);
     void ToggleChatState();
     void StartListening();
+    // 数字人页：直接进聆听，不走唤醒词。
+    void StartDigitalPeopleListening();
     void StopListening();
     void Reboot();
     void WakeWordInvoke(const std::string& wake_word);
