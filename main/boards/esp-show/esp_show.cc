@@ -877,10 +877,10 @@ private:
                 continue;
             }
             ESP_LOGI(TAG, "QMI8658 auto-rotation enabled");
+            // 摇一摇暂时关闭；IMU 任务仅保留自动旋转。
             xTaskCreate(
                 [](void* arg) {
                     auto* self = static_cast<EspShow*>(arg);
-                    int16_t prev_ax = 0;
                     constexpr int kPollMs = 120;
                     for (;;) {
                         const ImuSample sample = ReadQmiImu(self->qmi_dev_);
@@ -898,21 +898,6 @@ private:
                                           reinterpret_cast<void*>(static_cast<intptr_t>(target)));
                         }
 #endif
-
-                        if (prev_ax != 0) {
-                            const int delta =
-                                abs(static_cast<int>(sample.ax) - static_cast<int>(prev_ax));
-                            if (delta > 12000) {
-                                ESP_LOGI(TAG, "QMI8658 shake score=%d", delta);
-                                if (DigitalPeopleScreen::IsActive()) {
-                                    Application::GetInstance().ToggleChatState();
-                                } else {
-                                    HomeScreen::OpenDigitalPeopleAsync();
-                                }
-                                vTaskDelay(pdMS_TO_TICKS(1500));
-                            }
-                        }
-                        prev_ax = sample.ax;
                         vTaskDelay(pdMS_TO_TICKS(kPollMs));
                     }
                 },
