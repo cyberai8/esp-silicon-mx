@@ -15,6 +15,7 @@
 
 #include "esp_audio_simple_player.h"
 #include "esp_audio_simple_player_advance.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
@@ -183,6 +184,14 @@ TaskHandle_t s_play_task = nullptr;
 AudioCodec* s_codec = nullptr;
 std::vector<int16_t> s_pcm_buf;
 bool s_wake_disabled_by_us = false;
+
+// 记忆曲目由一个很小的内部 SRAM 任务负责。播放任务可以继续使用 PSRAM 栈，
+// 但不能在它里面直接执行 NVS/Flash 操作（Flash 操作会关闭 Cache）。
+std::mutex s_remember_mutex;
+std::string s_pending_track;
+TaskHandle_t s_remember_task = nullptr;
+StackType_t* s_remember_stack = nullptr;
+StaticTask_t* s_remember_tcb = nullptr;
 
 // UI 侧的播放计时（只在 LVGL 线程读写）
 uint32_t s_ui_seq = 0;
@@ -473,13 +482,62 @@ void StartScan() {
 // ---------------------------------------------------------------------------
 
 std::string MakeFileUri(const std::string& path) {
-    return std::string("file://") + path;
+    // GMF file IO: file:///sdcard/... 与 file://sdcard/... 均可；统一成前者。
+    if (path.rfind("file://", 0) == 0) {
+        return path;
+    }
+    if (!path.empty() && path[0] == '/') {
+        return std::string("file://") + path;
+    }
+    return std::string("file:///") + path;
 }
+
+bool PrepareCodecForMusicPlayback(const char* reason) {
+    auto& as = Application::GetInstance().GetAudioService();
+    as.EnableVoiceProcessing(false);
+    as.ResetDecoder();
+    // 数字人 speaking 会开唤醒词 AFE，仅 Enable(false) 不够，必须释放资源腾 I2S/堆。
+    if (as.ReleaseWakeWordDetection()) {
+        s_wake_disabled_by_us = true;
+        vTaskDelay(pdMS_TO_TICKS(150));
+    } else {
+        as.EnableWakeWordDetection(false);
+    }
+    if (s_codec == nullptr) {
+        s_codec = Board::GetInstance().GetAudioCodec();
+    }
+    if (s_codec == nullptr) {
+        ESP_LOGW(TAG, "music prepare(%s): no codec", reason);
+        return false;
+    }
+    if (s_codec->input_enabled()) {
+        s_codec->EnableInput(false);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (s_codec->output_enabled()) {
+        s_codec->EnableOutput(false);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    as.SetExternalPlaybackHold(true);
+    as.NotifyExternalPlayback();
+    if (!s_codec->output_enabled()) {
+        s_codec->EnableOutput(true);
+    }
+    const bool ok = s_codec->output_enabled();
+    ESP_LOGI(TAG, "music prepare(%s): output=%d vol=%d", reason, ok ? 1 : 0,
+             s_codec->output_volume());
+    return ok;
+}
+
+std::atomic<uint32_t> s_pcm_cb_logs{0};
 
 extern "C" int SdMusicOutCallback(uint8_t* data, int data_size, void* ctx) {
     auto* codec = static_cast<AudioCodec*>(ctx);
     if (codec == nullptr || data == nullptr || data_size <= 0) {
         return 0;
+    }
+    if (!codec->output_enabled()) {
+        codec->EnableOutput(true);
     }
     const int frames = data_size / static_cast<int>(sizeof(int16_t));
     if (frames <= 0) {
@@ -507,7 +565,21 @@ extern "C" int SdMusicOutCallback(uint8_t* data, int data_size, void* ctx) {
     }
     Application::GetInstance().GetAudioService().NotifyExternalPlayback();
     codec->OutputData(s_pcm_buf);
-    return 0;
+    const uint32_t n = s_pcm_cb_logs.fetch_add(1, std::memory_order_relaxed);
+    if (n < 3) {
+        int peak = 0;
+        for (int16_t s : s_pcm_buf) {
+            const int v = s >= 0 ? s : -s;
+            if (v > peak) {
+                peak = v;
+            }
+        }
+        ESP_LOGI(TAG, "music pcm#%u samples=%u peak=%d out=%d",
+                 static_cast<unsigned>(n),
+                 static_cast<unsigned>(s_pcm_buf.size()), peak,
+                 codec->output_enabled() ? 1 : 0);
+    }
+    return data_size;
 }
 
 extern "C" int SdMusicEventCallback(esp_asp_event_pkt_t* event, void* /*ctx*/) {
@@ -561,7 +633,9 @@ extern "C" int SdMusicPrevCallback(esp_asp_handle_t* handle, void* ctx) {
 void StopCurrentPlayback() {
     s_play_gen.fetch_add(1, std::memory_order_relaxed);
     s_paused.store(false, std::memory_order_relaxed);
-    if (s_player != nullptr) {
+    // esp_audio_simple_player_new() 创建对象后，pipeline 还可能尚未建立。
+    // 这时调用 stop() 会在 GMF 内部报 "pipeline_stop: Got NULL Pointer"。
+    if (s_player != nullptr && s_in_run.load(std::memory_order_relaxed)) {
         esp_audio_simple_player_stop(s_player);
     }
 }
@@ -604,9 +678,64 @@ size_t NextIndexAfterEnd(size_t current, size_t count) {
     }
 }
 
-void RememberTrack(const std::string& path) {
+void RememberTrackNow(const std::string& path) {
     Settings settings("music", true);
     settings.SetString("last_path", path);
+}
+
+void RememberTrackTask(void* /*arg*/) {
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        std::string path;
+        {
+            std::lock_guard<std::mutex> lock(s_remember_mutex);
+            path.swap(s_pending_track);
+        }
+        if (!path.empty()) {
+            RememberTrackNow(path);
+        }
+    }
+}
+
+void EnsureRememberTrackTask() {
+    if (s_remember_task != nullptr) {
+        return;
+    }
+
+    constexpr uint32_t kStack = 4 * 1024;
+    if (s_remember_stack == nullptr) {
+        s_remember_stack = static_cast<StackType_t*>(heap_caps_malloc(
+            kStack, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+    if (s_remember_tcb == nullptr) {
+        s_remember_tcb = static_cast<StaticTask_t*>(heap_caps_malloc(
+            sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+    if (s_remember_stack == nullptr || s_remember_tcb == nullptr) {
+        ESP_LOGE(TAG, "remember task create failed: internal SRAM unavailable");
+        return;
+    }
+
+    s_remember_task = xTaskCreateStaticPinnedToCore(
+        RememberTrackTask, "music_nvs", kStack, nullptr, 2,
+        s_remember_stack, s_remember_tcb, 0);
+    if (s_remember_task == nullptr) {
+        ESP_LOGE(TAG, "remember task create failed");
+    }
+}
+
+void RememberTrackAsync(const std::string& path) {
+    EnsureRememberTrackTask();
+    if (s_remember_task == nullptr) {
+        // 播放功能不依赖“记忆上次曲目”；内存不足时只跳过持久化。
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(s_remember_mutex);
+        s_pending_track = path;
+    }
+    xTaskNotifyGive(s_remember_task);
 }
 
 void SdPlayTask(void* /*arg*/) {
@@ -634,7 +763,10 @@ void SdPlayTask(void* /*arg*/) {
     esp_audio_simple_player_set_event(s_player, SdMusicEventCallback, nullptr);
 
     if (s_codec != nullptr) {
-        s_codec->EnableOutput(true);
+        Application::GetInstance().GetAudioService().NotifyExternalPlayback();
+        if (!s_codec->output_enabled()) {
+            s_codec->EnableOutput(true);
+        }
     }
 
     while (!s_shutdown.load(std::memory_order_relaxed)) {
@@ -657,6 +789,9 @@ void SdPlayTask(void* /*arg*/) {
 
         if (s_codec != nullptr) {
             Application::GetInstance().GetAudioService().NotifyExternalPlayback();
+            if (!s_codec->output_enabled()) {
+                s_codec->EnableOutput(true);
+            }
         }
 
         const uint32_t gen = s_play_gen.load(std::memory_order_relaxed);
@@ -665,7 +800,7 @@ void SdPlayTask(void* /*arg*/) {
         s_paused.store(false, std::memory_order_relaxed);
         s_pcm_channels.store(2, std::memory_order_relaxed);
         s_track_seq.fetch_add(1, std::memory_order_relaxed);
-        RememberTrack(track.path);
+        RememberTrackAsync(track.path);
         ESP_LOGI(TAG, "play: %s", track.path.c_str());
 
         s_in_run.store(true, std::memory_order_relaxed);
@@ -704,7 +839,36 @@ void EnsurePlayTask() {
         return;
     }
     s_shutdown.store(false, std::memory_order_relaxed);
-    xTaskCreate(SdPlayTask, "sd_music", 4096, nullptr, 5, &s_play_task);
+    constexpr uint32_t kStack = 8 * 1024;
+    // 播放/解码任务保留在 PSRAM；NVS 持久化已经转交给内部 SRAM 的
+    // music_nvs 任务，因此这里不再需要为 NVS 腾出整块内部栈。
+    static StackType_t* s_play_stack = nullptr;
+    static StaticTask_t* s_play_tcb = nullptr;
+    if (s_play_stack == nullptr) {
+        s_play_stack = static_cast<StackType_t*>(heap_caps_malloc(
+            kStack, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+    if (s_play_tcb == nullptr) {
+        s_play_tcb = static_cast<StaticTask_t*>(heap_caps_malloc(
+            sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+    if (s_play_stack != nullptr && s_play_tcb != nullptr) {
+        s_play_task = xTaskCreateStaticPinnedToCore(
+            SdPlayTask, "sd_music", kStack, nullptr, 5, s_play_stack, s_play_tcb,
+            0);
+        if (s_play_task != nullptr) {
+            ESP_LOGI(TAG, "play task started (SPIRAM stack)");
+            return;
+        }
+    }
+    // PSRAM 不可用时回退到普通任务创建；这只影响极端内存不足场景。
+    if (xTaskCreatePinnedToCore(SdPlayTask, "sd_music", kStack, nullptr, 5,
+                                &s_play_task, 0) == pdPASS) {
+        ESP_LOGI(TAG, "play task started (fallback stack)");
+        return;
+    }
+    s_play_task = nullptr;
+    ESP_LOGE(TAG, "play task create failed");
 }
 
 void ShutdownPlayTask() {
@@ -726,11 +890,16 @@ bool IsPlayingNow() {
 
 void PlayIndex(size_t idx) {
     if (idx >= TrackCount()) {
+        ESP_LOGW(TAG, "PlayIndex idx=%u count=%u", static_cast<unsigned>(idx),
+                 static_cast<unsigned>(TrackCount()));
         return;
     }
+    ESP_LOGI(TAG, "PlayIndex idx=%u", static_cast<unsigned>(idx));
+    PrepareCodecForMusicPlayback("PlayIndex");
+    s_pcm_cb_logs.store(0, std::memory_order_relaxed);
     s_index.store(idx, std::memory_order_relaxed);
     s_want_play.store(true, std::memory_order_relaxed);
-    Application::GetInstance().GetAudioService().NotifyExternalPlayback();
+    EnsurePlayTask();
     StopCurrentPlayback();
     RefreshTrackUi();
 }
@@ -1254,6 +1423,10 @@ void OnNextClicked(lv_event_t* /*e*/) {
 }
 
 void OnPlayClicked(lv_event_t* /*e*/) {
+    ESP_LOGI(TAG, "play clicked want=%d paused=%d count=%u task=%p",
+             s_want_play.load() ? 1 : 0, s_paused.load() ? 1 : 0,
+             static_cast<unsigned>(TrackCount()),
+             static_cast<void*>(s_play_task));
     if (TrackCount() == 0) {
         ShowStateLayer();
         return;
@@ -1270,12 +1443,15 @@ void OnPlayClicked(lv_event_t* /*e*/) {
         ApplyPlayStateToUi(false);
         return;
     }
-    Application::GetInstance().GetAudioService().NotifyExternalPlayback();
+    PrepareCodecForMusicPlayback("play_btn");
+    s_pcm_cb_logs.store(0, std::memory_order_relaxed);
+    EnsurePlayTask();
     if (s_paused.load(std::memory_order_relaxed) && s_player != nullptr) {
         esp_audio_simple_player_resume(s_player);
         s_paused.store(false, std::memory_order_relaxed);
     } else {
         s_want_play.store(true, std::memory_order_relaxed);
+        StopCurrentPlayback();
     }
     ApplyPlayStateToUi(true);
 }
@@ -1542,19 +1718,10 @@ void MusicScreenSd::LifecycleCallback(screen_lifecycle_event_t event) {
     if (event == SCREEN_LIFECYCLE_LOAD) {
         ESP_LOGI(TAG, "load: SD card music");
         s_codec = Board::GetInstance().GetAudioCodec();
-        auto& as = Application::GetInstance().GetAudioService();
         s_wake_disabled_by_us = false;
-        if (as.IsWakeWordRunning()) {
-            as.ReleaseWakeWordDetection();
-            s_wake_disabled_by_us = true;
-            vTaskDelay(pdMS_TO_TICKS(150));
-        }
-        if (s_codec != nullptr) {
-            s_codec->EnableInput(false);
-            as.SetExternalPlaybackHold(true);
-            as.NotifyExternalPlayback();
-        }
-
+        s_pcm_cb_logs.store(0, std::memory_order_relaxed);
+        PrepareCodecForMusicPlayback("load");
+        EnsureRememberTrackTask();
         StartScan();
         EnsurePlayTask();
     } else {

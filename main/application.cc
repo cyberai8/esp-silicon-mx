@@ -1565,12 +1565,20 @@ void Application::ForceReturnToIdle() {
         return;
     }
     tts_playback_active_.store(false);
+    audio_service_.EnableVoiceProcessing(false);
     if (device_state_ == kDeviceStateListening && protocol_) {
         protocol_->CloseAudioChannel();
     } else if (device_state_ == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
+        if (protocol_ && protocol_->IsAudioChannelOpened()) {
+            protocol_->CloseAudioChannel();
+        }
     } else {
         audio_service_.ResetDecoder();
+    }
+    if (AudioCodec* codec = Board::GetInstance().GetAudioCodec();
+        codec != nullptr && codec->input_enabled()) {
+        codec->EnableInput(false);
     }
     SetDeviceState(kDeviceStateIdle);
 }
