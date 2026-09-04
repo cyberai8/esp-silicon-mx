@@ -68,6 +68,18 @@ void Backlight::SetBrightness(uint8_t brightness, bool permanent) {
     ESP_LOGI(TAG, "Set brightness to %d", brightness);
 }
 
+void Backlight::SetBrightnessImmediately(uint8_t brightness) {
+    if (brightness > 100) {
+        brightness = 100;
+    }
+    if (transition_timer_ != nullptr) {
+        esp_timer_stop(transition_timer_);
+    }
+    brightness_ = brightness;
+    target_brightness_ = brightness;
+    SetBrightnessImpl(brightness_);
+}
+
 void Backlight::OnTransitionTimer() {
     if (brightness_ == target_brightness_) {
         esp_timer_stop(transition_timer_);

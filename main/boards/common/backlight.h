@@ -16,6 +16,8 @@ public:
 
     void RestoreBrightness();
     void SetBrightness(uint8_t brightness, bool permanent = false);
+    // 立刻改 PWM，不做渐变、不写 NVS。用于 QSPI 条带刷新时短暂关背光。
+    void SetBrightnessImmediately(uint8_t brightness);
     inline uint8_t brightness() const { return brightness_; }
 
 protected:

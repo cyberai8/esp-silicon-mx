@@ -20,6 +20,7 @@
 #include "application.h"
 #include "board.h"
 #include "config.h"
+#include "display_refresh_blank.h"
 #include "dual_network_board.h"
 #include "nt26_board.h"
 #include "IOExpander.hpp"
@@ -466,10 +467,13 @@ void LaunchWifi(screen_lifecycle_cb_t lifecycle_cb) {
 }
 
 void LaunchDigitalPeople(screen_lifecycle_cb_t lifecycle_cb) {
+    // QSPI PARTIAL：进页首帧条带刷藏在黑屏里，避免从上往下露出来。
+    DisplayRefreshBlank blank;
     lv_obj_t* old_scr = lv_screen_active();
     lv_obj_t* app = DigitalPeopleScreen::Create();
     screen_attach_lifecycle(app, lifecycle_cb);
     lv_screen_load(app);
+    lv_refr_now(lv_display_get_default());
     if (old_scr != nullptr && old_scr != app) {
         lv_obj_delete_async(old_scr);
     }

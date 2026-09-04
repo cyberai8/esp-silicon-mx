@@ -4,6 +4,7 @@
 #include <cstdlib>
 
 #include "config.h"
+#include "display_refresh_blank.h"
 #include "esp_log.h"
 #include "esp_lv_adapter.h"
 #include "esp_timer.h"
@@ -282,6 +283,8 @@ esp_err_t DisplayOrientationApply(esp_lv_adapter_rotation_t rotation) {
 
     lv_obj_t* scr = lv_screen_active();
     if (scr != nullptr) {
+        // 关背光后再条带刷，避免旋转时整页从上往下扫出来。
+        DisplayRefreshBlank blank;
         lv_obj_invalidate(scr);
         lv_refr_now(lv_display_get_default());
     }

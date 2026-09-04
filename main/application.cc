@@ -1186,7 +1186,14 @@ void Application::MainEventLoop() {
             MAIN_EVENT_ERROR, pdTRUE, pdFALSE, portMAX_DELAY);
 
         if (bits & MAIN_EVENT_ERROR) {
+            // 数字人字幕在 idle 状态会主动清空。先用 idle 停止旧的音频处理，
+            // 再回到 connecting，最后显示错误文本；这样重连等待期间
+            // “无法连接服务，请稍后再试”会稳定留在底部文字显示区域。
+            const bool resume_voice_chat = IsVoiceChatAllowed();
             SetDeviceState(kDeviceStateIdle);
+            if (resume_voice_chat) {
+                SetDeviceState(kDeviceStateConnecting);
+            }
             Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
         }
 

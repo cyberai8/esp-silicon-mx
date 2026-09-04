@@ -12,6 +12,7 @@
 #include "application.h"
 #include "audio_service.h"
 #include "device_state.h"
+#include "display_refresh_blank.h"
 #include "home_screen/home_screen.h"
 #include "screen_util.h"
 
@@ -342,9 +343,11 @@ void OnSwipeBack() {
     if (indev != nullptr) {
         lv_indev_wait_release(indev);
     }
+    DisplayRefreshBlank blank;
     lv_obj_t* old_scr = lv_screen_active();
     lv_obj_t* home    = HomeScreen::Create();
     lv_screen_load(home);
+    lv_refr_now(lv_display_get_default());
     if (old_scr != nullptr && old_scr != home) {
         lv_obj_delete_async(old_scr);
     }
