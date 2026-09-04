@@ -21,11 +21,13 @@
 #include <string>
 #include <map>
 #include <mutex>
+#include <atomic>
 
 #define MQTT_PING_INTERVAL_SECONDS 60
 #define MQTT_RECONNECT_INTERVAL_MS 15000
 
 #define MQTT_PROTOCOL_SERVER_HELLO_EVENT (1 << 0)
+#define MQTT_PROTOCOL_DISCONNECTED_EVENT (1 << 1)
 
 class MqttProtocol : public Protocol {
 public:
@@ -53,9 +55,16 @@ private:
     uint32_t local_sequence_;
     uint32_t remote_sequence_;
     esp_timer_handle_t reconnect_timer_;
+    std::atomic<bool> connect_in_progress_{false};
+    std::atomic<bool> reconnect_pending_{false};
+    std::atomic<bool> shutting_down_{false};
+    std::atomic<unsigned> consecutive_connect_failures_{0};
+    std::atomic<uint32_t> mqtt_generation_{0};
 
     bool StartMqttClient(bool report_error=false);
+    void ArmReconnect(uint32_t delay_ms = MQTT_RECONNECT_INTERVAL_MS);
     void ScheduleReconnect();
+    bool RequestWifiLinkRecovery();
     void ParseServerHello(const cJSON* root);
     std::string DecodeHexString(const std::string& hex_string);
 

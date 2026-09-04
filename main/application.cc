@@ -685,7 +685,20 @@ bool Application::InitializeProtocol(Ota& ota) {
     auto* codec = board.GetAudioCodec();
 
     protocol_->OnConnected([this]() {
-        DismissAlert();
+        // MQTT 事件来自网络任务。所有状态/UI 操作统一回到应用主任务；
+        // 若之前卡在 connecting，先回 idle，idle 会重新申请语音通道。
+        Schedule([this]() {
+            DismissAlert();
+            if (!IsVoiceChatAllowed()) {
+                return;
+            }
+            if (device_state_ == kDeviceStateConnecting) {
+                ESP_LOGI(TAG, "Protocol reconnected: restart digital people session");
+                SetDeviceState(kDeviceStateIdle);
+            } else if (device_state_ == kDeviceStateIdle) {
+                StartDigitalPeopleListening();
+            }
+        });
     });
 
     protocol_->OnNetworkError([this](const std::string& message) {

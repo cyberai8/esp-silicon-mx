@@ -3,6 +3,9 @@
 #include "application.h"
 #include "settings.h"
 #include <wifi_station.h>
+#if CONFIG_BOARD_TYPE_ESP_SHOW || CONFIG_BOARD_TYPE_ESP_VOCAT
+#include <esp_wifi.h>
+#endif
 
 #include <esp_log.h>
 #include <cstring>
@@ -10,6 +13,10 @@
 #include "assets/lang_config.h"
 
 #define TAG "MQTT"
+
+namespace {
+constexpr unsigned kWifiRecoveryFailureThreshold = 3;
+}
 
 MqttProtocol::MqttProtocol() {
     event_group_handle_ = xEventGroupCreate();
@@ -26,6 +33,8 @@ MqttProtocol::MqttProtocol() {
 
 MqttProtocol::~MqttProtocol() {
     ESP_LOGI(TAG, "MqttProtocol deinit");
+    shutting_down_.store(true);
+    reconnect_pending_.store(false);
     if (reconnect_timer_ != nullptr) {
         esp_timer_stop(reconnect_timer_);
         esp_timer_delete(reconnect_timer_);
@@ -43,26 +52,86 @@ bool MqttProtocol::Start() {
     return StartMqttClient(false);
 }
 
+void MqttProtocol::ArmReconnect(uint32_t delay_ms) {
+    if (shutting_down_.load() || reconnect_timer_ == nullptr) {
+        return;
+    }
+
+    reconnect_pending_.store(true);
+    if (esp_timer_is_active(reconnect_timer_)) {
+        esp_timer_stop(reconnect_timer_);
+    }
+    const esp_err_t err = esp_timer_start_once(
+        reconnect_timer_, static_cast<uint64_t>(delay_ms) * 1000);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to arm MQTT reconnect timer: %s", esp_err_to_name(err));
+    }
+}
+
 void MqttProtocol::ScheduleReconnect() {
+    if (shutting_down_.load()) {
+        return;
+    }
     if (!WifiStation::GetInstance().IsConnected()) {
-        esp_timer_start_once(reconnect_timer_, MQTT_RECONNECT_INTERVAL_MS * 1000);
+        ESP_LOGI(TAG, "WiFi is not ready, postpone MQTT reconnect");
+        ArmReconnect();
         return;
     }
     auto& app = Application::GetInstance();
     const auto state = app.GetDeviceState();
     if (state == kDeviceStateUpgrading || state == kDeviceStateWifiConfiguring) {
-        esp_timer_start_once(reconnect_timer_, MQTT_RECONNECT_INTERVAL_MS * 1000);
+        ArmReconnect();
+        return;
+    }
+    if (connect_in_progress_.load()) {
+        ESP_LOGI(TAG, "MQTT connect is already in progress, postpone reconnect");
+        ArmReconnect();
         return;
     }
     ESP_LOGI(TAG, "Reconnecting to MQTT server");
     app.Schedule([this]() {
+        if (shutting_down_.load()) {
+            return;
+        }
+        auto& app = Application::GetInstance();
+        const auto state = app.GetDeviceState();
+        if (!WifiStation::GetInstance().IsConnected() ||
+            state == kDeviceStateUpgrading ||
+            state == kDeviceStateWifiConfiguring ||
+            connect_in_progress_.load()) {
+            ArmReconnect();
+            return;
+        }
+        if (mqtt_ != nullptr && mqtt_->IsConnected()) {
+            reconnect_pending_.store(false);
+            return;
+        }
+        reconnect_pending_.store(false);
         StartMqttClient(false);
     });
 }
 
 bool MqttProtocol::StartMqttClient(bool report_error) {
+    if (shutting_down_.load()) {
+        return false;
+    }
+    if (connect_in_progress_.exchange(true)) {
+        ESP_LOGI(TAG, "MQTT connect is already in progress");
+        return false;
+    }
+    struct ConnectGuard {
+        std::atomic<bool>& flag;
+        ~ConnectGuard() { flag.store(false); }
+    } connect_guard{connect_in_progress_};
+
+    reconnect_pending_.store(false);
+    if (reconnect_timer_ != nullptr && esp_timer_is_active(reconnect_timer_)) {
+        esp_timer_stop(reconnect_timer_);
+    }
+
     if (mqtt_ != nullptr) {
-        ESP_LOGW(TAG, "Mqtt client already started");
+        ESP_LOGI(TAG, "Destroy stale MQTT client before reconnect");
+        mqtt_generation_.fetch_add(1);
         mqtt_.reset();
     }
 
@@ -87,25 +156,57 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
 
     auto network = Board::GetInstance().GetNetwork();
     mqtt_ = network->CreateMqtt(0);
+    const uint32_t generation = mqtt_generation_.fetch_add(1) + 1;
     mqtt_->SetKeepAlive(keepalive_interval);
 
-    mqtt_->OnDisconnected([this]() {
+    mqtt_->OnDisconnected([this, generation]() {
+        if (shutting_down_.load() || mqtt_generation_.load() != generation) {
+            return;
+        }
+        xEventGroupSetBits(event_group_handle_, MQTT_PROTOCOL_DISCONNECTED_EVENT);
         if (on_disconnected_ != nullptr) {
             on_disconnected_();
         }
         ESP_LOGI(TAG, "MQTT disconnected, schedule reconnect in %d seconds", MQTT_RECONNECT_INTERVAL_MS / 1000);
-        esp_timer_start_once(reconnect_timer_, MQTT_RECONNECT_INTERVAL_MS * 1000);
-        // 延后销毁，避免在 esp_mqtt 事件回调里析构客户端；同时阻止其自动重连刷屏。
-        Application::GetInstance().Schedule([this]() {
-            mqtt_.reset();
+        ArmReconnect();
+
+        // MQTT 回调任务里不能析构自身。转到应用主任务关闭失效的 UDP 会话，
+        // 并销毁仍未自动恢复的客户端，避免后台自动重连与定时重连互相打架。
+        Application::GetInstance().Schedule([this, generation]() {
+            if (shutting_down_.load() || mqtt_generation_.load() != generation) {
+                return;
+            }
+
+            bool had_audio_channel = false;
+            {
+                std::lock_guard<std::mutex> lock(channel_mutex_);
+                had_audio_channel = udp_ != nullptr;
+                udp_.reset();
+            }
+            session_id_.clear();
+
+            if (mqtt_ != nullptr && !mqtt_->IsConnected()) {
+                mqtt_generation_.fetch_add(1);
+                mqtt_.reset();
+            }
+            if (had_audio_channel && on_audio_channel_closed_ != nullptr) {
+                on_audio_channel_closed_();
+            }
         });
     });
 
-    mqtt_->OnConnected([this]() {
+    mqtt_->OnConnected([this, generation]() {
+        if (shutting_down_.load() || mqtt_generation_.load() != generation) {
+            return;
+        }
+        consecutive_connect_failures_.store(0);
+        reconnect_pending_.store(false);
         if (on_connected_ != nullptr) {
             on_connected_();
         }
-        esp_timer_stop(reconnect_timer_);
+        if (reconnect_timer_ != nullptr && esp_timer_is_active(reconnect_timer_)) {
+            esp_timer_stop(reconnect_timer_);
+        }
     });
 
     mqtt_->OnMessage([this](const std::string& topic, const std::string& payload) {
@@ -148,14 +249,78 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     } else {
         broker_address = endpoint;
     }
+    const int64_t connect_started_us = esp_timer_get_time();
     if (!mqtt_->Connect(broker_address, broker_port, client_id, username, password)) {
-        ESP_LOGE(TAG, "Failed to connect to endpoint, code=%d", mqtt_->GetLastError());
-        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        const int64_t connect_elapsed_ms =
+            (esp_timer_get_time() - connect_started_us) / 1000;
+        const int error = mqtt_->GetLastError();
+        ESP_LOGE(TAG, "Failed to connect to endpoint, code=%d elapsed=%lld ms",
+                 error, static_cast<long long>(connect_elapsed_ms));
+
+        // EspMqtt 在 Connect() 超时后仍保留内部自动重连任务。立即销毁它，
+        // 后续只允许本类的定时器发起一次连接，避免多个连接流程叠加。
+        mqtt_generation_.fetch_add(1);
+        mqtt_.reset();
+
+        // 只有完整耗尽 10 秒连接窗口才视为链路超时。认证拒绝等快速失败
+        // 不重置 WiFi，避免服务器配置问题影响音乐/天气等其它联网功能。
+        if (connect_elapsed_ms >= 9000) {
+            const unsigned failures =
+                consecutive_connect_failures_.fetch_add(1) + 1;
+            if (failures >= kWifiRecoveryFailureThreshold) {
+                if (RequestWifiLinkRecovery()) {
+                    consecutive_connect_failures_.store(0);
+                } else {
+                    // 非语音页面先不动 WiFi；保留到阈值前一档，用户进入
+                    // 数字人后若仍超时，下一次即可执行链路恢复。
+                    consecutive_connect_failures_.store(
+                        kWifiRecoveryFailureThreshold - 1);
+                }
+            }
+        } else {
+            consecutive_connect_failures_.store(0);
+        }
+        ArmReconnect();
+        if (report_error) {
+            SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        }
         return false;
     }
 
+    consecutive_connect_failures_.store(0);
+    reconnect_pending_.store(false);
+    error_occurred_ = false;
     ESP_LOGI(TAG, "Connected to endpoint");
     return true;
+}
+
+bool MqttProtocol::RequestWifiLinkRecovery() {
+#if CONFIG_BOARD_TYPE_ESP_SHOW || CONFIG_BOARD_TYPE_ESP_VOCAT
+    const auto state = Application::GetInstance().GetDeviceState();
+    if (state != kDeviceStateConnecting &&
+        state != kDeviceStateListening &&
+        state != kDeviceStateSpeaking) {
+        ESP_LOGI(TAG, "Defer WiFi reassociation while voice chat is not active");
+        return false;
+    }
+    if (!WifiStation::GetInstance().IsConnected()) {
+        return true;
+    }
+
+    ESP_LOGW(TAG,
+             "MQTT failed %u consecutive times while WiFi still has an IP; "
+             "reassociate WiFi without rebooting",
+             kWifiRecoveryFailureThreshold);
+    const esp_err_t err = esp_wifi_disconnect();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi soft reconnect request failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    return true;
+#else
+    ESP_LOGW(TAG, "MQTT failed %u consecutive times", kWifiRecoveryFailureThreshold);
+    return false;
+#endif
 }
 
 bool MqttProtocol::SendText(const std::string& text) {
@@ -217,6 +382,10 @@ void MqttProtocol::CloseAudioChannel() {
 
 bool MqttProtocol::OpenAudioChannel() {
     if (mqtt_ == nullptr || !mqtt_->IsConnected()) {
+        if (connect_in_progress_.load() || reconnect_pending_.load()) {
+            ESP_LOGI(TAG, "MQTT reconnect is pending; wait for the single reconnect flow");
+            return false;
+        }
         ESP_LOGI(TAG, "MQTT is not connected, try to connect now");
         if (!StartMqttClient(true)) {
             return false;
@@ -225,7 +394,9 @@ bool MqttProtocol::OpenAudioChannel() {
 
     error_occurred_ = false;
     session_id_ = "";
-    xEventGroupClearBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);
+    xEventGroupClearBits(event_group_handle_,
+                         MQTT_PROTOCOL_SERVER_HELLO_EVENT |
+                         MQTT_PROTOCOL_DISCONNECTED_EVENT);
 
     auto message = GetHelloMessage();
     if (!SendText(message)) {
@@ -233,7 +404,15 @@ bool MqttProtocol::OpenAudioChannel() {
     }
 
     // 等待服务器响应
-    EventBits_t bits = xEventGroupWaitBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
+    EventBits_t bits = xEventGroupWaitBits(
+        event_group_handle_,
+        MQTT_PROTOCOL_SERVER_HELLO_EVENT | MQTT_PROTOCOL_DISCONNECTED_EVENT,
+        pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
+    if (bits & MQTT_PROTOCOL_DISCONNECTED_EVENT) {
+        ESP_LOGE(TAG, "MQTT disconnected while waiting for server hello");
+        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        return false;
+    }
     if (!(bits & MQTT_PROTOCOL_SERVER_HELLO_EVENT)) {
         ESP_LOGE(TAG, "Failed to receive server hello");
         SetError(Lang::Strings::SERVER_TIMEOUT);
