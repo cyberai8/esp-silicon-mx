@@ -122,7 +122,7 @@ lv_obj_t* s_backspace_btn;
 lv_obj_t* s_action_btn;        // 右下角：拨打 / 挂断
 lv_obj_t* s_action_icon;       // image inside action_btn (dial / hangup)
 
-// Tracks whether the call screen is currently mounted. lv_async_call() trampolines
+// Tracks whether the call screen is currently mounted. screen_async_call() trampolines
 // from the AT-task thread back to the LVGL thread; if the user already swiped back
 // we MUST NOT touch the now-deleted UI objects.
 bool s_screen_active = false;
@@ -223,7 +223,7 @@ void SetStatusText(const char* txt) {
 //   - 模组返回 "+CPIN: READY" 且带 OK 才继续 ATD<num>
 //   - 否则提示 "请检查移动网络"，回 idle
 //
-// 任务结果通过 lv_async_call() 切回 LVGL 线程刷新 UI，
+// 任务结果通过 screen_async_call() 切回 LVGL 线程刷新 UI，
 // 同时用 s_screen_active + s_call_epoch 双重保护，避免在屏幕已经销毁
 // 或者状态已经变化（用户中途挂断/退出）时还去操作野指针。
 // ---------------------------------------------------------------------------
@@ -378,7 +378,7 @@ void AtJobTask(void* arg) {
         }
     }
 
-    lv_async_call(OnAtResult, result);
+    screen_async_call(OnAtResult, result);
     delete job;
     vTaskDelete(nullptr);
 }

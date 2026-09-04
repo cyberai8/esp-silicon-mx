@@ -884,7 +884,7 @@ void SetStatus(StatusKind kind) {
         return;
     }
     auto* msg = new UiStatusMsg{kind};
-    if (lv_async_call(AsyncApplyStatus, msg) != LV_RESULT_OK) {
+    if (screen_async_call(AsyncApplyStatus, msg) != LV_RESULT_OK) {
         delete msg;
     }
 }
@@ -895,7 +895,7 @@ void SetPlayIcon(bool playing) {
         return;
     }
     auto* msg = new UiPlayIconMsg{playing};
-    if (lv_async_call(AsyncApplyPlayIcon, msg) != LV_RESULT_OK) {
+    if (screen_async_call(AsyncApplyPlayIcon, msg) != LV_RESULT_OK) {
         delete msg;
     }
 }
@@ -1251,7 +1251,7 @@ void SessionStartWorker(void* /*arg*/) {
     SetStatus(StatusKind::Connecting);
     SetPlayIcon(true);
     if (s_screen_active.load(std::memory_order_relaxed)) {
-        lv_async_call(
+        screen_async_call(
             [](void*) {
                 if (s_screen_active.load(std::memory_order_relaxed)) {
                     UpdateVolumeLabel();
@@ -1382,7 +1382,7 @@ void RequestSessionStart() {
         xSemaphoreGive(s_life_mu);
         // UI 可能错过 RUNNING 事件，把已缓存状态刷回去
         if (s_screen_active.load(std::memory_order_relaxed)) {
-            lv_async_call(
+            screen_async_call(
                 [](void*) {
                     SyncStatusToUi();
                     if (s_want_play.load(std::memory_order_relaxed) &&
@@ -1993,7 +1993,7 @@ void RadioScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         SetPlayIconDirect(true);
         ScheduleDeferredSessionStart();
         // 若会话其实已在播，把缓存状态刷到 UI（避免一直「连接中」）
-        lv_async_call(
+        screen_async_call(
             [](void*) {
                 if (!s_screen_active.load(std::memory_order_relaxed)) {
                     return;

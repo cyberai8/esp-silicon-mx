@@ -296,7 +296,7 @@ void OtaScreen::Update(int progress, size_t downloaded, size_t total, size_t spe
         return;
     }
     auto* msg = new OtaProgressMsg{progress, downloaded, total, speed_bps};
-    lv_async_call(AsyncUpdateProgress, msg);
+    screen_async_call(AsyncUpdateProgress, msg);
 }
 
 void OtaScreen::SetStatusMessage(const char* message) {

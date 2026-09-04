@@ -439,7 +439,7 @@ void Cell4gTestTask(void* arg) {
     Nt26Board* nt26 = GetNt26Board();
     if (nt26 == nullptr) {
         std::snprintf(msg->detail, sizeof(msg->detail), I18n::T("4G模块不可用"));
-        lv_async_call(OnTestDoneAsync, msg);
+        screen_async_call(OnTestDoneAsync, msg);
         s_modem_busy = false;
         vTaskDelete(nullptr);
         return;
@@ -448,7 +448,7 @@ void Cell4gTestTask(void* arg) {
     std::string resp;
     if (!RunAtOk(nt26, "AT", resp, kAtShortMs)) {
         std::snprintf(msg->detail, sizeof(msg->detail), I18n::T("模组无响应"));
-        lv_async_call(OnTestDoneAsync, msg);
+        screen_async_call(OnTestDoneAsync, msg);
         s_modem_busy = false;
         vTaskDelete(nullptr);
         return;
@@ -465,7 +465,7 @@ void Cell4gTestTask(void* arg) {
     if (current_slot != target_slot) {
         if (!ApplySimSlot(nt26, target_slot, msg->detail,
                           sizeof(msg->detail))) {
-            lv_async_call(OnTestDoneAsync, msg);
+            screen_async_call(OnTestDoneAsync, msg);
             s_modem_busy = false;
             vTaskDelete(nullptr);
             return;
@@ -483,7 +483,7 @@ void Cell4gTestTask(void* arg) {
                 if (switched && current_slot >= 0) {
                     RestoreSimSlotQuiet(nt26, current_slot);
                 }
-                lv_async_call(OnTestDoneAsync, msg);
+                screen_async_call(OnTestDoneAsync, msg);
                 s_modem_busy = false;
                 vTaskDelete(nullptr);
                 return;
@@ -502,7 +502,7 @@ void Cell4gTestTask(void* arg) {
         RestoreSimSlotQuiet(nt26, current_slot);
     }
 
-    lv_async_call(OnTestDoneAsync, msg);
+    screen_async_call(OnTestDoneAsync, msg);
     s_modem_busy = false;
     vTaskDelete(nullptr);
 }

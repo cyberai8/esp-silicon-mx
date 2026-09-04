@@ -1,6 +1,22 @@
 #pragma once
 
+#include "esp_lv_adapter.h"
 #include "lvgl.h"
+
+// LVGL's lv_async_call() creates a timer before it fills the callback payload.
+// Calling it from another core without the adapter mutex lets the LVGL task run
+// that timer against half-initialized data. The adapter mutex is recursive, so
+// this wrapper is also safe when the caller already runs in an LVGL callback.
+static inline lv_result_t screen_async_call(lv_async_cb_t callback,
+                                            void* user_data) {
+    if (callback == nullptr || esp_lv_adapter_lock(-1) != ESP_OK) {
+        return LV_RESULT_INVALID;
+    }
+
+    const lv_result_t result = (lv_async_call)(callback, user_data);
+    esp_lv_adapter_unlock();
+    return result;
+}
 
 // Make `obj` and all of its descendants ignore touch input, so that
 // PRESSED / RELEASED events fall through to the screen. This is required

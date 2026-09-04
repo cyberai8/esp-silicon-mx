@@ -1110,7 +1110,7 @@ void ChatScreen::RefreshDeviceState() {
     if (!IsActive()) {
         return;
     }
-    lv_async_call(on_refresh_device_state_async, nullptr);
+    screen_async_call(on_refresh_device_state_async, nullptr);
 }
 
 void ChatScreen::AddMessage(const char* text, ChatMsgDir dir) {

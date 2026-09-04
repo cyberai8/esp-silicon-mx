@@ -1579,7 +1579,7 @@ void SubmitLocationReport(LocationReportResult* res,
     auto network = Board::GetInstance().GetNetwork();
     if (network == nullptr) {
         res->err = I18n::T("网络不可用");
-        lv_async_call(OnLocationReportDone, res);
+        screen_async_call(OnLocationReportDone, res);
         vTaskDelete(nullptr);
         return;
     }
@@ -1587,7 +1587,7 @@ void SubmitLocationReport(LocationReportResult* res,
     auto http = network->CreateHttp(0);
     if (http == nullptr) {
         res->err = I18n::T("HTTP 创建失败");
-        lv_async_call(OnLocationReportDone, res);
+        screen_async_call(OnLocationReportDone, res);
         vTaskDelete(nullptr);
         return;
     }
@@ -1603,7 +1603,7 @@ void SubmitLocationReport(LocationReportResult* res,
     if (!http->Open("POST", report_url.c_str())) {
         res->err = I18n::T("Open 失败");
         LogLocateHttpJson(res->mode, req_json, 0, "(open failed)");
-        lv_async_call(OnLocationReportDone, res);
+        screen_async_call(OnLocationReportDone, res);
         vTaskDelete(nullptr);
         return;
     }
@@ -1620,25 +1620,25 @@ void SubmitLocationReport(LocationReportResult* res,
         char ebuf[32];
         std::snprintf(ebuf, sizeof(ebuf), "HTTP %d", status);
         res->err = ebuf;
-        lv_async_call(OnLocationReportDone, res);
+        screen_async_call(OnLocationReportDone, res);
         vTaskDelete(nullptr);
         return;
     }
 
     std::string static_map_url;
     if (!ParseLocationResponse(resp, res, static_map_url)) {
-        lv_async_call(OnLocationReportDone, res);
+        screen_async_call(OnLocationReportDone, res);
         vTaskDelete(nullptr);
         return;
     }
 
     if (!DownloadMapForResult(network, static_map_url, res)) {
-        lv_async_call(OnLocationReportDone, res);
+        screen_async_call(OnLocationReportDone, res);
         vTaskDelete(nullptr);
         return;
     }
 
-    lv_async_call(OnLocationReportDone, res);
+    screen_async_call(OnLocationReportDone, res);
     vTaskDelete(nullptr);
 }
 
@@ -1647,7 +1647,7 @@ void MapZoomRefreshTask(void* arg) {
     auto& tab = TabState(res->mode);
     if (!TabHasCachedCoords(tab)) {
         res->err = I18n::T("无缓存坐标");
-        lv_async_call(OnLocationReportDone, res);
+        screen_async_call(OnLocationReportDone, res);
         vTaskDelete(nullptr);
         return;
     }
@@ -1660,7 +1660,7 @@ void MapZoomRefreshTask(void* arg) {
     auto network = Board::GetInstance().GetNetwork();
     if (network == nullptr) {
         res->err = I18n::T("网络不可用");
-        lv_async_call(OnLocationReportDone, res);
+        screen_async_call(OnLocationReportDone, res);
         vTaskDelete(nullptr);
         return;
     }
@@ -1669,7 +1669,7 @@ void MapZoomRefreshTask(void* arg) {
         if (res->err.empty()) {
             res->err = res->map_err.empty() ? I18n::T("地图下载失败") : res->map_err;
         }
-        lv_async_call(OnLocationReportDone, res);
+        screen_async_call(OnLocationReportDone, res);
         vTaskDelete(nullptr);
         return;
     }
@@ -1678,7 +1678,7 @@ void MapZoomRefreshTask(void* arg) {
     res->latitude  = tab.result_lat;
     res->longitude = tab.result_lon;
     res->accuracy  = tab.result_acc;
-    lv_async_call(OnLocationReportDone, res);
+    screen_async_call(OnLocationReportDone, res);
     vTaskDelete(nullptr);
 }
 
@@ -1689,7 +1689,7 @@ void GpsLocationReportTask(void* arg) {
     const GpsService::Snapshot snap = GetEffectiveSnapshot();
     if (!snap.fix_valid) {
         res->err = I18n::T("尚未定位");
-        lv_async_call(OnLocationReportDone, res);
+        screen_async_call(OnLocationReportDone, res);
         vTaskDelete(nullptr);
         return;
     }
@@ -1702,7 +1702,7 @@ void GpsLocationReportTask(void* arg) {
         res->err = build_err.empty() ? I18n::T("组装请求失败") : build_err;
         ESP_LOGI(TAG, "locate[gps] request json=(build failed: %s)",
                  res->err.c_str());
-        lv_async_call(OnLocationReportDone, res);
+        screen_async_call(OnLocationReportDone, res);
         vTaskDelete(nullptr);
         return;
     }
@@ -1716,7 +1716,7 @@ void NetLocationReportTask(void* arg) {
     Nt26Board* nt26 = GetNt26Board();
     if (nt26 == nullptr) {
         res->err = I18n::T("未检测到 4G 模块");
-        lv_async_call(OnLocationReportDone, res);
+        screen_async_call(OnLocationReportDone, res);
         vTaskDelete(nullptr);
         return;
     }
@@ -1732,7 +1732,7 @@ void NetLocationReportTask(void* arg) {
 
     if (at_err != ESP_OK) {
         res->err = I18n::T("AT 指令失败");
-        lv_async_call(OnLocationReportDone, res);
+        screen_async_call(OnLocationReportDone, res);
         vTaskDelete(nullptr);
         return;
     }
@@ -1746,7 +1746,7 @@ void NetLocationReportTask(void* arg) {
                  static_cast<unsigned>(at_resp.size()), at_resp.c_str());
         if (at_err != ESP_OK) {
             res->err = I18n::T("WiFi 扫描超时");
-            lv_async_call(OnLocationReportDone, res);
+            screen_async_call(OnLocationReportDone, res);
             vTaskDelete(nullptr);
             return;
         }
@@ -1763,7 +1763,7 @@ void NetLocationReportTask(void* arg) {
         res->err = build_err.empty() ? I18n::T("组装请求失败") : build_err;
         ESP_LOGI(TAG, "locate[%s] request json=(build failed: %s)",
                  LocModeName(res->mode), res->err.c_str());
-        lv_async_call(OnLocationReportDone, res);
+        screen_async_call(OnLocationReportDone, res);
         vTaskDelete(nullptr);
         return;
     }

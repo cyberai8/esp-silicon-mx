@@ -869,14 +869,14 @@ void StartOtaVersionCheck() {
             result->has_update = ota.HasNewVersion();
             result->firmware_url = ota.GetFirmwareUrl();
         }
-        lv_async_call(OnOtaCheckDone, result.release());
+        screen_async_call(OnOtaCheckDone, result.release());
     });
 }
 
 void OtaUpgradeTask() {
     Ota ota;
     if (ota.CheckVersion(/*pause_lvgl=*/false) != ESP_OK || !ota.HasNewVersion()) {
-        lv_async_call(
+        screen_async_call(
             [](void* /*user_data*/) {
                 if (s_ui.ota_status_label != nullptr) {
                     lv_label_set_text(s_ui.ota_status_label,
@@ -1137,7 +1137,7 @@ void OnChargeModeClicked(lv_event_t* e) {
     SaveChargeMa(ma);
     ApplyChargeMa(ma);
     // 不能在 CLICKED 回调里同步删掉被点击的 card，延后重建选中态。
-    lv_async_call(RebuildChargeTabAsync, nullptr);
+    screen_async_call(RebuildChargeTabAsync, nullptr);
 }
 
 void BuildChargeTab(lv_obj_t* tab) {

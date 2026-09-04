@@ -327,7 +327,7 @@ void DecodeTask(void* arg) {
     PendingFrame* old = s_pending.exchange(pf, std::memory_order_acq_rel);
     if (old) { heap_caps_free(old->buf); delete old; }
     if (ScreenAlive()) {
-        lv_async_call(ApplyPendingFrame, nullptr);
+        screen_async_call(ApplyPendingFrame, nullptr);
     } else {
         PendingFrame* stale = s_pending.exchange(nullptr, std::memory_order_acq_rel);
         if (stale) { heap_caps_free(stale->buf); delete stale; }

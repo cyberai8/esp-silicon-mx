@@ -21,8 +21,8 @@ namespace {
 
 constexpr const char* TAG = "BatteryAlert";
 
-constexpr int kLowPopupThresholdPct = 20;
-constexpr int kLowPopupRecoverPct = 21;
+constexpr int kLowPopupThresholdPct = 25;
+constexpr int kLowPopupRecoverPct = 26;
 constexpr int kAutoShutdownThresholdPct = 6;
 constexpr uint32_t kPollPeriodMs = 2000;
 
@@ -186,7 +186,7 @@ void OnBatteryTick(lv_timer_t* /*timer*/) {
         return;
     }
 
-    if (battery_level <= kLowPopupThresholdPct && !s.low_popup_dismissed &&
+    if (battery_level < kLowPopupThresholdPct && !s.low_popup_dismissed &&
         s.overlay == nullptr) {
         ShowLowBatteryDialog(battery_level);
     }
@@ -201,12 +201,12 @@ void EnsureTimer() {
 
 void StartOnLvglThread(void* /*user_data*/) {
     EnsureTimer();
-    ESP_LOGI(TAG, "battery alert started (popup<=%d%%, shutdown<=%d%%)",
+    ESP_LOGI(TAG, "battery alert started (popup<%d%%, shutdown<=%d%%)",
              kLowPopupThresholdPct, kAutoShutdownThresholdPct);
 }
 
 }  // namespace
 
 void BatteryAlert_Start() {
-    lv_async_call(StartOnLvglThread, nullptr);
+    screen_async_call(StartOnLvglThread, nullptr);
 }

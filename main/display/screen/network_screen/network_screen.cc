@@ -370,7 +370,7 @@ void post_status(const char* text, uint32_t color) {
     auto* msg = new AsyncStatusMsg{};
     snprintf(msg->text, sizeof(msg->text), "%s", text);
     msg->color = color;
-    lv_async_call(async_update_status, msg);
+    screen_async_call(async_update_status, msg);
 }
 
 void async_rebuild_nearby(void* /*user_data*/) {
@@ -387,12 +387,12 @@ void async_rebuild_saved(void* /*user_data*/) {
 
 void refresh_nearby_list() {
     if (!s_screen_active) return;
-    lv_async_call(async_rebuild_nearby, nullptr);
+    screen_async_call(async_rebuild_nearby, nullptr);
 }
 
 void refresh_saved_list() {
     if (!s_screen_active) return;
-    lv_async_call(async_rebuild_saved, nullptr);
+    screen_async_call(async_rebuild_saved, nullptr);
 }
 
 void async_set_scan_btn_enabled(void* user_data) {
@@ -409,7 +409,7 @@ void async_set_scan_btn_enabled(void* user_data) {
 
 void post_scan_btn_enabled(bool enabled) {
     if (!s_screen_active) return;
-    lv_async_call(async_set_scan_btn_enabled,
+    screen_async_call(async_set_scan_btn_enabled,
                   reinterpret_cast<void*>(static_cast<intptr_t>(enabled ? 1 : 0)));
 }
 
@@ -429,7 +429,7 @@ void async_set_nearby_spinner(void* user_data) {
 
 void post_nearby_spinner(bool show) {
     if (!s_screen_active) return;
-    lv_async_call(async_set_nearby_spinner,
+    screen_async_call(async_set_nearby_spinner,
                   reinterpret_cast<void*>(static_cast<intptr_t>(show ? 1 : 0)));
 }
 
@@ -445,7 +445,7 @@ void async_open_connecting(void* user_data) {
 
 void post_open_connecting(const std::string& ssid) {
     if (!s_screen_active) return;
-    lv_async_call(async_open_connecting, new AsyncStringMsg{ssid});
+    screen_async_call(async_open_connecting, new AsyncStringMsg{ssid});
 }
 
 void async_open_success_and_reboot(void* user_data) {
@@ -460,7 +460,7 @@ void async_open_success_and_reboot(void* user_data) {
 
 void post_open_success_and_reboot(const std::string& ssid) {
     if (!s_screen_active) return;
-    lv_async_call(async_open_success_and_reboot, new AsyncStringMsg{ssid});
+    screen_async_call(async_open_success_and_reboot, new AsyncStringMsg{ssid});
 }
 
 void async_close_status(void* /*user_data*/) {
@@ -469,7 +469,7 @@ void async_close_status(void* /*user_data*/) {
 
 void post_close_status_popup() {
     if (!s_screen_active) return;
-    lv_async_call(async_close_status, nullptr);
+    screen_async_call(async_close_status, nullptr);
 }
 
 struct AsyncFailureMsg {
@@ -489,7 +489,7 @@ void async_show_failure(void* user_data) {
 void post_show_failure(const std::string& title, const std::string& detail,
                        uint32_t auto_close_ms = 2500) {
     if (!s_screen_active) return;
-    lv_async_call(async_show_failure,
+    screen_async_call(async_show_failure,
                   new AsyncFailureMsg{title, detail, auto_close_ms});
 }
 
@@ -1722,7 +1722,7 @@ void async_sim_set_progress(void* user_data) {
 
 void post_sim_progress(const std::string& text) {
     if (!s_screen_active) return;
-    lv_async_call(async_sim_set_progress, new AsyncStringMsg{text});
+    screen_async_call(async_sim_set_progress, new AsyncStringMsg{text});
 }
 
 // 从 AT+ECSIMCFG? 的响应里解析出 SimSlot 行。完整响应类似：
@@ -1792,7 +1792,7 @@ void sim_slot_query_task(void* /*arg*/) {
             }
         }
     }
-    lv_async_call(async_sim_slot_queried, msg);
+    screen_async_call(async_sim_slot_queried, msg);
     vTaskDelete(nullptr);
 }
 
@@ -1849,7 +1849,7 @@ void sim_switch_task(void* arg) {
     Nt26Board* nt26 = GetNt26Board();
     if (nt26 == nullptr) {
         result->detail = I18n::T("未检测到 4G 模块");
-        lv_async_call(async_sim_switch_done, result);
+        screen_async_call(async_sim_switch_done, result);
         delete ctx;
         vTaskDelete(nullptr);
         return;
@@ -1874,7 +1874,7 @@ void sim_switch_task(void* arg) {
     esp_err_t e1 = run_at("AT+CFUN=0", resp, 8000);
     if (e1 != ESP_OK || resp.find("OK") == std::string::npos) {
         result->detail = I18n::T("AT+CFUN=0 执行失败");
-        lv_async_call(async_sim_switch_done, result);
+        screen_async_call(async_sim_switch_done, result);
         delete ctx;
         vTaskDelete(nullptr);
         return;
@@ -1894,7 +1894,7 @@ void sim_switch_task(void* arg) {
         std::string tmp;
         run_at("AT+CFUN=1", tmp, 10000);
         result->detail = I18n::T("AT+ECSIMCFG 执行失败");
-        lv_async_call(async_sim_switch_done, result);
+        screen_async_call(async_sim_switch_done, result);
         delete ctx;
         vTaskDelete(nullptr);
         return;
@@ -1910,7 +1910,7 @@ void sim_switch_task(void* arg) {
 
     SaveSimSlot(ctx->target_slot);
     result->success = true;
-    lv_async_call(async_sim_switch_done, result);
+    screen_async_call(async_sim_switch_done, result);
     delete ctx;
     vTaskDelete(nullptr);
 }

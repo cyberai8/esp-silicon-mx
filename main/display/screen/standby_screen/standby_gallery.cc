@@ -480,7 +480,7 @@ void OnDecodeFailed(void* arg) {
 void RequestSkipImage(int index, const char* reason, const char* path) {
     ESP_LOGW(TAG, "%s, skip (keep switching): %s", reason, path ? path : "?");
     if (s_alive.load(std::memory_order_relaxed)) {
-        lv_async_call(OnDecodeFailed,
+        screen_async_call(OnDecodeFailed,
                       reinterpret_cast<void*>(static_cast<intptr_t>(index)));
     } else {
         s_decode_busy.store(false, std::memory_order_release);
@@ -529,7 +529,7 @@ void DecodeOne(int index) {
     }
     if (s_alive.load(std::memory_order_relaxed) &&
         s_active.load(std::memory_order_relaxed)) {
-        lv_async_call(ApplyPendingFrame, nullptr);
+        screen_async_call(ApplyPendingFrame, nullptr);
     } else {
         PendingFrame* stale = s_pending.exchange(nullptr, std::memory_order_acq_rel);
         if (stale) {
@@ -632,7 +632,7 @@ void StartDecode(int index) {
         return;
     }
     if (!EnsureWorker()) {
-        lv_async_call(OnDecodeFailed,
+        screen_async_call(OnDecodeFailed,
                       reinterpret_cast<void*>(static_cast<intptr_t>(index)));
         return;
     }

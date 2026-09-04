@@ -12,6 +12,7 @@
 #include "esp_lv_adapter_display.h"
 #include "home_screen/home_screen.h"
 #include "lvgl.h"
+#include "screen_util.h"
 #include "SdCardManager.hpp"
 #include "settings.h"
 #include "wifi_board.h"
@@ -894,7 +895,7 @@ private:
                             DisplayOrientationUpdate(sample, kPollMs);
                         DisplayOrientationMaybeLog(sample, target);
                         if (target != DisplayOrientationGet()) {
-                            lv_async_call(OnOrientationApplyAsync,
+                            screen_async_call(OnOrientationApplyAsync,
                                           reinterpret_cast<void*>(static_cast<intptr_t>(target)));
                         }
 #endif

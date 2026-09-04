@@ -323,12 +323,12 @@ void AsyncScanDone(void* user_data) {
 
 void ScanTask(void* /*arg*/) {
     s_scan_in_progress = true;
-    lv_async_call(AsyncRebuildListPopup, nullptr);
+    screen_async_call(AsyncRebuildListPopup, nullptr);
 
     if (!s_wifi_initialized && !WifiInitForTest()) {
         auto* msg = new ScanDoneMsg{false, 0};
         s_scan_in_progress = false;
-        lv_async_call(AsyncScanDone, msg);
+        screen_async_call(AsyncScanDone, msg);
         vTaskDelete(nullptr);
         return;
     }
@@ -342,7 +342,7 @@ void ScanTask(void* /*arg*/) {
         ESP_LOGE(TAG, "esp_wifi_scan_start failed: %d", err);
         auto* msg = new ScanDoneMsg{false, 0};
         s_scan_in_progress = false;
-        lv_async_call(AsyncScanDone, msg);
+        screen_async_call(AsyncScanDone, msg);
         vTaskDelete(nullptr);
         return;
     }
@@ -362,7 +362,7 @@ void ScanTask(void* /*arg*/) {
         msg->success = false;
         msg->count = 0;
         s_scan_in_progress = false;
-        lv_async_call(AsyncScanDone, msg);
+        screen_async_call(AsyncScanDone, msg);
         vTaskDelete(nullptr);
         return;
     }
@@ -410,7 +410,7 @@ void ScanTask(void* /*arg*/) {
     msg->success = true;
     msg->count = static_cast<int>(s_scan_results.size());
     s_scan_in_progress = false;
-    lv_async_call(AsyncScanDone, msg);
+    screen_async_call(AsyncScanDone, msg);
     vTaskDelete(nullptr);
 }
 

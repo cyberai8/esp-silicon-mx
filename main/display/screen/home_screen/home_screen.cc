@@ -588,7 +588,7 @@ vTaskDelay(pdMS_TO_TICKS(1500));
         ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, nullptr);
     if (ota1 == nullptr) {
         ESP_LOGE(TAG_HOME, "ESPClaw: ota_1 partition not found");
-        lv_async_call(EspClawSwitchFailAsync,
+        screen_async_call(EspClawSwitchFailAsync,
                       const_cast<char*>(I18n::T("未找到 ESPClaw\n请确认是否已安装到分区")));
         vTaskDelete(nullptr);
         return;
@@ -598,7 +598,7 @@ vTaskDelay(pdMS_TO_TICKS(1500));
     if (err != ESP_OK) {
         ESP_LOGE(TAG_HOME, "ESPClaw: set boot to %s failed: %s", ota1->label,
                  esp_err_to_name(err));
-        lv_async_call(EspClawSwitchFailAsync,
+        screen_async_call(EspClawSwitchFailAsync,
                       const_cast<char*>(I18n::T("未找到 ESPClaw\n请确认是否已安装到分区")));
         vTaskDelete(nullptr);
         return;
@@ -1157,6 +1157,8 @@ lv_obj_t* battery_pct_lbl  = nullptr;
     const char* last_battery_icon = nullptr;
     int  last_battery_pct = -1;
     bool last_battery_low = false;
+    bool last_battery_charging = false;
+    bool last_battery_valid = false;
 int  last_net_type = -1;
 // SIM ??
     int  last_sim_slot = -1;
@@ -1343,7 +1345,7 @@ void BootSimSlotQueryTask(void* /*arg*/) {
             }
         }
     }
-    lv_async_call(AsyncBootSimSlotSynced, msg);
+    screen_async_call(AsyncBootSimSlotSynced, msg);
     vTaskDelete(nullptr);
 }
 
@@ -1412,9 +1414,8 @@ void UpdateHomeStatusBar(HomeStatusState* st) {
 
     // ---- ?? ----
 #if HOME_STATUS_SHOW_BATTERY_ICON
-    // ??????
-// Font Awesome ?????????
-    if (st->battery_icon_lbl != nullptr) {
+    // 右上角使用紧凑的“图标 + 百分比”组合，避免电压等调试信息干扰主菜单。
+    if (st->battery_icon_lbl != nullptr || st->battery_pct_lbl != nullptr) {
         int battery_level = 0;
         bool charging = false, discharging = false;
         if (Board::GetInstance().GetBatteryLevel(battery_level, charging, discharging)) {
@@ -1430,31 +1431,69 @@ void UpdateHomeStatusBar(HomeStatusState* st) {
                 bat_icon = FONT_AWESOME_BATTERY_THREE_QUARTERS;
             } else if (battery_level >= 40) {
                 bat_icon = FONT_AWESOME_BATTERY_HALF;
-            } else if (battery_level >= 20) {
+            } else if (battery_level >= 25) {
                 bat_icon = FONT_AWESOME_BATTERY_QUARTER;
             } else {
                 bat_icon = FONT_AWESOME_BATTERY_EMPTY;
             }
-            if (bat_icon != st->last_battery_icon) {
+            if (st->battery_icon_lbl != nullptr &&
+                bat_icon != st->last_battery_icon) {
                 st->last_battery_icon = bat_icon;
                 lv_label_set_text(st->battery_icon_lbl, bat_icon);
             }
 
-            const bool low = !charging && battery_level < 20;
-            if (low != st->last_battery_low) {
-                st->last_battery_low = low;
-                uint32_t color = low ? 0xF87171 : 0xFFFFFF;
-                lv_obj_set_style_text_color(st->battery_icon_lbl,
-                                            lv_color_hex(color), LV_PART_MAIN);
+            const bool low = !charging && battery_level < 25;
+            if (st->battery_pct_lbl != nullptr &&
+                st->last_battery_pct != battery_level) {
+                char battery_text[8];
+                std::snprintf(battery_text, sizeof(battery_text), "%d%%",
+                              battery_level);
+                lv_label_set_text(st->battery_pct_lbl, battery_text);
+                st->last_battery_pct = battery_level;
             }
+
+            const bool color_changed = !st->last_battery_valid ||
+                                       low != st->last_battery_low ||
+                                       charging != st->last_battery_charging;
+            if (color_changed) {
+                st->last_battery_low = low;
+                st->last_battery_charging = charging;
+                const uint32_t color = low ? 0xF87171
+                                           : (charging ? 0x86EFAC : 0xFFFFFF);
+                if (st->battery_icon_lbl != nullptr) {
+                    lv_obj_set_style_text_color(st->battery_icon_lbl,
+                                                lv_color_hex(color), LV_PART_MAIN);
+                }
+                if (st->battery_pct_lbl != nullptr) {
+                    lv_obj_set_style_text_color(st->battery_pct_lbl,
+                                                lv_color_hex(color), LV_PART_MAIN);
+                }
+            }
+            st->last_battery_valid = true;
         } else {
-            // ??????????????
-st->last_battery_icon = FONT_AWESOME_BATTERY_SLASH;
-            lv_label_set_text(st->battery_icon_lbl, FONT_AWESOME_BATTERY_SLASH);
-            if (st->last_battery_low) {
+            if (st->battery_icon_lbl != nullptr &&
+                (st->last_battery_icon == nullptr || st->last_battery_valid)) {
+                st->last_battery_icon = FONT_AWESOME_BATTERY_SLASH;
+                lv_label_set_text(st->battery_icon_lbl,
+                                  FONT_AWESOME_BATTERY_SLASH);
+            }
+            if (st->battery_pct_lbl != nullptr && st->last_battery_pct != -1) {
+                st->last_battery_pct = -1;
+                lv_label_set_text(st->battery_pct_lbl, "--%");
+            }
+            if (st->last_battery_valid || st->last_battery_low ||
+                st->last_battery_charging) {
+                st->last_battery_valid = false;
                 st->last_battery_low = false;
-                lv_obj_set_style_text_color(st->battery_icon_lbl,
-                                            lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+                st->last_battery_charging = false;
+                if (st->battery_icon_lbl != nullptr) {
+                    lv_obj_set_style_text_color(st->battery_icon_lbl,
+                                                lv_color_hex(0x9AA3B2), LV_PART_MAIN);
+                }
+                if (st->battery_pct_lbl != nullptr) {
+                    lv_obj_set_style_text_color(st->battery_pct_lbl,
+                                                lv_color_hex(0x9AA3B2), LV_PART_MAIN);
+                }
             }
         }
     }
@@ -1470,7 +1509,7 @@ st->last_battery_icon = FONT_AWESOME_BATTERY_SLASH;
             if (battery_level < 0)   battery_level = 0;
             if (battery_level > 100) battery_level = 100;
 
-            const bool low = !charging && battery_level < 20;
+            const bool low = !charging && battery_level < 25;
 
             char buf[48];
             uint16_t dbg_mv = 0;
@@ -1605,7 +1644,7 @@ lv_obj_t* CreateStatusBar(lv_obj_t* screen, HomeStatusState* st) {
     // 大屏：左网络 / 右电量宽区 + 居中时间。
     // 360 圆屏：左右收窄、加大水平边距；左侧保留 WiFi 图标+文字，右侧电量。
     constexpr int kStatusLeftWidth  = kLayoutRoundSmall ? 118 : 300;
-    constexpr int kStatusRightWidth = kLayoutRoundSmall ? 56 : 400;
+    constexpr int kStatusRightWidth = kLayoutRoundSmall ? 0 : 120;
     constexpr int kStatusPadHor     = kLayoutRoundSmall ? 28 : 10;
     constexpr int kStatusPadVer     = kLayoutRoundSmall ? 4 : 8;
     constexpr int kStatusNetworkShiftX = kLayoutRoundSmall ? 8 : 0;
@@ -1674,23 +1713,35 @@ lv_obj_t* CreateStatusBar(lv_obj_t* screen, HomeStatusState* st) {
     lv_obj_set_flex_flow(right, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(right, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(right, kLayoutRoundSmall ? 5 : 8, LV_PART_MAIN);
 #if HOME_STATUS_SHOW_BATTERY_ICON
-    st->battery_icon_lbl = lv_label_create(right);
-    lv_label_set_text(st->battery_icon_lbl, FONT_AWESOME_BATTERY_FULL);
-    lv_obj_set_style_text_font(st->battery_icon_lbl, &font_awesome_20_4, LV_PART_MAIN);
-    lv_obj_set_style_text_color(st->battery_icon_lbl, lv_color_hex(0xFFFFFF),
-                                LV_PART_MAIN);
+    if (!kLayoutRoundSmall) {
+        st->battery_icon_lbl = lv_label_create(right);
+        lv_label_set_text(st->battery_icon_lbl, FONT_AWESOME_BATTERY_FULL);
+        lv_obj_set_style_text_font(st->battery_icon_lbl, &font_awesome_20_4, LV_PART_MAIN);
+        lv_obj_set_style_text_color(st->battery_icon_lbl, lv_color_hex(0xFFFFFF),
+                                    LV_PART_MAIN);
+        st->battery_pct_lbl = lv_label_create(right);
+        lv_label_set_long_mode(st->battery_pct_lbl, LV_LABEL_LONG_CLIP);
+        lv_obj_set_width(st->battery_pct_lbl, 54);
+        lv_obj_set_style_text_align(st->battery_pct_lbl, LV_TEXT_ALIGN_RIGHT,
+                                    LV_PART_MAIN);
+        lv_label_set_text(st->battery_pct_lbl, "--%");
+        lv_obj_set_style_text_font(st->battery_pct_lbl, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_set_style_text_color(st->battery_pct_lbl, lv_color_hex(0xFFFFFF),
+                                    LV_PART_MAIN);
+    }
 #else
-    lv_obj_set_style_pad_column(right, 14, LV_PART_MAIN);
-
-    st->battery_pct_lbl = lv_label_create(right);
-    lv_label_set_long_mode(st->battery_pct_lbl, LV_LABEL_LONG_CLIP);
-    lv_obj_set_width(st->battery_pct_lbl, kLayoutRoundSmall ? 64 : 380);
-    lv_obj_set_style_text_align(st->battery_pct_lbl, LV_TEXT_ALIGN_RIGHT,
-                                LV_PART_MAIN);
-    lv_obj_set_style_text_font(st->battery_pct_lbl, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_set_style_text_color(st->battery_pct_lbl, lv_color_hex(0xFFFFFF),
-                                LV_PART_MAIN);
+    if (!kLayoutRoundSmall) {
+        st->battery_pct_lbl = lv_label_create(right);
+        lv_label_set_long_mode(st->battery_pct_lbl, LV_LABEL_LONG_CLIP);
+        lv_obj_set_width(st->battery_pct_lbl, 380);
+        lv_obj_set_style_text_align(st->battery_pct_lbl, LV_TEXT_ALIGN_RIGHT,
+                                    LV_PART_MAIN);
+        lv_obj_set_style_text_font(st->battery_pct_lbl, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_set_style_text_color(st->battery_pct_lbl, lv_color_hex(0xFFFFFF),
+                                    LV_PART_MAIN);
+    }
 #endif
 
     lv_obj_t* center = lv_obj_create(bar);
@@ -3046,12 +3097,52 @@ void OnOpenDigitalPeopleAsync(void* /*arg*/) {
     LaunchDigitalPeople(digital_people_lifecycle_cb);
 }
 
+void CreateCenterBatteryGroup(lv_obj_t* parent, HomeStatusState* st) {
+    if (parent == nullptr || st == nullptr || !kLayoutRoundSmall) {
+        return;
+    }
+
+    // 中央深色圆形区域约 110x110，电池图标和百分比上下排列，
+    // 保持在圆内并避开四周四个功能瓣的文字。
+    lv_obj_t* group = lv_obj_create(parent);
+    lv_obj_remove_style_all(group);
+    lv_obj_set_size(group, 110, 82);
+    lv_obj_align(group, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_opa(group, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(group, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(group, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(group, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(group, LV_OBJ_FLAG_CLICKABLE);
+
+    st->battery_icon_lbl = lv_label_create(group);
+    lv_label_set_text(st->battery_icon_lbl, FONT_AWESOME_BATTERY_FULL);
+    lv_obj_set_width(st->battery_icon_lbl, 52);
+    lv_obj_align(st->battery_icon_lbl, LV_ALIGN_TOP_MID, 0, 3);
+    lv_obj_set_style_text_font(st->battery_icon_lbl, &font_awesome_20_4,
+                               LV_PART_MAIN);
+    lv_obj_set_style_text_color(st->battery_icon_lbl, lv_color_hex(0xFFFFFF),
+                                LV_PART_MAIN);
+    lv_obj_set_style_text_align(st->battery_icon_lbl, LV_TEXT_ALIGN_CENTER,
+                                LV_PART_MAIN);
+
+    st->battery_pct_lbl = lv_label_create(group);
+    lv_label_set_text(st->battery_pct_lbl, "--%");
+    lv_obj_set_width(st->battery_pct_lbl, 80);
+    lv_obj_align(st->battery_pct_lbl, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_set_style_text_align(st->battery_pct_lbl, LV_TEXT_ALIGN_CENTER,
+                                LV_PART_MAIN);
+    lv_obj_set_style_text_font(st->battery_pct_lbl, &font_puhui_20_4,
+                               LV_PART_MAIN);
+    lv_obj_set_style_text_color(st->battery_pct_lbl, lv_color_hex(0xFFFFFF),
+                                LV_PART_MAIN);
+}
+
 }  // namespace
 
 void HomeScreen::WarmStatusCaches() { WarmStatusCachesImpl(); }
 
 void HomeScreen::OpenDigitalPeopleAsync() {
-    lv_async_call(OnOpenDigitalPeopleAsync, nullptr);
+    screen_async_call(OnOpenDigitalPeopleAsync, nullptr);
 }
 
 void HomeScreen::ShowPowerOptionsDialog() { ShowPowerDialog(); }
@@ -3111,6 +3202,8 @@ lv_obj_t* CreateRoundCloverHome() {
     lv_obj_remove_flag(layer, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(layer, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     state->clover_layer = layer;
+    CreateCenterBatteryGroup(layer, status);
+    UpdateHomeStatusBar(status);
 
     constexpr lv_coord_t kIconCx[4] = {180, 298, 180, 62};
     constexpr lv_coord_t kIconCy[4] = {60, 178, 282, 178};
@@ -3294,7 +3387,7 @@ void HomeScreen::RefreshStatusBar() {
 // LVGL????LVGL ??????????adapter ????    // ??
 // lv_obj_invalidate ??Core0 ??????
 // CPU??
-lv_async_call(OnRefreshStatusBarAsync, nullptr);
+screen_async_call(OnRefreshStatusBarAsync, nullptr);
 }
 
 int HomeScreen::GetIdleShutdownMinutes() {

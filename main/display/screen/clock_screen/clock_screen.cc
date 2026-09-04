@@ -5,6 +5,7 @@
 #include "config.h"
 #include "home_screen/home_screen.h"
 #include "i18n.h"
+#include "screen_util.h"
 #include "settings.h"
 
 #include <cstdio>
@@ -435,7 +436,7 @@ void RefreshAlarmPageAsync(void* /*arg*/) {
 
 void RequestAlarmPageRefresh() {
     if (s_scr == nullptr) return;
-    lv_async_call(RefreshAlarmPageAsync, nullptr);
+    screen_async_call(RefreshAlarmPageAsync, nullptr);
 }
 
 int LocalWeekdayMon0() {

@@ -109,7 +109,7 @@ void post_status(const char* text, uint32_t color = kColorText) {
     auto* msg = new AsyncStatusMsg{};
     snprintf(msg->text, sizeof(msg->text), "%s", text);
     msg->color = color;
-    lv_async_call(async_update_status, msg);
+    screen_async_call(async_update_status, msg);
 }
 
 void refresh_mode_buttons() {
@@ -225,7 +225,7 @@ void add_device_to_list(const char* address, const char* name) {
     auto* msg = new AsyncAddDeviceMsg{};
     snprintf(msg->address, sizeof(msg->address), "%s", address);
     snprintf(msg->name, sizeof(msg->name), "%s", name);
-    lv_async_call(async_add_device_item, msg);
+    screen_async_call(async_add_device_item, msg);
 }
 
 void async_clear_list(void* /*user_data*/) {
@@ -236,7 +236,7 @@ void post_clear_list() {
     if (!s_screen_active) {
         return;
     }
-    lv_async_call(async_clear_list, nullptr);
+    screen_async_call(async_clear_list, nullptr);
 }
 
 static void async_on_mode1_set(void* /*user_data*/) {
@@ -311,21 +311,21 @@ static void handle_response_line(const std::string& raw_line) {
         s_active_mode = BtMode::kMode1;
         s_conn_state  = ConnState::kIdle;
         post_status(I18n::T("模式1 已设置"), kColorSuccess);
-        lv_async_call(async_on_mode1_set, nullptr);
+        screen_async_call(async_on_mode1_set, nullptr);
         return;
     }
     if (line.find("SET MODE 2") != std::string::npos) {
         s_active_mode = BtMode::kMode2;
         s_conn_state  = ConnState::kIdle;
         post_status(I18n::T("模式2 已设置，可扫描设备"), kColorSuccess);
-        lv_async_call(async_on_mode2_set, nullptr);
+        screen_async_call(async_on_mode2_set, nullptr);
         return;
     }
     if (line.find("SET MODE 3") != std::string::npos) {
         s_active_mode = BtMode::kMode3;
         s_conn_state  = ConnState::kIdle;
         post_status(I18n::T("模式3 已设置"), kColorSuccess);
-        lv_async_call(async_on_mode3_set, nullptr);
+        screen_async_call(async_on_mode3_set, nullptr);
         return;
     }
 
@@ -516,7 +516,7 @@ static void bt_reset_task(void* /*param*/) {
     ESP_LOGI(TAG, "BT_POWER on");
     s_active_mode = BtMode::kNone;
     s_conn_state  = ConnState::kIdle;
-    lv_async_call(async_after_bt_reset, nullptr);
+    screen_async_call(async_after_bt_reset, nullptr);
     post_status(I18n::T("蓝牙电源已复位"), kColorSuccess);
     vTaskDelete(nullptr);
 }

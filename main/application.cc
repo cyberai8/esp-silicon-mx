@@ -40,6 +40,7 @@
 #include "standby_screen/standby_screen.h"
 #include "idle_power_policy.h"
 #include "battery_alert.h"
+#include "screen_util.h"
 #include "lv_adapter_display.h"
 #include "esp_lv_adapter.h"
 #endif
@@ -1322,7 +1323,7 @@ void Application::SetDeviceState(DeviceState state) {
             audio_service_.EnableWakeWordDetection(false);
 #ifdef HAVE_LVGL
             // Standby charge particles + Home rebuild race with audio/modem; leave standby first.
-            lv_async_call(LeaveStandbyForWakeUi, nullptr);
+            screen_async_call(LeaveStandbyForWakeUi, nullptr);
 #endif
             break;
         case kDeviceStateListening:

@@ -13,6 +13,7 @@
 #include "application.h"
 #include "home_screen/home_screen.h"
 #include "i18n/i18n.h"
+#include "screen_util.h"
 #include "standby_screen/standby_screen.h"
 
 namespace {
@@ -92,23 +93,23 @@ void OnShortPress() {
     }
     if (std::strcmp(screen, "standby") == 0) {
         ESP_LOGI(TAG, "dispatch: leave standby -> home (power on)");
-        lv_async_call(OnLeaveStandbyAsync, nullptr);
+        screen_async_call(OnLeaveStandbyAsync, nullptr);
         return;
     }
     ESP_LOGI(TAG, "dispatch: soft shutdown (power off)");
-    lv_async_call(OnShutdownAsync, nullptr);
+    screen_async_call(OnShutdownAsync, nullptr);
     return;
 #endif
 
     if (std::strcmp(screen, kHomeScreen) == 0) {
         ESP_LOGI(TAG, "dispatch: enter standby_screen");
-        lv_async_call(OnEnterStandbyAsync, nullptr);
+        screen_async_call(OnEnterStandbyAsync, nullptr);
         return;
     }
 
     if (std::strcmp(screen, "standby") == 0) {
         ESP_LOGI(TAG, "dispatch: leave standby -> home");
-        lv_async_call(OnLeaveStandbyAsync, nullptr);
+        screen_async_call(OnLeaveStandbyAsync, nullptr);
         return;
     }
 
@@ -129,7 +130,7 @@ void OnLongPress() {
     const char* screen = PwrKey_ActiveScreen();
     ESP_LOGI(TAG, "long-press %ums on screen=%s -> power dialog",
              static_cast<unsigned>(kLongPressMs), screen);
-    lv_async_call(OnLongPressAsync, nullptr);
+    screen_async_call(OnLongPressAsync, nullptr);
 }
 
 }  // namespace

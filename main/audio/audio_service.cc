@@ -176,6 +176,10 @@ bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, in
         esp_timer_stop(audio_power_timer_);
         esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
         codec_->EnableInput(true);
+        if (!codec_->input_enabled()) {
+            ESP_LOGW(TAG, "Input device is unavailable, skip audio frame");
+            return false;
+        }
     }
 
     if (codec_->input_sample_rate() != sample_rate) {
@@ -307,6 +311,16 @@ void AudioService::AudioInputTask() {
                     continue;
                 }
             }
+        }
+
+        // 输入设备可能因内部 DMA RAM 暂时不足而开启失败；保持任务存活，
+        // 让下一轮按退避时间自动重试，避免把一次内存不足升级成系统重启。
+        if ((bits & (AS_EVENT_AUDIO_TESTING_RUNNING |
+                     AS_EVENT_WAKE_WORD_RUNNING |
+                     AS_EVENT_AUDIO_PROCESSOR_RUNNING)) != 0 &&
+            !codec_->input_enabled()) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
         }
 
         ESP_LOGE(TAG, "Should not be here, bits: %lx", bits);

@@ -22,6 +22,7 @@ private:
     esp_codec_dev_handle_t output_dev_ = nullptr;
     esp_codec_dev_handle_t input_dev_ = nullptr;
     std::mutex data_if_mutex_;
+    TickType_t input_open_retry_after_tick_ = 0;
 
 #if CONFIG_BOARD_TYPE_ESP_VOCAT
     void* i2c_master_handle_ = nullptr;

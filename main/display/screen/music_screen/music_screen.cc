@@ -292,7 +292,7 @@ void async_set_play_icon(void* user_data) {
         return;
     }
     auto* msg = new AsyncPlayStateMsg{playing};
-    lv_async_call(async_set_play_icon, msg);
+    screen_async_call(async_set_play_icon, msg);
 }
 
 void post_track_info(const std::string& title, const std::string& artist,
@@ -304,7 +304,7 @@ void post_track_info(const std::string& title, const std::string& artist,
     snprintf(msg->title, sizeof(msg->title), "%s", title.c_str());
     snprintf(msg->artist, sizeof(msg->artist), "%s", artist.c_str());
     snprintf(msg->album, sizeof(msg->album), "%s", album.c_str());
-    lv_async_call(async_set_track_info, msg);
+    screen_async_call(async_set_track_info, msg);
 }
 
 void post_lyric(const std::string& text) {
@@ -313,7 +313,7 @@ void post_lyric(const std::string& text) {
     }
     auto* msg = new AsyncTextMsg{};
     snprintf(msg->text, sizeof(msg->text), "%s", text.c_str());
-    lv_async_call(async_set_lyric, msg);
+    screen_async_call(async_set_lyric, msg);
 }
 
 #if BOARD_HAS_EXTERNAL_BT

@@ -1,6 +1,7 @@
 #include "box_audio_codec.h"
 
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_codec_dev.h>
 #include <sdkconfig.h>
 #include <driver/i2c_master.h>
@@ -12,6 +13,27 @@
 #include <vector>
 
 #define TAG "BoxAudioCodec"
+
+namespace {
+
+// I2S DMA 必须放在内部 DMA RAM。预留余量，避免 esp_codec_dev 的失败路径
+// 在 DMA 分配失败后继续启用通道并解引用空描述符。
+constexpr size_t kMinLargestDmaBlock = 8192;
+constexpr uint32_t kInputOpenRetryDelayMs = 1500;
+
+bool HasEnoughInternalDmaMemory() {
+    const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA;
+    const size_t largest = heap_caps_get_largest_free_block(caps);
+    if (largest < kMinLargestDmaBlock) {
+        ESP_LOGW(TAG, "skip input open: internal DMA largest=%u (<%u)",
+                 static_cast<unsigned>(largest),
+                 static_cast<unsigned>(kMinLargestDmaBlock));
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
 
 BoxAudioCodec::BoxAudioCodec(void* i2c_master_handle, int input_sample_rate, int output_sample_rate,
     gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din,
@@ -126,8 +148,10 @@ void BoxAudioCodec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_
     i2s_chan_config_t chan_cfg = {
         .id = I2S_NUM_0,
         .role = I2S_ROLE_MASTER,
-        .dma_desc_num = AUDIO_CODEC_DMA_DESC_NUM,
-        .dma_frame_num = AUDIO_CODEC_DMA_FRAME_NUM,
+        // ESP-Show 在语音模型/音乐切换后内部 DMA RAM 容易碎片化。
+        // 4 x 120 帧仍是 5 ms 音频缓冲，足够语音采集，同时显著降低峰值。
+        .dma_desc_num = 4,
+        .dma_frame_num = 120,
         .auto_clear_after_cb = true,
         .auto_clear_before_cb = false,
         .intr_priority = 0,
@@ -298,6 +322,7 @@ bool BoxAudioCodec::CreateCodecDevicesLocked() {
     input_read_fail_count_ = 0;
     last_input_recovery_tick_ = 0;
     input_recovery_in_progress_ = false;
+    input_open_retry_after_tick_ = 0;
     ESP_LOGI(TAG, "BoxAudioDevice initialized");
     return true;
 }
@@ -468,11 +493,20 @@ bool BoxAudioCodec::OpenInputDeviceLocked() {
         return true;
     }
 
+    const TickType_t now = xTaskGetTickCount();
+    if (input_open_retry_after_tick_ != 0 &&
+        static_cast<int32_t>(now - input_open_retry_after_tick_) < 0) {
+        return false;
+    }
+    if (!HasEnoughInternalDmaMemory()) {
+        input_open_retry_after_tick_ =
+            now + pdMS_TO_TICKS(kInputOpenRetryDelayMs);
+        return false;
+    }
+
     if (output_enabled_) {
         CloseOutputDeviceLocked();
         AudioCodec::EnableOutput(false);
-    } else {
-        ResetI2sHardwareLocked();
     }
 
     esp_codec_dev_sample_info_t fs = {
@@ -525,17 +559,17 @@ bool BoxAudioCodec::OpenInputDeviceLocked() {
     };
 
     if (esp_codec_dev_open(input_dev_, &fs) == ESP_CODEC_DEV_OK) {
+        input_open_retry_after_tick_ = 0;
         return finish_open();
     }
-    ESP_LOGW(TAG, "Failed to open input device, retry after duplex reset");
+    // esp_codec_dev 的 DMA 分配失败路径在部分 IDF 版本中会留下不完整的
+    // I2S 状态；这里不立即 reset/reopen，交给下一次带退避的尝试处理。
+    ESP_LOGE(TAG, "Failed to open input device; keep audio service alive");
     CloseInputDeviceLocked();
-    RecoverDuplexStreamLocked();
-    if (esp_codec_dev_open(input_dev_, &fs) != ESP_CODEC_DEV_OK) {
-        ESP_LOGE(TAG, "Failed to open input device after reset");
-        CloseInputDeviceLocked();
-        return false;
-    }
-    return finish_open();
+    AudioCodec::EnableInput(false);
+    input_open_retry_after_tick_ =
+        xTaskGetTickCount() + pdMS_TO_TICKS(kInputOpenRetryDelayMs);
+    return false;
 }
 
 #if CONFIG_BOARD_TYPE_ESP_VOCAT
