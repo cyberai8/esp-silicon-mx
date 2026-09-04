@@ -185,13 +185,12 @@ AudioCodec* s_codec = nullptr;
 std::vector<int16_t> s_pcm_buf;
 bool s_wake_disabled_by_us = false;
 
-// 记忆曲目由一个很小的内部 SRAM 任务负责。播放任务可以继续使用 PSRAM 栈，
-// 但不能在它里面直接执行 NVS/Flash 操作（Flash 操作会关闭 Cache）。
+// 播放任务使用 PSRAM 栈，不能在里面直接执行 NVS/Flash 操作（Flash 操作会
+// 关闭 Cache）。把持久化投递到已有的内部 SRAM 主事件任务，避免音乐首次
+// 进入后永久占用额外 4 KB 内部任务栈。
 std::mutex s_remember_mutex;
 std::string s_pending_track;
-TaskHandle_t s_remember_task = nullptr;
-StackType_t* s_remember_stack = nullptr;
-StaticTask_t* s_remember_tcb = nullptr;
+bool s_remember_scheduled = false;
 
 // UI 侧的播放计时（只在 LVGL 线程读写）
 uint32_t s_ui_seq = 0;
@@ -683,59 +682,34 @@ void RememberTrackNow(const std::string& path) {
     settings.SetString("last_path", path);
 }
 
-void RememberTrackTask(void* /*arg*/) {
+void FlushPendingTrackRemember() {
     for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
         std::string path;
         {
             std::lock_guard<std::mutex> lock(s_remember_mutex);
+            if (s_pending_track.empty()) {
+                s_remember_scheduled = false;
+                return;
+            }
             path.swap(s_pending_track);
         }
-        if (!path.empty()) {
-            RememberTrackNow(path);
-        }
-    }
-}
-
-void EnsureRememberTrackTask() {
-    if (s_remember_task != nullptr) {
-        return;
-    }
-
-    constexpr uint32_t kStack = 4 * 1024;
-    if (s_remember_stack == nullptr) {
-        s_remember_stack = static_cast<StackType_t*>(heap_caps_malloc(
-            kStack, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    }
-    if (s_remember_tcb == nullptr) {
-        s_remember_tcb = static_cast<StaticTask_t*>(heap_caps_malloc(
-            sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    }
-    if (s_remember_stack == nullptr || s_remember_tcb == nullptr) {
-        ESP_LOGE(TAG, "remember task create failed: internal SRAM unavailable");
-        return;
-    }
-
-    s_remember_task = xTaskCreateStaticPinnedToCore(
-        RememberTrackTask, "music_nvs", kStack, nullptr, 2,
-        s_remember_stack, s_remember_tcb, 0);
-    if (s_remember_task == nullptr) {
-        ESP_LOGE(TAG, "remember task create failed");
+        RememberTrackNow(path);
     }
 }
 
 void RememberTrackAsync(const std::string& path) {
-    EnsureRememberTrackTask();
-    if (s_remember_task == nullptr) {
-        // 播放功能不依赖“记忆上次曲目”；内存不足时只跳过持久化。
-        return;
-    }
+    bool need_schedule = false;
     {
         std::lock_guard<std::mutex> lock(s_remember_mutex);
         s_pending_track = path;
+        if (!s_remember_scheduled) {
+            s_remember_scheduled = true;
+            need_schedule = true;
+        }
     }
-    xTaskNotifyGive(s_remember_task);
+    if (need_schedule) {
+        Application::GetInstance().Schedule(FlushPendingTrackRemember);
+    }
 }
 
 void SdPlayTask(void* /*arg*/) {
@@ -840,8 +814,8 @@ void EnsurePlayTask() {
     }
     s_shutdown.store(false, std::memory_order_relaxed);
     constexpr uint32_t kStack = 8 * 1024;
-    // 播放/解码任务保留在 PSRAM；NVS 持久化已经转交给内部 SRAM 的
-    // music_nvs 任务，因此这里不再需要为 NVS 腾出整块内部栈。
+    // 播放/解码任务保留在 PSRAM；NVS 持久化已转交给内部 SRAM 的主事件
+    // 任务，因此这里不需要为 Flash 操作另留内部栈。
     static StackType_t* s_play_stack = nullptr;
     static StaticTask_t* s_play_tcb = nullptr;
     if (s_play_stack == nullptr) {
@@ -1721,7 +1695,6 @@ void MusicScreenSd::LifecycleCallback(screen_lifecycle_event_t event) {
         s_wake_disabled_by_us = false;
         s_pcm_cb_logs.store(0, std::memory_order_relaxed);
         PrepareCodecForMusicPlayback("load");
-        EnsureRememberTrackTask();
         StartScan();
         EnsurePlayTask();
     } else {

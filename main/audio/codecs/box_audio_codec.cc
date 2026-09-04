@@ -16,17 +16,27 @@
 
 namespace {
 
-// I2S DMA 必须放在内部 DMA RAM。预留余量，避免 esp_codec_dev 的失败路径
-// 在 DMA 分配失败后继续启用通道并解引用空描述符。
-constexpr size_t kMinLargestDmaBlock = 8192;
+// I2S DMA 必须放在内部 DMA RAM。ESP-IDF 会分别分配 4 个缓冲区，而不是
+// 分配一个总大小约 4 KB 的连续块。ESP-Show 的 TDM 参数为 120 帧 x 4 通道
+// x 16 bit，每个缓冲区实际为 960 B；同时检查总空闲量，给描述符和分配器
+// 元数据留出余量。这样既不会把 largest=3 KB 误判为不可用，也继续挡住
+// 明显不足时 esp_codec_dev 的危险失败路径。
+constexpr size_t kMinLargestDmaBlock = 1024;
+constexpr size_t kMinFreeDmaBytes = 5 * 1024;
 constexpr uint32_t kInputOpenRetryDelayMs = 1500;
 
 bool HasEnoughInternalDmaMemory() {
-    const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA;
+    const uint32_t caps =
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT;
+    const size_t free = heap_caps_get_free_size(caps);
     const size_t largest = heap_caps_get_largest_free_block(caps);
-    if (largest < kMinLargestDmaBlock) {
-        ESP_LOGW(TAG, "skip input open: internal DMA largest=%u (<%u)",
+    if (free < kMinFreeDmaBytes || largest < kMinLargestDmaBlock) {
+        ESP_LOGW(TAG,
+                 "skip input open: internal DMA free=%u largest=%u "
+                 "(need free>=%u largest>=%u)",
+                 static_cast<unsigned>(free),
                  static_cast<unsigned>(largest),
+                 static_cast<unsigned>(kMinFreeDmaBytes),
                  static_cast<unsigned>(kMinLargestDmaBlock));
         return false;
     }

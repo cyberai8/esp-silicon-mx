@@ -558,7 +558,9 @@ void Application::StartDigitalPeopleListening() {
     }
 
     if (!protocol_) {
-        ESP_LOGW(TAG, "Digital people listen: protocol not ready");
+        // 开机阶段 UI 会早于后台 OTA/MQTT 就绪。页面保持打开即可，
+        // StartNetworkAndProtocol() 在协议准备完成后会自动再次进入监听。
+        ESP_LOGI(TAG, "Digital people listen deferred: protocol not ready");
         return;
     }
 
@@ -943,6 +945,14 @@ void Application::StartNetworkAndProtocol() {
 
     if (InitializeProtocol(ota)) {
         ESP_LOGI(TAG, "Protocol ready");
+        // 用户可能在后台联网完成前就进入了数字人页。协议就绪后主动补一次
+        // 自动监听，避免第一次失败后必须退出页面再重新进入。
+        Schedule([this]() {
+            if (device_state_ == kDeviceStateIdle && IsVoiceChatAllowed()) {
+                ESP_LOGI(TAG, "Protocol ready: resume digital people listening");
+                StartDigitalPeopleListening();
+            }
+        });
     } else {
         ESP_LOGW(TAG, "Protocol start failed");
     }

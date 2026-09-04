@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstring>
 #include <ctime>
+#include <mutex>
 #include <new>
 #include <string>
 
@@ -117,7 +118,7 @@ lv_obj_t* s_alarm_empty_lbl = nullptr;
 
 // stopwatch
 lv_obj_t* s_sw_lbl = nullptr;
-lv_timer_t* s_sw_timer = nullptr;
+lv_obj_t* s_sw_start_btn = nullptr;
 int64_t s_sw_elapsed_ms = 0;
 int64_t s_sw_last_tick = 0;
 bool s_sw_running = false;
@@ -125,10 +126,17 @@ bool s_sw_running = false;
 // countdown
 lv_obj_t* s_cd_lbl = nullptr;
 lv_obj_t* s_cd_start_btn = nullptr;
-lv_timer_t* s_cd_timer = nullptr;
 int s_cd_total_sec = 5 * 60;
 int s_cd_left_sec = 5 * 60;
 bool s_cd_running = false;
+int64_t s_cd_deadline_ms = 0;
+
+// 正计时和倒计时独立于页面运行；页面退出时只清理控件，不清理这些状态。
+std::mutex s_runtime_mutex;
+esp_timer_handle_t s_runtime_timer = nullptr;
+bool s_runtime_timer_active = false;
+std::atomic_bool s_clock_screen_loaded{false};
+std::atomic_bool s_runtime_ui_update_pending{false};
 
 // edit rollers
 lv_obj_t* s_edit_hour = nullptr;
@@ -172,6 +180,7 @@ bool AnyAlarmEnabled();
 std::string AlarmHint(const AlarmData& a);
 void ShowAlarmLimitPopup();
 void CloseAlarmLimitPopup();
+void MaybeStopRuntimeTimer();
 
 lv_obj_t* s_limit_popup = nullptr;
 
@@ -644,8 +653,13 @@ void OnTabClicked(lv_event_t* e) {
 // ---------- stopwatch ----------
 void RefreshStopwatchLabel() {
     if (s_sw_lbl == nullptr) return;
-    int ms = static_cast<int>(s_sw_elapsed_ms % 1000);
-    int total = static_cast<int>(s_sw_elapsed_ms / 1000);
+    int64_t elapsed_ms = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_runtime_mutex);
+        elapsed_ms = s_sw_elapsed_ms;
+    }
+    int ms = static_cast<int>(elapsed_ms % 1000);
+    int total = static_cast<int>(elapsed_ms / 1000);
     int sec = total % 60;
     int min = (total / 60) % 60;
     int hour = total / 3600;
@@ -658,40 +672,14 @@ void RefreshStopwatchLabel() {
     lv_label_set_text(s_sw_lbl, buf);
 }
 
-void SwTick(lv_timer_t* /*t*/) {
-    if (!s_sw_running) return;
-    int64_t now = esp_timer_get_time() / 1000;
-    s_sw_elapsed_ms += (now - s_sw_last_tick);
-    s_sw_last_tick = now;
-    RefreshStopwatchLabel();
-}
-
-void OnSwStart(lv_event_t* e) {
-    lv_obj_t* btn = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
-    lv_obj_t* lbl = btn ? lv_obj_get_child(btn, 0) : nullptr;
-    if (!s_sw_running) {
-        s_sw_running = true;
-        s_sw_last_tick = esp_timer_get_time() / 1000;
-        if (s_sw_timer == nullptr) {
-            s_sw_timer = lv_timer_create(SwTick, 50, nullptr);
-        }
-        if (lbl) lv_label_set_text(lbl, I18n::T("暂停"));
-    } else {
-        s_sw_running = false;
-        if (lbl) lv_label_set_text(lbl, I18n::T("开始"));
-    }
-}
-
-void OnSwReset(lv_event_t* /*e*/) {
-    s_sw_running = false;
-    s_sw_elapsed_ms = 0;
-    RefreshStopwatchLabel();
-}
-
-// ---------- countdown ----------
 void RefreshCountdownLabel() {
     if (s_cd_lbl == nullptr) return;
-    int sec = s_cd_left_sec;
+    int left_sec = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_runtime_mutex);
+        left_sec = s_cd_left_sec;
+    }
+    int sec = left_sec;
     int h = sec / 3600;
     int m = (sec % 3600) / 60;
     int s = sec % 60;
@@ -701,52 +689,189 @@ void RefreshCountdownLabel() {
     lv_label_set_text(s_cd_lbl, buf);
 }
 
-void CdTick(lv_timer_t* /*t*/) {
-    if (!s_cd_running) return;
-    if (s_cd_left_sec <= 0) {
-        s_cd_running = false;
-        PlayRingtone(0);
-        if (s_cd_start_btn) {
-            lv_obj_t* lbl = lv_obj_get_child(s_cd_start_btn, 0);
-            if (lbl) lv_label_set_text(lbl, I18n::T("开始"));
-        }
+void UpdateRuntimeButtonLabels() {
+    bool sw_running = false;
+    bool cd_running = false;
+    {
+        std::lock_guard<std::mutex> lock(s_runtime_mutex);
+        sw_running = s_sw_running;
+        cd_running = s_cd_running;
+    }
+    if (s_sw_start_btn != nullptr) {
+        lv_obj_t* lbl = lv_obj_get_child(s_sw_start_btn, 0);
+        if (lbl) lv_label_set_text(lbl, I18n::T(sw_running ? "暂停" : "开始"));
+    }
+    if (s_cd_start_btn != nullptr) {
+        lv_obj_t* lbl = lv_obj_get_child(s_cd_start_btn, 0);
+        if (lbl) lv_label_set_text(lbl, I18n::T(cd_running ? "暂停" : "开始"));
+    }
+}
+
+void RefreshRuntimeUiAsync(void* /*arg*/) {
+    s_runtime_ui_update_pending.store(false, std::memory_order_release);
+    if (!s_clock_screen_loaded.load(std::memory_order_acquire)) return;
+    RefreshStopwatchLabel();
+    RefreshCountdownLabel();
+    UpdateRuntimeButtonLabels();
+}
+
+void RequestRuntimeUiRefresh() {
+    if (!s_clock_screen_loaded.load(std::memory_order_acquire)) return;
+    if (s_runtime_ui_update_pending.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
-    s_cd_left_sec--;
-    RefreshCountdownLabel();
+    if (screen_async_call(RefreshRuntimeUiAsync, nullptr) != LV_RESULT_OK) {
+        s_runtime_ui_update_pending.store(false, std::memory_order_release);
+    }
+}
+
+void RuntimeTimerCb(void* /*arg*/) {
+    const int64_t now_ms = esp_timer_get_time() / 1000;
+    bool refresh_ui = false;
+    bool countdown_finished = false;
+    {
+        std::lock_guard<std::mutex> lock(s_runtime_mutex);
+
+        if (s_sw_running) {
+            if (s_sw_last_tick <= 0) s_sw_last_tick = now_ms;
+            const int64_t delta_ms = now_ms - s_sw_last_tick;
+            if (delta_ms > 0) {
+                s_sw_elapsed_ms += delta_ms;
+                s_sw_last_tick = now_ms;
+                refresh_ui = true;
+            }
+        }
+
+        if (s_cd_running) {
+            const int64_t remain_ms = s_cd_deadline_ms - now_ms;
+            const int remain_sec = remain_ms > 0
+                                       ? static_cast<int>((remain_ms + 999) / 1000)
+                                       : 0;
+            if (remain_sec != s_cd_left_sec) {
+                s_cd_left_sec = remain_sec;
+                refresh_ui = true;
+            }
+            if (remain_sec <= 0) {
+                s_cd_running = false;
+                s_cd_deadline_ms = 0;
+                countdown_finished = true;
+                refresh_ui = true;
+            }
+        }
+    }
+
+    if (countdown_finished) {
+        PlayRingtone(0);
+        MaybeStopRuntimeTimer();
+    }
+    if (refresh_ui) RequestRuntimeUiRefresh();
+}
+
+void EnsureRuntimeTimer() {
+    std::lock_guard<std::mutex> lock(s_runtime_mutex);
+    if (s_runtime_timer == nullptr) {
+        esp_timer_create_args_t args = {
+            .callback = &RuntimeTimerCb,
+            .arg = nullptr,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "clock_runtime",
+            .skip_unhandled_events = true,
+        };
+        if (esp_timer_create(&args, &s_runtime_timer) != ESP_OK) {
+            ESP_LOGE(TAG, "failed to create runtime timer");
+            return;
+        }
+    }
+    if (!s_runtime_timer_active) {
+        if (esp_timer_start_periodic(s_runtime_timer, 50 * 1000) == ESP_OK) {
+            s_runtime_timer_active = true;
+        } else {
+            ESP_LOGE(TAG, "failed to start runtime timer");
+        }
+    }
+}
+
+void MaybeStopRuntimeTimer() {
+    std::lock_guard<std::mutex> lock(s_runtime_mutex);
+    if (s_runtime_timer == nullptr || !s_runtime_timer_active ||
+        s_sw_running || s_cd_running) {
+        return;
+    }
+    esp_timer_stop(s_runtime_timer);
+    s_runtime_timer_active = false;
+}
+
+void OnSwStart(lv_event_t* e) {
+    lv_obj_t* btn = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
+    bool running = false;
+    {
+        std::lock_guard<std::mutex> lock(s_runtime_mutex);
+        if (!s_sw_running) {
+            s_sw_running = true;
+            s_sw_last_tick = esp_timer_get_time() / 1000;
+            running = true;
+        } else {
+            s_sw_running = false;
+        }
+    }
+    if (running) EnsureRuntimeTimer();
+    else MaybeStopRuntimeTimer();
+    if (btn) {
+        lv_obj_t* lbl = lv_obj_get_child(btn, 0);
+        if (lbl) lv_label_set_text(lbl, I18n::T(running ? "暂停" : "开始"));
+    }
+}
+
+void OnSwReset(lv_event_t* /*e*/) {
+    {
+        std::lock_guard<std::mutex> lock(s_runtime_mutex);
+        s_sw_running = false;
+        s_sw_elapsed_ms = 0;
+        s_sw_last_tick = 0;
+    }
+    MaybeStopRuntimeTimer();
+    RefreshStopwatchLabel();
+    UpdateRuntimeButtonLabels();
 }
 
 void OnCdStart(lv_event_t* /*e*/) {
-    if (!s_cd_running) {
-        if (s_cd_left_sec <= 0) s_cd_left_sec = s_cd_total_sec;
-        s_cd_running = true;
-        if (s_cd_timer == nullptr) {
-            s_cd_timer = lv_timer_create(CdTick, 1000, nullptr);
-        }
-        if (s_cd_start_btn) {
-            lv_obj_t* lbl = lv_obj_get_child(s_cd_start_btn, 0);
-            if (lbl) lv_label_set_text(lbl, I18n::T("暂停"));
-        }
-    } else {
-        s_cd_running = false;
-        if (s_cd_start_btn) {
-            lv_obj_t* lbl = lv_obj_get_child(s_cd_start_btn, 0);
-            if (lbl) lv_label_set_text(lbl, I18n::T("开始"));
+    bool running = false;
+    {
+        std::lock_guard<std::mutex> lock(s_runtime_mutex);
+        if (!s_cd_running) {
+            if (s_cd_left_sec <= 0) s_cd_left_sec = s_cd_total_sec;
+            s_cd_deadline_ms = esp_timer_get_time() / 1000 +
+                               static_cast<int64_t>(s_cd_left_sec) * 1000;
+            s_cd_running = true;
+            running = true;
+        } else {
+            const int64_t remain_ms = s_cd_deadline_ms - esp_timer_get_time() / 1000;
+            s_cd_left_sec = remain_ms > 0
+                                ? static_cast<int>((remain_ms + 999) / 1000)
+                                : 0;
+            s_cd_deadline_ms = 0;
+            s_cd_running = false;
         }
     }
+    if (running) EnsureRuntimeTimer();
+    else MaybeStopRuntimeTimer();
+    RefreshCountdownLabel();
+    UpdateRuntimeButtonLabels();
 }
 
 void SetCountdownSeconds(int sec) {
     if (sec < 1) sec = 1;
     if (sec > 23 * 3600 + 59 * 60 + 59) sec = 23 * 3600 + 59 * 60 + 59;
-    s_cd_running = false;
-    s_cd_total_sec = sec;
-    s_cd_left_sec = sec;
-    RefreshCountdownLabel();
-    if (s_cd_start_btn) {
-        lv_obj_t* lbl = lv_obj_get_child(s_cd_start_btn, 0);
-        if (lbl) lv_label_set_text(lbl, I18n::T("开始"));
+    {
+        std::lock_guard<std::mutex> lock(s_runtime_mutex);
+        s_cd_running = false;
+        s_cd_deadline_ms = 0;
+        s_cd_total_sec = sec;
+        s_cd_left_sec = sec;
     }
+    MaybeStopRuntimeTimer();
+    RefreshCountdownLabel();
+    UpdateRuntimeButtonLabels();
 }
 
 void OnPreset(lv_event_t* e) {
@@ -1211,9 +1336,14 @@ void ShowCountdownCustom() {
     min_opts = BuildMinOpts();
     sec_opts = BuildMinOpts();
 
-    int h = s_cd_total_sec / 3600;
-    int m = (s_cd_total_sec % 3600) / 60;
-    int s = s_cd_total_sec % 60;
+    int total_sec = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_runtime_mutex);
+        total_sec = s_cd_total_sec;
+    }
+    int h = total_sec / 3600;
+    int m = (total_sec % 3600) / 60;
+    int s = total_sec % 60;
 
     const int rw = kRound ? 70 : 110;
     const int rh = kRound ? 110 : 180;
@@ -1371,15 +1501,16 @@ void BuildStopwatchPage(lv_obj_t* parent) {
     lv_obj_center(rl);
     lv_obj_add_event_cb(reset, OnSwReset, LV_EVENT_CLICKED, nullptr);
 
-    lv_obj_t* start = lv_btn_create(s_page_sw);
-    StyleFillBtn(start, bs);
-    lv_obj_align(start, LV_ALIGN_CENTER, 0, kSwBtnCenterY);
-    lv_obj_t* sl = lv_label_create(start);
+    s_sw_start_btn = lv_btn_create(s_page_sw);
+    StyleFillBtn(s_sw_start_btn, bs);
+    lv_obj_align(s_sw_start_btn, LV_ALIGN_CENTER, 0, kSwBtnCenterY);
+    lv_obj_t* sl = lv_label_create(s_sw_start_btn);
     lv_label_set_text(sl, I18n::T("开始"));
     lv_obj_set_style_text_font(sl, FontSmall(), LV_PART_MAIN);
     lv_obj_set_style_text_color(sl, lv_color_hex(kBg), LV_PART_MAIN);
     lv_obj_center(sl);
-    lv_obj_add_event_cb(start, OnSwStart, LV_EVENT_CLICKED, start);
+    lv_obj_add_event_cb(s_sw_start_btn, OnSwStart, LV_EVENT_CLICKED,
+                        s_sw_start_btn);
 
     lv_obj_t* lap = lv_btn_create(s_page_sw);
     StyleGhostBtn(lap, bs);
@@ -1393,9 +1524,17 @@ void BuildStopwatchPage(lv_obj_t* parent) {
     lv_obj_add_event_cb(
         lap,
         [](lv_event_t*) {
-            ESP_LOGI(TAG, "lap at %lld ms", static_cast<long long>(s_sw_elapsed_ms));
+            int64_t elapsed_ms = 0;
+            {
+                std::lock_guard<std::mutex> lock(s_runtime_mutex);
+                elapsed_ms = s_sw_elapsed_ms;
+            }
+            ESP_LOGI(TAG, "lap at %lld ms", static_cast<long long>(elapsed_ms));
         },
         LV_EVENT_CLICKED, nullptr);
+
+    RefreshStopwatchLabel();
+    UpdateRuntimeButtonLabels();
 }
 
 void BuildCountdownPage(lv_obj_t* parent) {
@@ -1477,19 +1616,14 @@ void BuildCountdownPage(lv_obj_t* parent) {
     lv_obj_add_event_cb(s_cd_start_btn, OnCdStart, LV_EVENT_CLICKED, nullptr);
 
     RefreshCountdownLabel();
+    UpdateRuntimeButtonLabels();
 }
 
-void OnScrDeleted(lv_event_t* /*e*/) {
-    if (s_sw_timer) {
-        lv_timer_del(s_sw_timer);
-        s_sw_timer = nullptr;
-    }
-    if (s_cd_timer) {
-        lv_timer_del(s_cd_timer);
-        s_cd_timer = nullptr;
-    }
-    s_sw_running = false;
-    s_cd_running = false;
+void OnScrDeleted(lv_event_t* e) {
+    // 旧页面异步删除时不能清空新页面的全局控件指针。
+    if (lv_event_get_current_target(e) != s_scr) return;
+    s_clock_screen_loaded.store(false, std::memory_order_release);
+    s_runtime_ui_update_pending.store(false, std::memory_order_release);
     s_limit_popup = nullptr;
     s_scr = nullptr;
     s_page_alarm = s_page_sw = s_page_cd = nullptr;
@@ -1497,6 +1631,7 @@ void OnScrDeleted(lv_event_t* /*e*/) {
     s_alarm_list = nullptr;
     s_alarm_empty_lbl = nullptr;
     s_sw_lbl = nullptr;
+    s_sw_start_btn = nullptr;
     s_cd_lbl = s_cd_start_btn = nullptr;
     for (int i = 0; i < 3; ++i) s_tab_btns[i] = nullptr;
 }
@@ -1530,10 +1665,17 @@ lv_obj_t* ClockScreen::Create() {
 
 void ClockScreen::LifecycleCallback(screen_lifecycle_event_t event) {
     if (event == SCREEN_LIFECYCLE_LOAD) {
+        s_clock_screen_loaded.store(true, std::memory_order_release);
         EnsureAlarmPoller();
+        bool runtime_active = false;
+        {
+            std::lock_guard<std::mutex> lock(s_runtime_mutex);
+            runtime_active = s_sw_running || s_cd_running;
+        }
+        if (runtime_active) EnsureRuntimeTimer();
+        RefreshRuntimeUiAsync(nullptr);
     } else {
-        s_sw_running = false;
-        s_cd_running = false;
-        // 闹钟轮询在后台继续，离开页面不关。
+        s_clock_screen_loaded.store(false, std::memory_order_release);
+        // 退出页面只释放 LVGL 控件，正计时/倒计时状态和后台计时继续保留。
     }
 }
