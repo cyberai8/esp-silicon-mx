@@ -29,7 +29,7 @@ endif()
 idf_build_set_property(COMPILE_OPTIONS "-Wno-error=stringop-truncation" APPEND)
 idf_build_set_property(COMPILE_OPTIONS "-Wno-error=overflow" APPEND)
 
-project(xiaozhi)
+project(yunfan)
 
 idf_build_set_property(COMPILE_OPTIONS "-Wno-error=stringop-truncation" APPEND)
 idf_build_set_property(COMPILE_OPTIONS "-Wno-error=overflow" APPEND)
