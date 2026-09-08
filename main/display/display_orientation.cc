@@ -4,6 +4,7 @@
 #include <cstdlib>
 
 #include "config.h"
+#include "settings.h"
 #include "display_refresh_blank.h"
 #include "esp_log.h"
 #include "esp_lv_adapter.h"
@@ -135,10 +136,10 @@ float GravityMagnitude(int16_t ax, int16_t ay, int16_t az) {
 // 屏幕大致水平（像章平放）：|az|/|g| 较大，绕屏法向转要用陀螺仪。
 bool IsNearlyFlat(int16_t ax, int16_t ay, int16_t az) {
     const float g = GravityMagnitude(ax, ay, az);
-    if (g < 3000.0f) {
+    if (g < 4000.0f) {
         return false;
     }
-    return std::fabsf(static_cast<float>(az)) / g > 0.72f;
+    return std::fabsf(static_cast<float>(az)) / g > 0.85f;
 }
 
 esp_lv_adapter_rotation_t RotationFromTilt(int16_t ax, int16_t ay, bool* valid) {
@@ -159,7 +160,7 @@ esp_lv_adapter_rotation_t RotationFromTilt(int16_t ax, int16_t ay, bool* valid) 
 
     const int abs_x = std::abs(static_cast<int>(ax));
     const int abs_y = std::abs(static_cast<int>(ay));
-    constexpr int kMinInPlane = 2800;
+    constexpr int kMinInPlane = 5200;
     if (abs_x < kMinInPlane && abs_y < kMinInPlane) {
         return s_current;
     }
@@ -169,16 +170,37 @@ esp_lv_adapter_rotation_t RotationFromTilt(int16_t ax, int16_t ay, bool* valid) 
     }
     const float angle_deg =
         std::atan2f(static_cast<float>(ax), static_cast<float>(ay)) * (180.0f / 3.14159265f);
-    if (angle_deg >= -45.0f && angle_deg < 45.0f) {
+
+    /* 迟滞：当前朝向扇区加宽，切换到新朝向要越过更大角度，拿起晃动不易连跳。 */
+    auto in_band = [](float a, float lo, float hi) { return a >= lo && a < hi; };
+    const esp_lv_adapter_rotation_t cur = s_current;
+    if (cur == ESP_LV_ADAPTER_ROTATE_0 && in_band(angle_deg, -60.0f, 60.0f)) {
         return ESP_LV_ADAPTER_ROTATE_0;
     }
-    if (angle_deg >= 45.0f && angle_deg < 135.0f) {
+    if (cur == ESP_LV_ADAPTER_ROTATE_90 && in_band(angle_deg, 30.0f, 150.0f)) {
         return ESP_LV_ADAPTER_ROTATE_90;
     }
-    if (angle_deg >= -135.0f && angle_deg < -45.0f) {
+    if (cur == ESP_LV_ADAPTER_ROTATE_270 && in_band(angle_deg, -150.0f, -30.0f)) {
         return ESP_LV_ADAPTER_ROTATE_270;
     }
-    return ESP_LV_ADAPTER_ROTATE_180;
+    if (cur == ESP_LV_ADAPTER_ROTATE_180 &&
+        (angle_deg >= 120.0f || angle_deg < -120.0f)) {
+        return ESP_LV_ADAPTER_ROTATE_180;
+    }
+
+    if (in_band(angle_deg, -30.0f, 30.0f)) {
+        return ESP_LV_ADAPTER_ROTATE_0;
+    }
+    if (in_band(angle_deg, 60.0f, 120.0f)) {
+        return ESP_LV_ADAPTER_ROTATE_90;
+    }
+    if (in_band(angle_deg, -120.0f, -60.0f)) {
+        return ESP_LV_ADAPTER_ROTATE_270;
+    }
+    if (angle_deg >= 150.0f || angle_deg < -150.0f) {
+        return ESP_LV_ADAPTER_ROTATE_180;
+    }
+    return cur;
 }
 
 esp_lv_adapter_rotation_t NextRotation90(esp_lv_adapter_rotation_t cur, bool clockwise) {
@@ -204,7 +226,7 @@ esp_lv_adapter_rotation_t DetectTargetRotation(const ImuSample& sample, int dt_m
         if (std::abs(static_cast<int>(sample.gz)) < kGyroSaturation) {
             s_gyro_z_accum += static_cast<int32_t>(sample.gz) * dt_ms;
         }
-        constexpr int32_t kSpinAccumThreshold = 120000;
+        constexpr int32_t kSpinAccumThreshold = 280000;
         if (s_gyro_z_accum > kSpinAccumThreshold) {
             s_gyro_z_accum = 0;
             return NextRotation90(s_current, true);
@@ -227,6 +249,18 @@ esp_lv_adapter_rotation_t DetectTargetRotation(const ImuSample& sample, int dt_m
 }
 
 }  // namespace
+
+
+bool DisplayOrientationIsAutoEnabled() {
+    Settings settings("display", false);
+    return settings.GetInt("auto_rotate", 1) != 0;
+}
+
+void DisplayOrientationSetAutoEnabled(bool enabled) {
+    Settings settings("display", true);
+    settings.SetInt("auto_rotate", enabled ? 1 : 0);
+    ESP_LOGI(TAG, "auto_rotate=%d", enabled ? 1 : 0);
+}
 
 void DisplayOrientationInit(esp_lcd_panel_handle_t panel, esp_lcd_touch_handle_t touch,
                             bool base_swap_xy, bool base_mirror_x, bool base_mirror_y) {
@@ -292,6 +326,9 @@ esp_err_t DisplayOrientationApply(esp_lv_adapter_rotation_t rotation) {
 }
 
 esp_lv_adapter_rotation_t DisplayOrientationUpdate(const ImuSample& sample, int dt_ms) {
+    if (!DisplayOrientationIsAutoEnabled()) {
+        return s_current;
+    }
     if (!sample.ok || dt_ms <= 0) {
         return s_current;
     }
@@ -305,7 +342,7 @@ esp_lv_adapter_rotation_t DisplayOrientationUpdate(const ImuSample& sample, int 
         s_stable_count = 1;
     }
 
-    if (s_stable_count >= 3 && target != s_current) {
+    if (s_stable_count >= 10 && target != s_current) {
         s_stable_count = 0;
         return target;
     }

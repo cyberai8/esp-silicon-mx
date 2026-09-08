@@ -18,6 +18,7 @@
 #include "native_bluetooth_audio.h"
 #include "screen_util.h"
 #include "settings.h"
+#include "display_orientation.h"
 #include "standby_screen/standby_screen.h"
 
 #ifndef ESP_YUN_SIM
@@ -97,6 +98,7 @@ struct UiState {
     lv_obj_t* ota_remote_label = nullptr;
     lv_obj_t* ota_status_label = nullptr;
     lv_obj_t* ota_auto_switch = nullptr;
+    lv_obj_t* auto_rotate_switch = nullptr;
     lv_obj_t* ota_check_btn = nullptr;
     lv_obj_t* ota_upgrade_btn = nullptr;
     bool ota_checking = false;
@@ -197,6 +199,9 @@ bool ApplyChargeMa(int ma) {
 
 void OnSwipeBack();
 void OnBackClicked(lv_event_t* e);
+void StyleSettingsSwitch(lv_obj_t* sw);
+void OnAutoRotateSwitchChanged(lv_event_t* e);
+void BuildDisplayTab(lv_obj_t* tab);
 
 int ReadInitialBrightness() {
     int value = kBacklightDefaultPercent;
@@ -436,6 +441,58 @@ void BuildSliderPanel(lv_obj_t* parent, const char* title, const char* hint,
 
     CreateSliderRow(parent, slider_min, slider_max, initial_value, slider_cb,
                     slider_out);
+}
+
+
+void BuildDisplayTab(lv_obj_t* tab) {
+    lv_obj_set_style_pad_hor(tab, kTabPadHor, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(tab, kTabPadTop + (kRoundLayout ? 8 : 12), LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(tab, kTabPadBottom, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(tab, kRoundLayout ? 10 : 12, LV_PART_MAIN);
+    lv_obj_set_flex_flow(tab, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(tab, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+    lv_obj_add_flag(tab, LV_OBJ_FLAG_SCROLLABLE);
+
+#if defined(DISPLAY_AUTO_ROTATION) && DISPLAY_AUTO_ROTATION
+    lv_obj_t* rotate_card = lv_obj_create(tab);
+    screen_strip_obj_chrome(rotate_card);
+    lv_obj_set_width(rotate_card, LV_PCT(100));
+    lv_obj_set_height(rotate_card, kRoundLayout ? 56 : 72);
+    lv_obj_set_style_bg_color(rotate_card, lv_color_hex(kColorCard), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(rotate_card, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(rotate_card, 16, LV_PART_MAIN);
+    lv_obj_remove_flag(rotate_card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* rotate_title = lv_label_create(rotate_card);
+    lv_label_set_text(rotate_title, I18n::T("屏幕自动旋转"));
+    lv_obj_set_style_text_color(rotate_title, lv_color_hex(kColorText), LV_PART_MAIN);
+    lv_obj_set_style_text_font(rotate_title, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_align(rotate_title, LV_ALIGN_LEFT_MID, kRoundLayout ? 12 : 16, 0);
+
+    lv_obj_t* rotate_sw = lv_switch_create(rotate_card);
+    s_ui.auto_rotate_switch = rotate_sw;
+    StyleSettingsSwitch(rotate_sw);
+    lv_obj_align(rotate_sw, LV_ALIGN_RIGHT_MID, -12, 0);
+    if (DisplayOrientationIsAutoEnabled()) {
+        lv_obj_add_state(rotate_sw, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(rotate_sw, OnAutoRotateSwitchChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    lv_obj_t* foot = lv_label_create(tab);
+    lv_label_set_text(foot, I18n::T("关闭后拿起设备也不会自动转屏"));
+    lv_obj_set_style_text_color(foot, lv_color_hex(kColorSubtle), LV_PART_MAIN);
+    lv_obj_set_style_text_font(foot, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_align(foot, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(foot, LV_PCT(100));
+    lv_label_set_long_mode(foot, LV_LABEL_LONG_WRAP);
+#else
+    lv_obj_t* tip = lv_label_create(tab);
+    lv_label_set_text(tip, I18n::T("当前板型不支持自动旋转"));
+    lv_obj_set_style_text_color(tip, lv_color_hex(kColorSubtle), LV_PART_MAIN);
+    lv_obj_set_style_text_font(tip, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_align(tip, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(tip, LV_PCT(100));
+#endif
 }
 
 void BuildBrightnessTab(lv_obj_t* tab, int initial_brightness) {
@@ -909,6 +966,12 @@ void OnOtaUpgradeClicked(lv_event_t* /*e*/) {
 }
 #endif
 
+
+void OnAutoRotateSwitchChanged(lv_event_t* e) {
+    lv_obj_t* sw = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    DisplayOrientationSetAutoEnabled(lv_obj_has_state(sw, LV_STATE_CHECKED));
+}
+
 void OnAutoOtaSwitchChanged(lv_event_t* e) {
     lv_obj_t* sw = static_cast<lv_obj_t*>(lv_event_get_target(e));
     SaveAutoOtaEnabled(lv_obj_has_state(sw, LV_STATE_CHECKED));
@@ -920,6 +983,7 @@ void BuildOtaTab(lv_obj_t* tab) {
     s_ui.ota_remote_label = nullptr;
     s_ui.ota_status_label = nullptr;
     s_ui.ota_auto_switch = nullptr;
+    s_ui.auto_rotate_switch = nullptr;
     s_ui.ota_check_btn = nullptr;
     s_ui.ota_upgrade_btn = nullptr;
 
@@ -1273,6 +1337,9 @@ void BuildTabView(lv_obj_t* parent) {
 
     lv_obj_t* tab_brightness = lv_tabview_add_tab(tv, I18n::T("亮度"));
     BuildBrightnessTab(tab_brightness, initial_brightness);
+
+    lv_obj_t* tab_display = lv_tabview_add_tab(tv, I18n::T("显示"));
+    BuildDisplayTab(tab_display);
 
     lv_obj_t* tab_standby = lv_tabview_add_tab(tv, I18n::T("待机"));
     BuildStandbyTab(tab_standby);

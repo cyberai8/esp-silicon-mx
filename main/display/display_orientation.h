@@ -25,6 +25,10 @@ esp_err_t DisplayOrientationApply(esp_lv_adapter_rotation_t rotation);
 
 esp_lv_adapter_rotation_t DisplayOrientationGet();
 
+// NVS display/auto_rotate；关闭后 IMU 不再自动转屏。
+bool DisplayOrientationIsAutoEnabled();
+void DisplayOrientationSetAutoEnabled(bool enabled);
+
 // 竖握：加速度计重力方向；平放：陀螺仪 Z 积分（绕屏法向转 90°）。
 esp_lv_adapter_rotation_t DisplayOrientationUpdate(const ImuSample& sample, int dt_ms);
 
